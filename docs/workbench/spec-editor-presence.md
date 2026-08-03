@@ -173,3 +173,63 @@ scope. `EnvironmentAuth.authenticateWebSocketUpgrade` accepts a `wsTicket`
 query param or an `Authorization: Bearer` header — Unity's `ClientWebSocket`
 can set the header where browser JS cannot, but something must put a token
 there first. Solve this before step 1, or step 1 cannot be demonstrated.
+
+---
+
+## OWNER DECISIONS — settled 2026-08-03
+
+### 1. Attachment: auto-attach, with a pin
+
+**Default (unpinned):** the chip follows the Unity selection live and
+**auto-attaches on send**. Whatever is selected when you hit Enter rides along.
+
+**Click the chip to PIN it:** that item is locked and keeps riding on every
+message regardless of what happens in Unity — clicking around the hierarchy,
+deselecting, opening another scene. **Click again to unpin**, returning it to
+following the live selection.
+
+Owner's words: _"you can click on the chip to attach so it is always riding
+until you unattach (by clicking on the chip again)"_.
+
+Why this is better than either option originally offered: auto-attach alone
+has a real failure mode — select something, get distracted, and twenty minutes
+later it silently rides along with an unrelated question. Pin-to-attach alone
+destroys the ambient quality that is the whole point. This gets both: nothing
+is ever silent because the chip visibly tracks the selection, and when you
+genuinely want to hold an object while poking around Unity, you say so once.
+
+### 2. Deselect behaviour: moot, by construction
+
+The original question was whether deselecting in Unity should clear the chip
+or leave it sticky. The pin resolves it:
+
+- **unpinned** → follows Unity exactly, including deselect. Honest presence.
+- **pinned** → holds regardless. Explicit intent.
+
+Stickiness becomes something the user asks for rather than something the
+system guesses at. That is strictly better than either default.
+
+### 3. Scope: global
+
+One chip, showing the current Unity selection, visible in whatever thread you
+are looking at. Unity has exactly one selection; the chip mirrors it.
+
+Consequence, accepted: a thread about footstep audio will show the collider you
+currently have selected, because that is genuinely what is selected. The chip
+means **"selected now"**, never "selected once" — which is what keeps it
+honest and is why presence is not persisted.
+
+### OPEN: pin + live selection together?
+
+Not settled. When `PlayerRoot` is pinned and you then select `Ground`:
+
+- **(a) Pin replaces following** — one chip, the pinned one; live selection
+  ignored while anything is pinned. Simplest and never ambiguous.
+- **(b) Pinned AND live** — a chip row showing `PlayerRoot 📌` and `Ground`,
+  both attaching. Supports "why do these two clip", which is a very common
+  game-dev question — but it is a set to manage and needs a way to see what is
+  riding at a glance.
+
+Recommendation is (b) for usefulness, but it is the larger build. **Implement
+(a) first**; it is a strict subset, and the protocol already carries an array
+of items so (b) needs no protocol change — only client state.
