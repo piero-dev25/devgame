@@ -12,9 +12,9 @@ Three verifications changed the design versus the input maps:
 
 1. **`HttpServerRequest.upgrade: Effect<Socket.Socket, HttpServerError>` and `upgradeChannel()` exist** (`/Users/pieroherrera/Projects/t3code-fork/apps/server/node_modules/effect/dist/unstable/http/HttpServerRequest.d.ts:74` and `:134`). A raw, non-RPC WebSocket route is a first-class primitive here. This is the single biggest finding: we do **not** need a new RPC method, a new `WS_METHODS` entry, a new `AuthEnvironmentScope` literal, or any change to `packages/contracts`. The transport lane's "new RPC + new scope" cost estimate was overstated. Route registration is one line at `apps/server/src/server.ts:422`, mirroring `websocketRpcRouteLayer` (`apps/server/src/ws.ts:2108-2170`).
 
-2. **Unity is 6000.3.14f1 with `apiCompatibilityLevel: 6` (.NET Standard 2.1)** (`/Users/pieroherrera/Projects/Deepmind/ProjectSettings/ProjectVersion.txt:1`; `/Users/pieroherrera/Projects/Deepmind/ProjectSettings/ProjectSettings.asset:988`). `System.Net.WebSockets.ClientWebSocket` is available, so **we ship no WebSocket DLL**. Bezi bundles `bezi-websocket-sharp.dll` because their `package.json` declares `"unity": "2018.3"` (`/Users/pieroherrera/Projects/Deepmind/Packages/com.bezi.sidekick/package.json:19`) — a .NET 3.5-era floor we do not have to match. Unity is the WS _client_; it never hosts a socket. That sidesteps the Mono `HttpListener.AcceptWebSocketAsync` problem entirely.
+2. **Unity is 6000.3.14f1 with `apiCompatibilityLevel: 6` (.NET Standard 2.1)** (`/Users/pieroherrera/Projects/Deepmind/ProjectSettings/ProjectVersion.txt:1`; `/Users/pieroherrera/Projects/Deepmind/ProjectSettings/ProjectSettings.asset:988`). `System.Net.WebSockets.ClientWebSocket` is available, so **we ship no WebSocket DLL**. Plugins that bundle their own WebSocket library do so to support a Unity 2018.3-era .NET 3.5 floor, which we do not have to match. Unity is the WS _client_; it never hosts a socket. That sidesteps the Mono `HttpListener.AcceptWebSocketAsync` problem entirely.
 
-3. **Domain reload fires on every play-mode enter in this project.** `m_EnterPlayModeOptionsEnabled: 1` with `m_EnterPlayModeOptions: 0` (`/Users/pieroherrera/Projects/Deepmind/ProjectSettings/EditorSettings.asset:27-28`) — the toggle is on but neither `DisableDomainReload` (1) nor `DisableSceneReload` (2) is set, so both reloads still happen. The Unity-side socket dies on every script compile **and** every press of Play. Reconnect is the dominant runtime path, not an edge case, which is why Bezi ships four status icons (`connected/connecting/disconnected/paused` under `/Users/pieroherrera/Projects/Deepmind/Packages/com.bezi.sidekick/Editor/Resources/Icons/Light/`). Our status indicator is required in step 1, not deferred.
+3. **Domain reload fires on every play-mode enter in this project.** `m_EnterPlayModeOptionsEnabled: 1` with `m_EnterPlayModeOptions: 0` (`/Users/pieroherrera/Projects/Deepmind/ProjectSettings/EditorSettings.asset:27-28`) — the toggle is on but neither `DisableDomainReload` (1) nor `DisableSceneReload` (2) is set, so both reloads still happen. The Unity-side socket dies on every script compile **and** every press of Play. Reconnect is the dominant runtime path, not an edge case — which is why mature editor plugins ship a visible connection state (connecting / connected / disconnected). Our status indicator is required in step 1, not deferred.
 
 I also confirmed the receiving lane's caveat: `addElementContext` is defined at `apps/web/src/composerDraftStore.ts:3063` and exercised only by `composerDraftStore.test.ts` — **no live producer anywhere in `apps/web/src`**. The element-context rail is real, tested, persisted, and dead-ended. It is a good _pattern_ to copy and a bad thing to squat: `normalizeElementContextSelection` hard-requires a non-empty `pageUrl` (`apps/web/src/lib/elementContext.ts:73-76`), and `formatElementContextLabel` renders `<tagName>` in angle brackets with a `MousePointerClick` icon (`elementContext.ts:117-120`, `ComposerPendingElementContexts.tsx:1,52`). Squatting it would put `<Player>` behind a mouse cursor and emit a `url:` field that is a lie.
 
@@ -112,7 +112,7 @@ MCP has nothing comparable — its closest concept is `notifications/roots/list_
 
 ### 1. Thin vertical: a real Unity selection appears as a chip
 
-All three tiers, each at its thinnest. UNITY (our own package `com.ironmind.editor-presence`, installed into a throwaway scratch project — never into Deepmind): `[InitializeOnLoad]` static class subscribing `UnityEditor.Selection.selectionChanged`; builds `items[]` from `Selection.objects` using `obj.name` for `label`, `GlobalObjectId.GetGlobalObjectIdSlow(obj).ToString()` for `id`, `AssetDatabase.GetAssetPath` for `path`; a single `ClientWebSocket` with the Bearer header set from an EditorPrefs-stored token; 100ms debounce; a status dot in the Editor toolbar showing connecting/connected/disconnected. Package shape copies Bezi's proven layout: top-level `package.json` + `Editor/` holding one asmdef with `"includePlatforms": ["Editor"]` (`/Users/pieroherrera/Projects/Deepmind/Packages/com.bezi.sidekick/Editor/Bezi.Editor.asmdef`) — but with real .cs sources, so no `Bezi.cs`-style placeholder is needed. SERVER (our file `apps/server/src/editorPresence/EditorPresenceRoute.ts`): `HttpRouter.add("GET", "/editor-presence", …)` using `HttpServerRequest.upgrade`; authenticate via the existing `authenticateWebSocketUpgrade`; branch on `?role=`; keep a `Map<sessionId, LastState>` and a subscriber set; fan out. WEB (our files `apps/web/src/editorPresence/{store,useEditorPresence,EditorPresenceChips}.tsx`): subscriber socket derived from the connection target's `wsBaseUrl` (`packages/client-runtime/src/connection/model.ts:13`) reusing the same wsTicket, own store, own chip component with its own icon. NOT in this step: send-time serialization, persistence, pin/unpin, multi-editor UI, pairing UX.
+All three tiers, each at its thinnest. UNITY (our own package `com.ironmind.editor-presence`, installed into a throwaway scratch project — never into Deepmind): `[InitializeOnLoad]` static class subscribing `UnityEditor.Selection.selectionChanged`; builds `items[]` from `Selection.objects` using `obj.name` for `label`, `GlobalObjectId.GetGlobalObjectIdSlow(obj).ToString()` for `id`, `AssetDatabase.GetAssetPath` for `path`; a single `ClientWebSocket` with the Bearer header set from an EditorPrefs-stored token; 100ms debounce; a status dot in the Editor toolbar showing connecting/connected/disconnected. Package shape is the standard editor-only UPM layout: top-level `package.json` plus an `Editor/` folder holding one asmdef with `"includePlatforms": ["Editor"]`, and real `.cs` sources rather than a compiled assembly. SERVER (our file `apps/server/src/editorPresence/EditorPresenceRoute.ts`): `HttpRouter.add("GET", "/editor-presence", …)` using `HttpServerRequest.upgrade`; authenticate via the existing `authenticateWebSocketUpgrade`; branch on `?role=`; keep a `Map<sessionId, LastState>` and a subscriber set; fan out. WEB (our files `apps/web/src/editorPresence/{store,useEditorPresence,EditorPresenceChips}.tsx`): subscriber socket derived from the connection target's `wsBaseUrl` (`packages/client-runtime/src/connection/model.ts:13`) reusing the same wsTicket, own store, own chip component with its own icon. NOT in this step: send-time serialization, persistence, pin/unpin, multi-editor UI, pairing UX.
 
 **Proof:** Screen recording plus four stills of the T3 composer taken while clicking in a live Unity 6.3 Editor: (a) select GameObject `A` → chip reads `A`; (b) select `B` → chip reads `B`, no residual `A` chip; (c) ctrl-click to multi-select `A`+`B` → exactly two chips; (d) click empty Hierarchy space → zero chips. Then press Play and screenshot again: the status dot goes disconnected→connecting→connected and the chip returns, proving the domain-reload path (which fires on every Play in this project per EditorSettings.asset:27-28) actually recovers. Each still timestamped against the Unity Editor window in the same frame. Not proof: unit tests, a mock publisher, or 'the socket connected'.
 
@@ -142,7 +142,7 @@ Verified fact: this project reloads the domain on every script compile AND every
 
 ### 6. Package it so someone else can actually install it
 
-The owner asked for shareable, so the deliverable is the protocol spec plus a reference publisher, not a Unity feature. Ship: (a) `com.ironmind.editor-presence` as a public git-URL UPM package — a distribution path already proven in this environment, since `/Users/pieroherrera/Projects/Deepmind/Packages/manifest.json:16` resolves `org.khronos.unitygltf` straight from a GitHub URL, no registry needed; (b) EPP v1 written up as a standalone spec with the JSON frames above; (c) a ~50-line reference subscriber (plain HTML page) so a third party can verify their plugin without running T3 at all; (d) a second publisher — a VS Code extension emitting the active file and symbol — as the proof the protocol is not Unity-shaped. Manifest fields to match Bezi's shipped set (`com.bezi.sidekick/package.json:1-24`): name, displayName, description, documentationUrl, author, keywords, unity, version, type, dependencies.
+The owner asked for shareable, so the deliverable is the protocol spec plus a reference publisher, not a Unity feature. Ship: (a) `com.ironmind.editor-presence` as a public git-URL UPM package — a distribution path already proven in this environment, since `/Users/pieroherrera/Projects/Deepmind/Packages/manifest.json:16` resolves `org.khronos.unitygltf` straight from a GitHub URL, no registry needed; (b) EPP v1 written up as a standalone spec with the JSON frames above; (c) a ~50-line reference subscriber (plain HTML page) so a third party can verify their plugin without running T3 at all; (d) a second publisher — a VS Code extension emitting the active file and symbol — as the proof the protocol is not Unity-shaped. Manifest fields, the standard shipped set: name, displayName, description, documentationUrl, author, keywords, unity, version, type, dependencies.
 
 **Proof:** On a clean machine with no prior setup, install the package by pasting the git URL into Unity's Package Manager, paste a token, and get a chip on screen — timed, and the elapsed time reported honestly. Separately: the VS Code extension drives the _same unmodified_ server route and the _same unmodified_ web chip component, screenshotted. If the web client needed any Unity-specific branch to render the VS Code chip, the protocol failed and this step is not done.
 
@@ -233,3 +233,35 @@ Not settled. When `PlayerRoot` is pinned and you then select `Ground`:
 Recommendation is (b) for usefulness, but it is the larger build. **Implement
 (a) first**; it is a strict subset, and the protocol already carries an array
 of items so (b) needs no protocol change — only client state.
+
+---
+
+## DECIDED 2026-08-03: multi-object — pinned AND live together
+
+The open question was whether pinning replaces live-following or coexists with
+it. **It coexists, and the chip row is multi-object.**
+
+So the row can carry several items at once:
+
+```
+⬡ PlayerRoot 📌   ⬡ Ground 📌   ⬡ Camera        ← live, follows Unity
+   pinned            pinned        (unpinned)
+```
+
+- **Unpinned items** follow the Unity selection and are replaced as it changes.
+- **Pinned items** stay until you click them again to release.
+- **Everything shown attaches on send.**
+
+This is what makes "why do these two clip through each other" a single
+question. Pin the player, pin the ground, then keep clicking around Unity —
+both stay, and whatever you have selected right now rides along too.
+
+No protocol change is needed: `selection.items` is already an array, and the
+server already replaces publisher state wholesale per frame. Pinning is purely
+client-side — the chip store keeps a pinned set that survives incoming frames,
+while unpinned chips are replaced by each frame's `items`.
+
+Implementation note: because pinned items outlive the frames that introduced
+them, the store must retain each pinned item's full payload (`id`, `label`,
+`path`, `kind`, `detail`) rather than re-deriving it from the current frame —
+a pinned object is frequently no longer in the live selection at all.
