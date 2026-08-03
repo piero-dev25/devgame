@@ -14,6 +14,7 @@ export const DEV_PROXIED_PATH_PREFIXES = [
   "/.well-known",
   "/ws",
   "/editor-presence",
+  "/space-events",
 ] as const;
 
 /**
@@ -29,7 +30,7 @@ export const DEV_PROXIED_PATH_PREFIXES = [
  * presents as "the app cannot reach its own backend", which is nowhere near
  * where anyone would look.
  */
-export const DEV_PROXIED_WEBSOCKET_PREFIXES = ["/ws", "/editor-presence"] as const;
+export const DEV_PROXIED_WEBSOCKET_PREFIXES = ["/ws", "/editor-presence", "/space-events"] as const;
 
 export function isDevProxiedWebSocketPath(prefix: string): boolean {
   return (DEV_PROXIED_WEBSOCKET_PREFIXES as readonly string[]).includes(prefix);

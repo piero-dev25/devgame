@@ -15,10 +15,12 @@ import type {
   OrchestrationSearchThreadsInput,
   OrchestrationSearchThreadsResult,
   OrchestrationShellSnapshot,
+  OrchestrationSpace,
   OrchestrationThread,
   OrchestrationThreadDetailSnapshot,
   OrchestrationThreadShell,
   ProjectId,
+  SpaceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -138,6 +140,27 @@ export interface ProjectionSnapshotQueryShape {
   readonly getFirstActiveThreadIdByProjectId: (
     projectId: ProjectId,
   ) => Effect.Effect<Option.Option<ThreadId>, ProjectionRepositoryError>;
+
+  /**
+   * Read the active (non-deleted) spaces for one project. The project-scoped
+   * counterpart to the unscoped `spaces` list embedded in `getSnapshot` /
+   * `getShellSnapshot` — used by SpaceEventsRoute's live broadcast, which
+   * runs once per relevant space event rather than once for a whole
+   * read-model rebuild, so it must never be unbounded.
+   */
+  readonly getActiveSpacesForProject: (
+    projectId: ProjectId,
+  ) => Effect.Effect<ReadonlyArray<OrchestrationSpace>, ProjectionRepositoryError>;
+
+  /**
+   * Read the owning project id for one space, found even after the space
+   * has been soft-deleted (its row survives with `deletedAt` set). Exists
+   * because `space.deleted`'s event payload does not carry `projectId` —
+   * see SpaceEventsRoute's domain-event listener.
+   */
+  readonly getSpaceProjectId: (
+    spaceId: SpaceId,
+  ) => Effect.Effect<Option.Option<ProjectId>, ProjectionRepositoryError>;
 
   /**
    * Read the checkpoint context needed to resolve a single thread diff.

@@ -39,6 +39,8 @@ const makeProjectionSnapshotQueryLayer = (project: OrchestrationProject) =>
     getProjectShellById: (projectId) =>
       Effect.succeed(projectId === project.id ? Option.some(project) : Option.none()),
     getFirstActiveThreadIdByProjectId: () => Effect.die("unused"),
+    getActiveSpacesForProject: () => Effect.die("unused"),
+    getSpaceProjectId: () => Effect.die("unused"),
     getThreadCheckpointContext: () => Effect.die("unused"),
     getFullThreadDiffContext: () => Effect.die("unused"),
     getThreadShellById: () => Effect.die("unused"),

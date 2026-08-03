@@ -135,9 +135,15 @@ const ProjectIdLookupInput = Schema.Struct({
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
 });
+const SpaceIdLookupInput = Schema.Struct({
+  spaceId: SpaceId,
+});
 const ProjectionProjectLookupRowSchema = ProjectionProjectDbRowSchema;
 const ProjectionThreadIdLookupRowSchema = Schema.Struct({
   threadId: ThreadId,
+});
+const ProjectionSpaceProjectIdLookupRowSchema = Schema.Struct({
+  projectId: ProjectId,
 });
 const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   threadId: ThreadId,
@@ -401,6 +407,50 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_spaces
         WHERE deleted_at IS NULL
         ORDER BY created_at ASC, space_id ASC
+      `,
+  });
+
+  // Scoped counterpart to listActiveSpaceRows, for callers driven by one
+  // project's client activity rather than a full read-model rebuild (e.g.
+  // SpaceEventsRoute's live broadcast) — indexed on project_id
+  // (idx_projection_spaces_project_id, Migrations/037_ProjectionSpaces.ts),
+  // so this never pays for a full table scan the way an unscoped listAll
+  // would.
+  const listActiveSpaceRowsByProjectId = SqlSchema.findAll({
+    Request: ProjectIdLookupInput,
+    Result: ProjectionSpaceDbRowSchema,
+    execute: ({ projectId }) =>
+      sql`
+        SELECT
+          space_id AS "spaceId",
+          project_id AS "projectId",
+          title,
+          created_at AS "createdAt",
+          updated_at AS "updatedAt",
+          deleted_at AS "deletedAt"
+        FROM projection_spaces
+        WHERE project_id = ${projectId}
+          AND deleted_at IS NULL
+        ORDER BY created_at ASC, space_id ASC
+      `,
+  });
+
+  // A `space.deleted` domain event's payload carries only `spaceId` (see
+  // SpaceDeletedPayload in packages/contracts) — no `projectId` — so a
+  // listener that needs to know which project's broadcast to refresh (e.g.
+  // SpaceEventsRoute) has to recover it. This is a single row by primary
+  // key, found even after deletion because spaces soft-delete (see
+  // applySpacesProjection in ProjectionPipeline.ts): the row survives with
+  // deleted_at set, so its project_id is still there to read.
+  const getSpaceProjectIdRow = SqlSchema.findOneOption({
+    Request: SpaceIdLookupInput,
+    Result: ProjectionSpaceProjectIdLookupRowSchema,
+    execute: ({ spaceId }) =>
+      sql`
+        SELECT
+          project_id AS "projectId"
+        FROM projection_spaces
+        WHERE space_id = ${spaceId}
       `,
   });
 
@@ -2072,6 +2122,30 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.map(Option.map((row) => row.threadId)),
       );
 
+  const getActiveSpacesForProject: ProjectionSnapshotQueryShape["getActiveSpacesForProject"] = (
+    projectId,
+  ) =>
+    listActiveSpaceRowsByProjectId({ projectId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getActiveSpacesForProject:query",
+          "ProjectionSnapshotQuery.getActiveSpacesForProject:decodeRow",
+        ),
+      ),
+      Effect.map((rows) => rows.map(mapSpaceRow)),
+    );
+
+  const getSpaceProjectId: ProjectionSnapshotQueryShape["getSpaceProjectId"] = (spaceId) =>
+    getSpaceProjectIdRow({ spaceId }).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProjectionSnapshotQuery.getSpaceProjectId:query",
+          "ProjectionSnapshotQuery.getSpaceProjectId:decodeRow",
+        ),
+      ),
+      Effect.map(Option.map((row) => row.projectId)),
+    );
+
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
   ) =>
@@ -2392,6 +2466,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
+    getActiveSpacesForProject,
+    getSpaceProjectId,
     getThreadCheckpointContext,
     getFullThreadDiffContext,
     getThreadShellById,

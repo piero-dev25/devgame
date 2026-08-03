@@ -21,6 +21,7 @@ import {
 } from "./http.ts";
 import { editorPresenceRouteLayer } from "./editorPresence/EditorPresenceRoute.ts";
 import { fixPath } from "./os-jank.ts";
+import { spaceEventsRouteLayer } from "./spaceEvents/SpaceEventsRoute.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -422,6 +423,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
     editorPresenceRouteLayer,
+    spaceEventsRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(

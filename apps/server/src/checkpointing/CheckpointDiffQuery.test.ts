@@ -88,6 +88,10 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
             getThreadCheckpointContext: () =>
               Effect.sync(() => {
                 getThreadCheckpointContextCalls += 1;
@@ -197,6 +201,10 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -281,6 +289,10 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -350,6 +362,10 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -404,6 +420,10 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
             getThreadCheckpointContext: () => Effect.succeed(Option.none()),
             getFullThreadDiffContext: () => Effect.succeed(Option.none()),
             getThreadShellById: () => Effect.succeed(Option.none()),
