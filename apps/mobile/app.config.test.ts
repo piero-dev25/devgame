@@ -90,7 +90,7 @@ describe("mobile app config severance", () => {
       "u.expo.dev",
       "ARK85ZXQ4Z",
       "t3.codes",
-      "t3tools",
+      "com.t3tools",
       "T3 Code",
       "t3-code",
     ]) {

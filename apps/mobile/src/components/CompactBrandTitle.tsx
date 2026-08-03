@@ -42,7 +42,7 @@ export function CompactBrandTitle(
   return (
     <View
       aria-level={1}
-      accessibilityLabel="T3 Code, Threads"
+      accessibilityLabel="DevGame, Threads"
       accessible
       role="heading"
       style={{

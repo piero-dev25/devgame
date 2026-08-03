@@ -1594,7 +1594,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
+          name: "DevGame",
           schemes: ["t3code", "t3code-dev"],
         },
       ],
@@ -1919,7 +1919,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "DevGame desktop build",
-    author: "T3 Tools",
+    author: "Ironmind Studios Inc.",
     main: "apps/desktop/dist-electron/main.cjs",
     build: yield* createBuildConfig(
       options.platform,
