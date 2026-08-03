@@ -27,6 +27,14 @@ toolchain: the guard should ask whether the storage _works_, not whether the
 global _exists_. Left alone for now; noted so the next person who sees those 8
 failures does not go looking in the wrong place.
 
+Worth being precise about the scope of that claim, because nothing in the repo
+_rejects_ node 25. The only enforced version check is
+`checkNodeSqliteCompat` (`apps/server/src/persistence/NodeSqliteClient.ts:77`),
+which requires major >= 24 and so passes on 25; `apps/server/package.json:40`
+declares an even looser `^22.16 || ^23.11 || >=24.10`. Node 25 will therefore
+boot the server quite happily. It is the web test suite that breaks, silently
+and for a reason that looks nothing like a node version problem. Use node 24.
+
 Install with brew's node@24 explicitly; pnpm self-manages to 11.10.0 from
 `packageManager`, so the ambient pnpm version does not matter:
 
@@ -127,12 +135,81 @@ really two. The absence was measured against a client that no longer exists.
 remains unanswered — the label is ours, so its absence proves nothing about
 the underlying fiber behaviour, and only a live Codex turn can settle it.
 
-## Clerk
+## The desktop shell
+
+`pnpm dev:desktop` builds and launches on macOS. Electron runs as
+`apps/desktop/.electron-runtime/T3 Code (Dev).app`, registers its own
+`t3code-dev` URL scheme, and **spawns its own backend** — the built
+`apps/server/dist/bin.mjs` (4.3 MB) — which then listens on `13773`.
+
+It is not the same shape as `pnpm dev`, and the difference costs time daily:
+
+```
+desktop#dev  dependsOn  t3#build  dependsOn  @t3tools/web#build
+```
+
+So a full _production_ web build plus a server CLI pack runs before Electron
+ever opens. And because Electron launches the built bundle rather than a
+watched process, **a backend change is not live-reloaded under `dev:desktop`**
+the way `node --watch` gives you under `dev`. Expect to iterate the server
+under `pnpm dev` and only switch to `dev:desktop` when the shell itself is
+what you are working on.
+
+Nothing outside the npm world is needed for either. `cargo` is not required —
+a missing `native/resource-monitor` binary surfaces as a typed Effect failure
+that degrades telemetry rather than blocking boot. Electron's and node-pty's
+postinstalls are allow-listed in `pnpm-workspace.yaml`, so pnpm's
+supply-chain script blocking does not need a manual approval step. The
+Ghostty WASM build is not wired into any `dev` task.
+
+## Providers: five drivers, all spawning your own CLIs
+
+`claudeAgent`, `codex`, `cursor`, `opencode`, `grok` — with Grok and Cursor
+going over ACP (`apps/server/src/provider/acp/GrokAcpSupport.ts`,
+`CursorAcpSupport.ts`) and Claude/Codex on native paths. That is the
+native-where-it-exists, ACP-for-the-rest split we wanted, already built.
+Gemini is the only one missing, which is exactly what we reserved as ours.
+
+Adding it is additive: `ProviderDriverKind` is an **open branded slug, not a
+closed union** (`packages/contracts/src/providerInstance.ts:70`), so a new
+driver needs no contract surgery.
+
+None of them take an API key. Searching `apps/server/src/provider` and
+`apps/server/src/textGeneration` for `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` /
+`*_API_KEY` returns nothing. Each provider's `binaryPath` defaults to a bare
+command name resolved from PATH — `"claude"`, `"codex"`, `"cursor-agent"`,
+`"grok"`, `"opencode"` (`packages/contracts/src/settings.ts:203-360`) — so it
+runs whatever you already installed and logged into. Codex is spawned as
+`codex app-server` speaking JSON-RPC over stdio.
+
+## Clerk: removable cleanly, and not load-bearing for pairing
 
 The server boots, issues a pairing token, completes DPoP pairing and runs a
-full agent turn **with no Clerk keys set anywhere**. The web bundle does load
-`@clerk/react` and `ClerkProvider` at startup, so it is present — but nothing
-on the local path depends on it.
+full agent turn **with no Clerk keys set anywhere**. Source audit agrees with
+the live result:
 
-That is enough to rule out "load-bearing for device pairing". Whether it can
-be deleted outright or only stubbed is a separate question, still open.
+- `apps/server` has **zero** `@clerk/*` imports. It only derives OAuth URLs
+  from a publishable-key _string_ (`cloud/publicConfig.ts:176`).
+- The whole local pairing path is Clerk-free: `auth/EnvironmentAuth.ts`,
+  `auth/dpop.ts`, `startupAccess.ts`, `cli/pair.ts`,
+  `packages/shared/src/dpop.ts`.
+- All 25 Clerk files belong to **T3 Connect**, their hosted relay-linking
+  feature. Clerk governs who may link a _remote_ device through their cloud;
+  it has no say over who may pair a _local_ client, which needs only the token
+  the server prints to stdout.
+
+The `@clerk` chunks that show up in the network log are static top-level
+imports in `main.tsx`, so they are always bundled and fetched — but
+`<ClerkProvider>` only mounts when `clerkPublishableKey && hasCloudPublicConfig()`
+(`main.tsx:39`). Bundle weight, not runtime initialisation. No Clerk network
+call happens without a key.
+
+One asymmetry to remember: `apps/desktop` wires `DesktopClerk.layer`
+**unconditionally** into the Electron main-process runtime
+(`main.ts:194-212`, `DesktopApp.ts:225`, `preload.ts:12`). No key is needed —
+`createClerkBridge` takes none and makes no network call — but
+`@clerk/electron` must stay installed and importable for desktop to boot.
+
+**Decision: leave it dormant.** Running local-only costs zero code changes
+today. Physical deletion is bounded (~25 files, 3 package.json deps, and
+`infra/relay`) and can wait until it actually gets in the way.
