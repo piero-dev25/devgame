@@ -115,11 +115,36 @@ function RootRouteView() {
     );
   }
 
+  // Step 2 (spec-dock-step-2.md, Part A): `AppSidebarLayout` used to wrap
+  // EVERY authenticated, non-pair/connect route identically — `/settings*`
+  // and every `/_chat/*` thread route alike — with its fixed,
+  // viewport-locked `<Sidebar>`. `/settings`, `/connect` and `/pair` "must
+  // keep rendering T3's normal AppSidebarLayout sidebar exactly as they do
+  // now" (spec), so settings keeps that exact wrapper; thread routes no
+  // longer go through it at all. `_chat.tsx` (the shared layout route for
+  // `/`, `/draft/$draftId`, `/$environmentId/$threadId`) now provides its
+  // own bare `<SidebarProvider>` instead — required only because
+  // `SidebarV2`/`Sidebar` call `useSidebar()`, but WITHOUT `AppSidebarLayout`'s
+  // fixed `<Sidebar>`/`<SidebarRail>`/`<SidebarControl>`, since T3's real
+  // sidebar is now an ordinary dock panel there (SidebarPanel.tsx) that
+  // dockview owns the sizing/visibility of, not a collapsible fixed pane.
+  // `/connect`/`/pair` are unaffected either way — they return above,
+  // before this component is reached at all.
+  //
+  // This IS a real duality — the sidebar renders through two different
+  // mechanisms depending on which route you're on — kept visible here
+  // rather than papered over, per the spec's own instruction to say so
+  // explicitly when it's true.
+  const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
   const appShell = (
     <CommandPalette>
-      <AppSidebarLayout>
+      {isOnSettings ? (
+        <AppSidebarLayout>
+          <Outlet />
+        </AppSidebarLayout>
+      ) : (
         <Outlet />
-      </AppSidebarLayout>
+      )}
     </CommandPalette>
   );
 

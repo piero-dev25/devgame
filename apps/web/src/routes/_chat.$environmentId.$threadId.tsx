@@ -82,6 +82,7 @@ function ChatThreadRouteView() {
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
       {renderState === "ready" || (renderState === "loading" && serverThreadShell !== null) ? (
         <ChatDock
+          routeKind="server"
           environmentId={threadRef.environmentId}
           threadId={threadRef.threadId}
           threadSyncPhase={threadSyncPhase}

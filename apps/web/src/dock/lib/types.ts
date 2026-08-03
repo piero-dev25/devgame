@@ -46,7 +46,13 @@ export interface PanelDefinition<P extends object = Record<string, unknown>> {
   /** A lucide-react icon component, rendered at a fixed small size in tabs. */
   icon: React.ComponentType<{ size?: number; strokeWidth?: number; className?: string }>;
   component: React.ComponentType<PanelProps<P>>;
-  defaultLocation?: "centre" | "right" | "bottom";
+  // "left" added for step 2 (spec-dock-step-2.md): the source union had no
+  // slot for a genuinely left-docked panel because nothing in that app's
+  // catalog was ever left-docked. Purely informational metadata today —
+  // nothing reads `defaultLocation` except `PanelRegistry.list()`'s unused
+  // filter param — but mislabeling the sidebar "centre" to avoid a one-line
+  // type edit would be worse than extending the union honestly.
+  defaultLocation?: "centre" | "right" | "bottom" | "left";
   /** Honoured ONLY while the panel's group is floating — never while docked. */
   minWidth?: number;
   minHeight?: number;

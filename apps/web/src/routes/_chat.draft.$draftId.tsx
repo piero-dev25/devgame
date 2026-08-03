@@ -1,12 +1,12 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
-import ChatView from "../components/ChatView";
 import { threadHasStarted } from "../components/ChatView.logic";
 import {
   DraftId,
   markPromotedDraftThreadByRef,
   useComposerDraftStore,
 } from "../composerDraftStore";
+import { ChatDock } from "../dock/ChatDock";
 import { SidebarInset } from "../components/ui/sidebar";
 import { waitForDraftHeroTransition } from "../components/chat/draftHeroTransition";
 import { buildThreadRouteParams } from "../threadRoutes";
@@ -72,12 +72,11 @@ function DraftChatThreadRouteView() {
 
   return (
     <SidebarInset className="h-svh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground md:h-dvh">
-      <ChatView
-        draftId={draftId}
+      <ChatDock
+        routeKind="draft"
         environmentId={draftSession.environmentId}
         threadId={draftSession.threadId}
-        routeKind="draft"
-        forceExpandedMobileComposer
+        draftId={draftId}
       />
     </SidebarInset>
   );

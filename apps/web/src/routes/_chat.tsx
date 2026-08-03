@@ -20,6 +20,7 @@ import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
+import { SidebarProvider } from "~/components/ui/sidebar";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 
 function ChatRouteGlobalShortcuts() {
@@ -174,12 +175,42 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
+/**
+ * Step 2 (spec-dock-step-2.md, Part A): every thread route under this
+ * pathless layout (`/`, `/draft/$draftId`, `/$environmentId/$threadId`) now
+ * hosts T3's real sidebar as a dock panel (SidebarPanel.tsx) instead of
+ * through `AppSidebarLayout`'s fixed `<Sidebar>` — see `__root.tsx`'s
+ * `RootRouteView` for the settings-vs-thread-routes branch this replaces.
+ * `SidebarProvider` is still required here: `SidebarV2`'s content calls
+ * `useSidebar()` (for `{isMobile, setOpenMobile}`), which throws outside
+ * one, and React context is not DOM-position-dependent — a panel rendered
+ * through `createPortal` from deep inside dockview still resolves this
+ * provider correctly as long as it's an ancestor in the REACT tree, which it
+ * is here (confirms the spec's own claim rather than assuming it).
+ *
+ * Deliberately NOT `AppSidebarLayout` itself: that also renders a fixed,
+ * viewport-locked `<Sidebar>` + `<SidebarRail>` (drag-to-resize) +
+ * `<SidebarControl>` (a collapse/expand toggle) — all three exist to manage
+ * a FIXED sidebar's open/collapsed state and pixel width, a concept dockview
+ * now owns instead (the sidebar panel can be dragged, resized against its
+ * neighbours, or floated, but per the design constraint it can never be
+ * closed — see SidebarPanel.tsx). Rendering that machinery alongside a
+ * docked copy of the same content would be actively wrong, not just
+ * redundant. `className="h-dvh! min-h-0!"` matches the override
+ * `AppSidebarLayout` already applies to its own `SidebarProvider`, for the
+ * same reason: `SidebarProvider`'s default `min-h-svh` could let content
+ * grow the wrapper taller than the viewport, which conflicts with the
+ * dock's own `h-svh min-h-0 overflow-hidden` height chain (see
+ * `_chat.$environmentId.$threadId.tsx`'s `SidebarInset`) — a definite,
+ * non-growing height is what keeps dockview from collapsing to zero height,
+ * per spec-dock-step-1.md's mount-point warning.
+ */
 function ChatRouteLayout() {
   return (
-    <>
+    <SidebarProvider className="h-dvh! min-h-0!" defaultOpen>
       <ChatRouteGlobalShortcuts />
       <Outlet />
-    </>
+    </SidebarProvider>
   );
 }
 
