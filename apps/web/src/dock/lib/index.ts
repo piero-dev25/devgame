@@ -35,8 +35,13 @@ export {
   createLocalStorageLayoutStorage,
   type LayoutStorage,
   type LoadLayoutResult,
+  type SaveLayoutResult,
 } from "./storage";
 export { TAB_COMPONENT_NO_CLOSE, TAB_COMPONENT_WITH_CLOSE } from "./tabComponents";
+// Fix-round additions (step-1 review): both pure, DOM-free decision
+// functions — see their own files for the finding each one closes.
+export { decideImportedLayoutAction, type ImportedLayoutAction } from "./importDecision";
+export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
 export {
   LAYOUT_SCHEMA_VERSION,
   type LayoutFile,

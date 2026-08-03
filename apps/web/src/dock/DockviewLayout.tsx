@@ -52,7 +52,9 @@ import {
   type LoadLayoutResult,
   type PresetRegistry,
 } from "./lib/index";
+import { decideImportedLayoutAction } from "./lib/importDecision";
 import type { PanelRegistry } from "./lib/panelRegistry";
+import { computeDuplicateSingletonPanelIds } from "./lib/singletonGuard";
 import { TAB_COMPONENT_NO_CLOSE, TAB_COMPONENT_WITH_CLOSE } from "./lib/tabComponents";
 import "./dockviewTheme.css";
 import { LayoutNotice } from "./LayoutNotice";
@@ -61,6 +63,7 @@ import { createPanelPortalStore, type PanelPortalEntry } from "./panelPortalStor
 import { QuarantinePanel } from "./QuarantinePanel";
 import { createReactContentRenderer } from "./reactContentRenderer";
 import { createReactTabRenderer } from "./reactTabRenderer";
+import { SingletonBlockedPanel } from "./SingletonBlockedPanel";
 import { buildTabContextMenuItems } from "./tabContextMenu";
 
 const WORKBENCH_THEME: DockviewTheme = {
@@ -80,6 +83,22 @@ const WORKBENCH_THEME: DockviewTheme = {
 /** A debounce short enough that a reload right after a drag still sees the latest arrangement. */
 const PERSIST_DEBOUNCE_MS = 250;
 
+/**
+ * STABILITY CONTRACT (fix-round finding #4 — this used to live only in an
+ * inline comment on the mount effect below, where the next caller wiring a
+ * second dock would not read it before getting bitten): `panelRegistry`,
+ * `presetRegistry`, `storage`, and `fallbackPreset` must be referentially
+ * STABLE for the lifetime of one mount. The internal mount effect only
+ * re-runs when `workspaceId`/`presetId` change identity — it deliberately
+ * does NOT watch these four (see the effect's own
+ * `eslint-disable-next-line react-hooks/exhaustive-deps`). A caller that
+ * rebuilds any of them on every render will NOT get a fresh dockview
+ * instance from that change alone; only a `workspaceId`/`presetId` change
+ * tears down and recreates the dock. `ChatDock.tsx` satisfies this by
+ * building all four exactly once, at module scope, before any component
+ * that uses them ever renders — that pattern, not per-render construction,
+ * is what any future second dock should copy.
+ */
 export interface DockviewLayoutProps {
   /** Identifies the saved layout — layouts are saved PER WORKSPACE. */
   workspaceId: string;
@@ -110,6 +129,17 @@ export interface DockviewLayoutProps {
  * component. A parent holds a `ref` to this component to wire these into
  * its own chrome (a toolbar, a "..." menu — this component renders none of
  * that itself).
+ *
+ * Step-1 review "ALSO" note: this fork has no workspace-header-equivalent
+ * chrome yet (unlike the source app's `WorkspaceHeader`), so nothing in
+ * PRODUCT UI currently holds a `ref` here and calls these three. Kept as
+ * real, typed, implemented API surface rather than wired-up-or-deleted —
+ * `importLayoutFile`'s own core decision logic (what to do with a parsed
+ * file, unmount-aware) is unit-tested directly via `lib/importDecision.ts`
+ * (this repo has no jsdom/mounted-component test infra to drive the ref
+ * itself end-to-end; see that file's test for what IS covered). Wiring an
+ * actual "..." menu that holds this ref is a UI task for a later step, not
+ * this fix round.
  */
 export interface DockviewLayoutHandle {
   reset(): void;
@@ -119,26 +149,36 @@ export interface DockviewLayoutHandle {
 
 /**
  * Renders one live dock panel's content, reached through the portal store.
- * `PanelErrorBoundary` wraps BOTH branches (the real component and the
- * `QuarantinePanel` fallback), not just the found-in-registry branch — a
- * throw in either arm quarantines to this panel's own tab rather than
+ * `PanelErrorBoundary` wraps ALL THREE branches (the real component, the
+ * `QuarantinePanel` fallback, and — fix-round finding #1 — the
+ * `SingletonBlockedPanel` fallback), not just the found-in-registry branch —
+ * a throw in any arm quarantines to this panel's own tab rather than
  * escaping to wherever this component itself is mounted (which has no
  * boundary of its own above it).
+ *
+ * `isDuplicateSingleton` is computed once per render, over every live entry,
+ * by `computeDuplicateSingletonPanelIds` (lib/singletonGuard.ts) — see that
+ * file for why this is the enforcement point rather than only
+ * `tabContextMenu.ts`'s "addable" filter.
  */
 function PanelPortalContent({
   entry,
   registry,
+  isDuplicateSingleton,
 }: {
   entry: PanelPortalEntry;
   registry: PanelRegistry;
+  isDuplicateSingleton: boolean;
 }) {
   const definition = registry.get(entry.componentId);
   return (
     <PanelErrorBoundary panelTitle={definition?.title ?? entry.componentId}>
-      {definition ? (
-        <definition.component params={entry.params} updateParams={entry.updateParams} />
-      ) : (
+      {!definition ? (
         <QuarantinePanel componentId={entry.componentId} />
+      ) : isDuplicateSingleton ? (
+        <SingletonBlockedPanel title={definition.title} />
+      ) : (
+        <definition.component params={entry.params} updateParams={entry.updateParams} />
       )}
     </PanelErrorBoundary>
   );
@@ -177,6 +217,21 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // Swallows exactly one automatic persist — the one caused by recovering onto
     // a fallback preset after an import we refused. See `maybePersist`.
     const suppressRecoveryPersistRef = useRef(false);
+    // Fix-round finding #3: set false in the mount effect's cleanup, read by
+    // every async continuation that resumes after touching `apiRef.current`
+    // (currently: `handleImportFile`'s `file.text().then(...)`, and the
+    // save-result reporting below) — the same "don't act on a disposed
+    // DockviewApi" guard `loadInitialLayout`'s own `cancelled` flag already
+    // provides for the initial load, extended to every other async gap.
+    const isMountedRef = useRef(true);
+    // Fix-round finding #2: gates the save-failure notice to ONCE per
+    // session rather than once per debounce tick — every drag/resize
+    // schedules a save, so a broken `storage.save` would otherwise re-show
+    // the same notice every ~250ms. Reset to `false` the next time a save
+    // SUCCEEDS, so a later, different failure after a recovery still gets
+    // reported — this is a standing "already told them" flag, not a
+    // one-shot-forever suppression.
+    const saveFailureNoticeShownRef = useRef(false);
 
     const storage = useMemo(() => storageProp ?? createLocalStorageLayoutStorage(), [storageProp]);
 
@@ -213,17 +268,43 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     const presetFallbackNotice =
       "This workspace's own default preset isn't registered yet — opened the fallback layout instead.";
 
+    // Fix-round finding #2: the ONE place a `SaveLayoutResult` is turned into
+    // UI. Both callers of `storage.save()` below (`persist`'s own debounced/
+    // explicit saves, and `handleImportFile`'s direct save after a successful
+    // import) route through this so the once-per-session gating can't drift
+    // between two independently-written notice strings.
+    const reportSaveResult = useCallback((result: Awaited<ReturnType<LayoutStorage["save"]>>) => {
+      if (!isMountedRef.current) return;
+      if (result.status === "ok") {
+        saveFailureNoticeShownRef.current = false;
+        return;
+      }
+      if (saveFailureNoticeShownRef.current) return;
+      saveFailureNoticeShownRef.current = true;
+      setNotice(
+        `This workspace's layout couldn't be saved (${result.message}). Your current arrangement is still visible, but won't survive a reload until storage is available again.`,
+      );
+    }, []);
+
     const persist = useCallback(
       (api: DockviewApi) => {
         const file = buildLayoutFile({ preset: presetId, dockviewJson: api.toJSON() });
-        storage.save(workspaceId, file);
+        void storage.save(workspaceId, file).then(reportSaveResult);
       },
-      [storage, workspaceId, presetId],
+      [storage, workspaceId, presetId, reportSaveResult],
     );
 
     useEffect(() => {
       const container = containerRef.current;
       if (!container) return undefined;
+
+      // StrictMode double-invokes this effect (mount -> cleanup -> mount
+      // again) against the SAME `isMountedRef` instance in dev — the
+      // cleanup below sets it `false`, so it must be reset here on every
+      // effect run, not just rely on `useRef(true)`'s one-time initial
+      // value, or the second StrictMode mount would start out permanently
+      // "unmounted" from its own guards' point of view.
+      isMountedRef.current = true;
 
       const api = createDockview(container, {
         theme: WORKBENCH_THEME,
@@ -362,6 +443,12 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
 
       return () => {
         cancelled = true;
+        // Set BEFORE the flush below, not after: `maybePersist()` ->
+        // `persist()` attaches `.then(reportSaveResult)`, and
+        // `reportSaveResult` checks this flag — so a save that resolves
+        // after this cleanup runs correctly skips `setNotice` on an
+        // unmounted component instead of firing it moments too late.
+        isMountedRef.current = false;
         clearTimeout(persistTimer);
         if (persistPending) {
           // A workspace switch unmounts this component, so clearing the
@@ -372,7 +459,9 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           // survive a switch-away just as much as a splitter nudge.
           // `storage.save` is fire-and-forget here (a real network request
           // can't be awaited from a synchronous cleanup) — it keeps running
-          // after unmount; the response is simply not observed.
+          // after unmount; `reportSaveResult`'s `isMountedRef` check (just
+          // set above) is what keeps its eventual result from acting on
+          // anything, not the absence of an observer.
           maybePersist();
         }
         layoutChangeSub?.dispose();
@@ -380,10 +469,8 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         api.dispose();
         apiRef.current = null;
       };
-      // Only workspaceId/presetId identity changes should tear down and
-      // remount dockview; the registries/storage/fallbackPreset are treated
-      // as stable for the lifetime of one mount (ChatDock.tsx builds every one
-      // of them once, at module scope).
+      // Deliberately workspaceId/presetId-only deps — see the stability
+      // contract on `DockviewLayoutProps` above for the full reasoning.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [workspaceId, presetId]);
 
@@ -417,19 +504,35 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         const api = apiRef.current;
         if (!api) return;
         void file.text().then((raw) => {
-          const result = parseLayoutFile(raw);
-          if (!result.ok) {
-            setNotice(`Couldn't import ${file.name}: ${result.message}`);
+          // Fix-round finding #3: `api` was captured synchronously above,
+          // but this continuation only resumes after the (async) file read
+          // completes — if the component unmounted in between,
+          // `loadInitialLayout`'s own mount effect has already disposed
+          // `api`. `decideImportedLayoutAction` (lib/importDecision.ts) is
+          // the same "don't touch a disposed DockviewApi" guard
+          // `loadInitialLayout` gets from its `cancelled` flag, applied
+          // here via `isMountedRef`. See that file's tests for the red/green
+          // proof.
+          const decision = decideImportedLayoutAction({
+            isMounted: isMountedRef.current,
+            parseResult: parseLayoutFile(raw),
+          });
+
+          if (decision.action === "ignore-unmounted") return;
+
+          if (decision.action === "invalid") {
+            setNotice(`Couldn't import ${file.name}: ${decision.message}`);
             return;
           }
-          // A well-formed-JSON-but-dockview-invalid file (e.g. a view id with
-          // no `panels` entry) throws AND clears the current grid to zero
-          // groups first. Left bare, that's an unhandled rejection, a
-          // torn-down dock with no notice, and — since `storage.save` below
-          // never ran — a reload that silently restores the old layout as if
-          // nothing happened.
+
+          // decision.action === "apply" — a well-formed-JSON-but-dockview-invalid
+          // file (e.g. a view id with no `panels` entry) throws AND clears the
+          // current grid to zero groups first. Left bare, that's an unhandled
+          // rejection, a torn-down dock with no notice, and — since
+          // `storage.save` below never ran — a reload that silently restores
+          // the old layout as if nothing happened.
           try {
-            api.fromJSON(result.file.dockview);
+            api.fromJSON(decision.file.dockview);
           } catch {
             // Order matters: arm the guard BEFORE touching the dock, because
             // applyPreset synchronously fires onDidMutateLayout, which schedules
@@ -446,8 +549,8 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           // Same reasoning as reset() — importing a file is an explicit
           // replacement, so it persists and lifts any standing block.
           autoSaveBlockedRef.current = false;
-          storage.save(workspaceId, result.file);
-          const unknown = findUnknownPanelIds(result.file.dockview, panelRegistry.knownIds());
+          void storage.save(workspaceId, decision.file).then(reportSaveResult);
+          const unknown = findUnknownPanelIds(decision.file.dockview, panelRegistry.knownIds());
           setNotice(
             unknown.length > 0
               ? `Imported ${file.name}. ${unknown.length} panel type(s) aren't in the current catalog and show as quarantine cards.`
@@ -455,7 +558,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           );
         });
       },
-      [storage, workspaceId, panelRegistry, applyPreset],
+      [storage, workspaceId, panelRegistry, applyPreset, reportSaveResult],
     );
 
     useImperativeHandle(
@@ -468,13 +571,29 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       [handleReset, handleExport, handleImportFile],
     );
 
+    // Fix-round finding #1: recomputed every render — cheap (a linear scan
+    // over however many panels are actually open, typically single digits)
+    // and correctness-critical to recompute fresh rather than memoize
+    // against `panelEntries` identity alone, since `panelRegistry` could in
+    // principle change too (it's a required prop, not literally guaranteed
+    // immutable by the type system even though `ChatDock.tsx` never rebuilds
+    // it — see the stability contract on `DockviewLayoutProps`).
+    const duplicateSingletonPanelIds = computeDuplicateSingletonPanelIds(
+      panelEntries,
+      panelRegistry,
+    );
+
     return (
       <div className={cn("flex h-full min-h-0 flex-col", className)}>
         {notice ? <LayoutNotice message={notice} onDismiss={() => setNotice(null)} /> : null}
         <div ref={containerRef} className="min-h-0 flex-1" />
         {panelEntries.map((entry) =>
           createPortal(
-            <PanelPortalContent entry={entry} registry={panelRegistry} />,
+            <PanelPortalContent
+              entry={entry}
+              registry={panelRegistry}
+              isDuplicateSingleton={duplicateSingletonPanelIds.has(entry.panelId)}
+            />,
             entry.element,
             entry.panelId,
           ),

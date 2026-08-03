@@ -74,7 +74,20 @@ export function createReactTabRenderer(showClose: boolean): ITabRenderer {
       );
     },
     dispose() {
-      // See reactContentRenderer.tsx for why this unmount is deferred a microtask.
+      // Fix-round finding #5 (step-1 review): this used to point at
+      // reactContentRenderer.tsx "for why this unmount is deferred a
+      // microtask" — that file never explained it (it doesn't own a React
+      // root at all; its own doc comment only notes that ITS OLD
+      // microtask-deferred-unmount workaround is GONE, since the portal
+      // refactor removed the hazard it guarded). The dangling reference
+      // predates that refactor; here is the reasoning it used to point to,
+      // stated directly: calling `root.unmount()` synchronously from inside
+      // dockview-core's own `dispose()` callback can run while THIS app's
+      // React tree is mid-commit elsewhere (dockview disposing a tab is not
+      // itself a React event) — unmounting a root synchronously in that
+      // window is the "don't unmount mid-commit" hazard. Deferring to a
+      // microtask lets the current call stack (and any in-flight commit)
+      // finish first.
       const current = root;
       root = null;
       if (current) queueMicrotask(() => current.unmount());

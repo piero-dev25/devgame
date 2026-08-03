@@ -12,6 +12,15 @@ export interface PanelRegistry {
   ids(): string[];
   /** The full id set — what dockview's panel factory treats as "known". */
   knownIds(): ReadonlySet<string>;
+  /**
+   * Step-1 review "ALSO" note: the `filter` param is currently dead — the
+   * one caller today (`tabContextMenu.ts`'s "addable" list) calls this with
+   * no filter. Kept deliberately rather than trimmed: it's the natural shape
+   * for a future "add panel" picker that groups candidates by column
+   * (left/centre/right/bottom) instead of one flat list, which this dock's
+   * panel count doesn't yet justify building. Not dead code to clean up —
+   * forward-looking scaffolding to leave alone until that picker exists.
+   */
   list(filter?: { defaultLocation?: PanelDefinition["defaultLocation"] }): PanelDefinition[];
 }
 

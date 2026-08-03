@@ -21,13 +21,26 @@ export type LoadLayoutResult =
   | { status: "invalid"; reason: ParseLayoutFailureReason; message: string };
 
 /**
+ * Fix-round finding #2 (step-1 review): `save()` used to return `Promise<void>`
+ * and swallow every failure in a bare `catch`. The LOAD path already had this
+ * same taxonomy (`LoadLayoutResult`) precisely so a corrupted/unreadable file
+ * could surface a notice instead of failing silently — SAVE had no equivalent,
+ * so quota-exceeded, private browsing, or a storage-blocked profile all
+ * degraded to a no-op with the UI showing the drag as having succeeded. The
+ * arrangement then vanishes on reload with no error anywhere. Mirrors
+ * `LoadLayoutResult`'s shape on purpose, for the same reason: one taxonomy
+ * shape a caller (`DockviewLayout`) already knows how to switch over.
+ */
+export type SaveLayoutResult = { status: "ok" } | { status: "failed"; message: string };
+
+/**
  * Async on every method, not just the ones a network-backed adapter would
  * obviously need — keeping the interface uniform means `DockviewLayout`
  * doesn't need to know which backend it's holding.
  */
 export interface LayoutStorage {
   load(workspaceId: string): Promise<LoadLayoutResult>;
-  save(workspaceId: string, file: LayoutFile): Promise<void>;
+  save(workspaceId: string, file: LayoutFile): Promise<SaveLayoutResult>;
   clear(workspaceId: string): Promise<void>;
 }
 
@@ -72,9 +85,17 @@ export function createLocalStorageLayoutStorage(
     async save(workspaceId, file) {
       try {
         window.localStorage.setItem(keyFor(workspaceId), JSON.stringify(file));
-      } catch {
-        // Can't persist right now — the in-memory layout is still fine;
-        // never let a storage failure crash the workspace.
+        return { status: "ok" };
+      } catch (error) {
+        // Can't persist right now — the in-memory layout is still fine, and
+        // this function still never THROWS (same "never crash the workspace
+        // over a storage failure" contract as before) — but the caller now
+        // gets to know it happened instead of it being swallowed here.
+        return {
+          status: "failed",
+          message:
+            error instanceof Error ? error.message : "The browser refused to save the layout.",
+        };
       }
     },
     async clear(workspaceId) {

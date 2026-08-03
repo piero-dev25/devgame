@@ -42,6 +42,17 @@ export function buildTabContextMenuItems({
 
   // A panel id is unique across the whole dockview, so "addable" means
   // "not open anywhere yet" — including elsewhere in this same group.
+  //
+  // This filter is BY EXACT ID (`definition.id`), and every "Add tab" call
+  // below reuses that same id verbatim as the new panel's instance id — so
+  // today this already can't open a second instance of anything, singleton
+  // or not. The real enforcement for `singleton: true` panels lives one
+  // level deeper, in `DockviewLayout.tsx`'s render loop
+  // (`lib/singletonGuard.ts`), which is the choke point ANY panel-adding
+  // path funnels through (this menu, a restored saved layout, or a future
+  // caller that mints a fresh instance id rather than reusing the catalog
+  // id) — see that file for why this filter alone wouldn't be enough to
+  // rely on going forward.
   const addable = registry.list().filter((definition) => !api.getPanel(definition.id));
 
   if (addable.length > 0) {
