@@ -65,6 +65,28 @@ every engine client a clean rule that does not depend on timing:
 - close code **−1** → no WebSocket session was ever established; show
   "cannot reach Workbench at `<url>`"
 
+### Correction: "≥ 4000 means stop retrying" was too coarse
+
+The first version of this rule said any code ≥ 4000 should halt reconnection,
+on the reasoning that the server had given a definitive answer. Three codes are
+now in use and they do not behave alike:
+
+| Code | Meaning               | Retry?                                                       |
+| ---- | --------------------- | ------------------------------------------------------------ |
+| 4400 | missing credential    | **No** — nothing to retry with until the user configures one |
+| 4401 | invalid credential    | **No** — retrying sends the same rejected token              |
+| 4500 | server internal error | **Yes, with backoff** — transient by definition              |
+
+Under the original rule a momentary server fault would permanently disconnect
+every editor on every machine until each user noticed and clicked retry. That
+is an availability bug created by writing the rule too broadly, not by any
+client implementing it wrongly.
+
+**The distinction is credential-class versus everything-else, not a numeric
+threshold.** Encode it by name so it does not get re-flattened into a
+comparison later. An unrecognised ≥ 4000 code should keep retrying — an unknown
+failure is more likely to be transient than to be the user's fault.
+
 This should hold for Unity and Unreal too — both of their WebSocket clients
 expose close codes — but it is proven only for Godot.
 
