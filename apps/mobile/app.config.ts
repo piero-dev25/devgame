@@ -53,21 +53,21 @@ const RELEASE_ASSETS = {
 const VARIANT_CONFIG = {
   development: {
     appName: "DevGame Dev",
-    scheme: "t3code-dev",
+    scheme: "devgame-dev",
     iosBundleIdentifier: "com.devgame.app.dev",
     androidPackage: "com.devgame.app.dev",
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
     appName: "DevGame Preview",
-    scheme: "t3code-preview",
+    scheme: "devgame-preview",
     iosBundleIdentifier: "com.devgame.app.preview",
     androidPackage: "com.devgame.app.preview",
     assets: PREVIEW_ASSETS,
   },
   production: {
     appName: "DevGame",
-    scheme: "t3code",
+    scheme: "devgame",
     iosBundleIdentifier: "com.devgame.app",
     androidPackage: "com.devgame.app",
     assets: RELEASE_ASSETS,

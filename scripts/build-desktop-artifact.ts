@@ -1571,7 +1571,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "DevGame",
-          schemes: ["t3code", "t3code-dev"],
+          schemes: ["devgame", "devgame-dev"],
         },
       ],
       ...(macPasskeySigning
@@ -1586,21 +1586,21 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "t3code",
+      executableName: "devgame",
       icon: "icons",
       category: "Development",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // t3code:// OAuth callbacks to the app.
+      // devgame:// OAuth callbacks to the app.
       protocols: [
         {
           name: "DevGame",
-          schemes: ["t3code", "t3code-dev"],
+          schemes: ["devgame", "devgame-dev"],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: "devgame",
         },
       },
     };

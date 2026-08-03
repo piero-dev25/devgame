@@ -4,10 +4,10 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { ProjectScriptIcon } from "./orchestration.ts";
 
 /** File name of the checked-in T3 project file, resolved at the workspace root. */
-export const T3_PROJECT_FILE_NAME = "t3.json";
+export const T3_PROJECT_FILE_NAME = "devgame.json";
 
 /** Public URL of the published JSON Schema for {@link T3ProjectFile}. */
-export const T3_PROJECT_FILE_SCHEMA_URL = "https://t3.codes/schema/t3.json";
+export const T3_PROJECT_FILE_SCHEMA_URL = "https://devgame.fun/schema/devgame.json";
 
 const T3_PROJECT_FILE_PATH_MAX_LENGTH = 512;
 const T3_PROJECT_FILE_MAX_SCRIPTS = 50;
@@ -83,6 +83,6 @@ export const T3ProjectFile = Schema.Struct({
 }).annotate({
   title: "T3 project file",
   description:
-    "Checked-in project configuration for DevGame (t3.json at the repository root). See https://t3.codes for documentation.",
+    "Checked-in project configuration for DevGame (devgame.json at the repository root). See https://devgame.fun for documentation.",
 });
 export type T3ProjectFile = typeof T3ProjectFile.Type;

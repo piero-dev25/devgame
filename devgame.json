@@ -1,5 +1,5 @@
 {
-  "$schema": "https://t3.codes/schema/t3.json",
+  "$schema": "https://devgame.fun/schema/devgame.json",
   "iconPath": "assets/dev/blueprint-web-apple-touch-180.png",
   "scripts": [
     {

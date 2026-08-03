@@ -98,6 +98,37 @@ describe("fork severance from upstream infrastructure", () => {
     },
   );
 
+  /**
+   * URL schemes are registered with the OPERATING SYSTEM, so they are as much
+   * a public identity as the bundle id: they appear in deep links, in the
+   * macOS/Linux handler registry, and in the OAuth callback origin that Clerk
+   * allowlists.
+   *
+   * Asserted separately from UPSTREAM_LITERALS because the bare token `t3code`
+   * cannot go in that list. Twenty-two localStorage keys still carry a
+   * `t3code:` prefix and are deliberately left alone — they are invisible to
+   * users, renaming them would wipe saved layouts and drafts, and each rename
+   * is permanent merge-conflict surface against upstream for no user-facing
+   * gain. So this check is scoped to the two files that declare OS-level
+   * schemes.
+   *
+   * The gap it closes is real: the schemes survived every earlier rename pass
+   * precisely because the existing guard only looked for the hyphenated
+   * `t3-code`, and `t3code-dev` walked straight through it.
+   */
+  const SCHEME_DECLARING_FILES = ["apps/mobile/app.config.ts", "scripts/build-desktop-artifact.ts"];
+
+  it.each(SCHEME_DECLARING_FILES)("%s registers our own URL scheme, not upstream's", (path) => {
+    const source = readRepoFile(path);
+
+    for (const upstreamScheme of ['"t3code"', '"t3code-dev"', '"t3code-preview"']) {
+      expect(source, `${path} still registers ${upstreamScheme}`).not.toContain(upstreamScheme);
+    }
+    // Asserted PRESENT too: a file that simply lost its scheme block would pass
+    // a pure absence check while shipping an app that handles no deep links.
+    expect(source, `${path} declares no devgame scheme`).toContain("devgame");
+  });
+
   it("leaves no upstream domain as a shell default in the release workflow", () => {
     const workflow = readRepoFile(".github/workflows/release.yml");
     const shellDefaults = workflow.match(/\$\{[A-Z0-9_]+:-[^}]*\}/g) ?? [];
