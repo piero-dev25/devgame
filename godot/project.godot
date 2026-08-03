@@ -1,0 +1,8 @@
+[application]
+
+config/name="T3 Editor Presence — addon test project"
+config/features=PackedStringArray("4.7")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/editor_presence/plugin.cfg")
