@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DevGame — an agent workbench for game developers</title>
+    <meta
+      name="description"
+      content="DevGame runs coding agents against your game project, and knows what you have selected in Unity, Unreal or Godot. Local-first, open source, your own subscriptions."
+    />
+    <meta property="og:title" content="DevGame" />
+    <meta
+      property="og:description"
+      content="An agent workbench for game developers. Local-first, open source."
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0d10;
+        --panel: #14171c;
+        --line: #23272e;
+        --text: #e8eaed;
+        --muted: #9aa3ad;
+        --accent: #7cc4ff;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          16px/1.65 ui-sans-serif,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Inter,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .wrap {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 0 24px;
+      }
+      header {
+        padding: 88px 0 40px;
+      }
+      h1 {
+        font-size: clamp(2.2rem, 6vw, 3.2rem);
+        line-height: 1.1;
+        margin: 0 0 16px;
+        letter-spacing: -0.02em;
+      }
+      .lede {
+        font-size: 1.15rem;
+        color: var(--muted);
+        margin: 0 0 32px;
+        max-width: 34em;
+      }
+      h2 {
+        font-size: 1.05rem;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin: 48px 0 12px;
+        font-weight: 600;
+      }
+      p {
+        margin: 0 0 16px;
+      }
+      a {
+        color: var(--accent);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin: 0 0 12px;
+      }
+      .btn {
+        display: inline-block;
+        padding: 12px 20px;
+        border-radius: 8px;
+        background: var(--accent);
+        color: #06243c;
+        font-weight: 650;
+        text-decoration: none;
+      }
+      .btn.secondary {
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--line);
+        font-weight: 500;
+      }
+      .note {
+        font-size: 0.92rem;
+        color: var(--muted);
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 20px 22px;
+        margin: 0 0 16px;
+      }
+      ul {
+        padding-left: 20px;
+        margin: 0 0 16px;
+      }
+      li {
+        margin: 0 0 8px;
+      }
+      code {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 2px 6px;
+        font-size: 0.9em;
+      }
+      footer {
+        margin: 72px 0 64px;
+        padding-top: 28px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+      footer a {
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <h1>DevGame</h1>
+        <p class="lede">
+          An agent workbench for game developers. Run coding agents against your project, with the
+          objects you have selected in Unity, Unreal or Godot already in the chat box before you
+          type.
+        </p>
+
+        <div class="row">
+          <a class="btn" href="https://github.com/piero-dev25/devgame" id="download">Get DevGame</a>
+          <a class="btn secondary" href="https://github.com/piero-dev25/devgame"
+            >Source on GitHub</a
+          >
+        </div>
+        <p class="note" id="download-note">
+          macOS builds are being prepared. The source is available now and builds from a clone.
+        </p>
+      </header>
+
+      <h2>Editor presence</h2>
+      <p>
+        Select a prefab in Unity, a node in Godot, an actor in Unreal — it turns up as a chip in the
+        composer straight away, and travels with the message you send. No copying paths, no
+        describing what you mean.
+      </p>
+      <p class="note">
+        Plugins are included for Unity, Unreal and Godot. Unreal ships as an Editor Python plugin
+        and Godot as a GDScript addon, so neither needs a compile toolchain to install.
+      </p>
+
+      <h2>It runs on your machine</h2>
+      <div class="card">
+        <p style="margin-bottom: 12px">
+          DevGame drives the agents you already pay for — Claude Code, Codex, Cursor, Grok, OpenCode
+          — using your own subscriptions. The backend runs locally, on your project, on your
+          machine.
+        </p>
+        <p class="note" style="margin: 0">
+          You can use DevGame from a browser or a phone, but that is a client pairing to the backend
+          on your own computer. There is no hosted version that runs your project for you, and your
+          code is not uploaded anywhere.
+        </p>
+      </div>
+
+      <h2>Open source</h2>
+      <p>
+        DevGame is MIT-licensed and developed in the open. If it ever goes a direction you dislike,
+        you have everything you need to fork it.
+      </p>
+      <ul>
+        <li><a href="https://github.com/piero-dev25/devgame">Source code</a></li>
+        <li><a href="https://github.com/piero-dev25/devgame/releases">Releases</a></li>
+      </ul>
+
+      <footer>
+        <p>
+          <strong
+            >DevGame is a fork of <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, built
+            by T3 Tools, Inc.</strong
+          >
+          Almost everything that makes this application work was written by them — the agent
+          harness, the terminal, checkpointing, source control and all four client apps. We
+          specialised it for game development; we did not build it.
+        </p>
+        <p>
+          If you want the general-purpose agent harness rather than the game-development one, use
+          <a href="https://github.com/pingdotgg/t3code">T3 Code</a> — it is the better tool for that
+          job and it is where this came from.
+        </p>
+        <p>DevGame is made by Ironmind Studios Inc. MIT licensed.</p>
+      </footer>
+    </div>
+  </body>
+</html>

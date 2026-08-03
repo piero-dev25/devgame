@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!--
+    DevGame app mark.
+
+    One shape doing two jobs: it is the `>` of a shell prompt and the ▶ of a
+    play button. Dev and game in the same glyph, which is the whole product.
+
+    Drawn as vector rather than generated as an image because an app icon has
+    to survive 16x16 in a Finder list and a Dock at small sizes. Generated
+    artwork mushes there; a single high-contrast stroke does not.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#171B22" />
+      <stop offset="100%" stop-color="#0A0C10" />
+    </linearGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#9BD3FF" />
+      <stop offset="100%" stop-color="#4FA6EE" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="228" ry="228" fill="url(#bg)" />
+  <rect x="8" y="8" width="1008" height="1008" rx="222" ry="222"
+        fill="none" stroke="#2A313B" stroke-width="6" />
+
+  <!-- Optically centred: a chevron's visual mass sits left of its bounding box. -->
+  <path d="M 372 286 L 654 512 L 372 738"
+        fill="none"
+        stroke="url(#mark)"
+        stroke-width="118"
+        stroke-linecap="round"
+        stroke-linejoin="round" />
+</svg>

@@ -1,12 +1,12 @@
 {
   "name": "com.ironmind.editor-presence",
-  "displayName": "T3 Editor Presence",
+  "displayName": "DevGame Editor Presence",
   "version": "0.1.0",
-  "description": "Streams the current Unity Editor selection to a T3 Code chat composer over the Editor Presence Protocol (EPP). See docs/workbench/spec-editor-presence.md in the t3code repo for the protocol and pairing flow. Editor-only; nothing in this package ships in a player build.",
+  "description": "Streams the current Unity Editor selection to a DevGame chat composer over the Editor Presence Protocol (EPP). See docs/workbench/spec-editor-presence.md in the DevGame repo for the protocol and pairing flow. Editor-only; nothing in this package ships in a player build.",
   "keywords": [
+    "devgame",
     "editor-presence",
     "epp",
-    "t3",
     "workbench"
   ],
   "author": {
@@ -14,6 +14,6 @@
   },
   "type": "tool",
   "dependencies": {},
-  "documentationUrl": "https://github.com/ironmindstudios/t3code/blob/main/docs/workbench/spec-editor-presence.md",
+  "documentationUrl": "https://github.com/piero-dev25/devgame/blob/main/docs/workbench/spec-editor-presence.md",
   "unity": "6000.3"
 }
