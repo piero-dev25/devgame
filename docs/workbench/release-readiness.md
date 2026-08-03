@@ -372,3 +372,65 @@ cannot be built, and a fat Release build fails unless `ONLY_ACTIVE_ARCH=YES` is
 passed. Pre-existing, unrelated to the severance, and not blocking for
 TestFlight since device builds are arm64 — but it is a real constraint on who
 can build this and should be in the build docs rather than rediscovered.
+
+---
+
+## 8. Apple account path — DECIDED
+
+**DevGame is published by Ironmind Studios Inc.** (owner decision, 2026-08-03).
+
+This supersedes §3.1 D3 and materially shortens §3.2 A1: an Apple Developer
+membership already exists on this machine — team `A865JH62VP`, used by the
+WellnessCompanion project via a `ZELA_DEV_TEAM` variable, with an App Store
+Connect API key already on disk there. So enrolment is not a cold start.
+
+### The constraint that decides the sequence
+
+**Bundle identifiers are globally unique across Apple, and the team that
+creates the App Store Connect record owns it.** Apple's transfer criteria
+require an app to have had **at least one version released to the App Store**
+before it can move between accounts, and TestFlight-only apps that never
+shipped publicly may not be transferable at all.
+
+So "TestFlight under the existing team now, move to Ironmind later" is **not a
+safe plan**. It risks binding `com.devgame.app` to the wrong team with no clean
+exit.
+
+### What that does and does not block
+
+| Activity                        | Needs the Ironmind team first?                                    |
+| ------------------------------- | ----------------------------------------------------------------- |
+| Simulator builds                | **No**                                                            |
+| Local device builds and signing | **No** — creates no App Store Connect record, locks no identifier |
+| Internal iteration              | **No**                                                            |
+| **TestFlight**                  | **YES** — requires the ASC record, which binds the bundle id      |
+
+### The path
+
+1. **Start the Ironmind Studios Inc. Organization enrolment now.** It needs a
+   D-U-N-S number; an incorporated entity often already has one, but issuance
+   takes several days otherwise. This is the only long-lead item left and it
+   runs unattended.
+2. **Meanwhile use the existing team for local work**, via
+   `T3CODE_APPLE_TEAM_ID`. That variable already drives both mobile
+   (`app.config.ts`, absent-when-unset) and desktop
+   (`scripts/build-desktop-artifact.ts`, format-validated), so switching teams
+   later is one environment variable and no code change.
+3. **Do not create the App Store Connect record until the Ironmind team
+   exists.** That is the point of no return.
+
+### Worth copying rather than reinventing
+
+WellnessCompanion's `ios-native-testflight-release` skill and its release
+script are a better starting point than anything in this fork's pipeline. Its
+refusals are the valuable part: dirty checkout, mismatched SHA, expired or
+wrong provisioning profile, missing distribution identity, failed export
+verification — and it runs a no-upload archive/export lane before any upload,
+copies the `.p8` into a mode-600 temp dir removed on exit, and treats
+TestFlight upload and App Review submission as separate deliberate actions.
+
+### Confidence
+
+The transfer rules above come from Apple's published criteria and developer
+forum reports, not from anything testable here. Before relying on "we can move
+it later" — which this plan deliberately does not — confirm with Apple.
