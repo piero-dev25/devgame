@@ -50,6 +50,9 @@ export {
   type MigrateLoadedLayoutInput,
   type MigrateLoadedLayoutResult,
 } from "./layoutMigration";
+// Fix round, finding #1 ("app bricks in 3 clicks"): a dockview tree with
+// zero panels is never a valid state to persist or restore.
+export { isEmptyDockviewTree } from "./emptyLayoutGuard";
 export {
   LAYOUT_SCHEMA_VERSION,
   type LayoutFile,

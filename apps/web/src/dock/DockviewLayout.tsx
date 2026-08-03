@@ -25,6 +25,7 @@
 // twMerge(...)` signature, so every call site below is unchanged).
 import { createDockview, type DockviewApi, type DockviewTheme } from "dockview";
 import "dockview/dist/styles/dockview.css";
+import { RotateCcw } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -37,6 +38,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { Button } from "~/components/ui/button";
 import { cn } from "~/lib/utils";
 
 import {
@@ -45,6 +47,7 @@ import {
   buildPresetSafely,
   createLocalStorageLayoutStorage,
   findUnknownPanelIds,
+  isEmptyDockviewTree,
   migrateLoadedLayout,
   parseLayoutFile,
   syncFloatingConstraints,
@@ -320,6 +323,18 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
 
     const persist = useCallback(
       (api: DockviewApi) => {
+        const dockviewJson = api.toJSON();
+        // Fix round, finding #1 ("app bricks in 3 clicks"): a dock with zero
+        // panels is never a valid state to persist. This is the LAST-RESORT
+        // guard — `scheduleSave` below already recovers the live view before
+        // its debounce fires, so in the normal flow this branch never
+        // actually triggers — but `persist` also gets called directly from
+        // the mount effect's unmount-flush (a workspace switch mid-debounce),
+        // which bypasses that recovery entirely. Skipping the save here
+        // rather than trying to recover `api` is deliberate: a component
+        // about to be torn down (`api.dispose()` runs right after this
+        // cleanup) has nothing useful left to apply a fresh preset TO.
+        if (isEmptyDockviewTree(dockviewJson)) return;
         // `knownPanelIds` stamped on EVERY save (not just after a migration)
         // — fix round after 7606dff45: this is what lets a FUTURE newly
         // registered panel be told apart from one the user closes on
@@ -329,7 +344,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // would.
         const file = buildLayoutFile({
           preset: presetId,
-          dockviewJson: api.toJSON(),
+          dockviewJson,
           knownPanelIds: panelRegistry.ids(),
         });
         void storage.save(workspaceId, file).then(reportSaveResult);
@@ -413,6 +428,35 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         clearTimeout(persistTimer);
         persistTimer = setTimeout(() => {
           persistPending = false;
+          // Fix round, finding #1 ("app bricks in 3 clicks"): close every
+          // tab (Files, then Chat, then Sidebar) and the LIVE view goes
+          // blank right now, in this tab, with nothing left to right-click
+          // — no reload needed to reach it. Checked here rather than
+          // synchronously inside the `onDidLayoutChange`/`onDidMutateLayout`
+          // handlers themselves: this callback only runs after the debounce
+          // delay, well outside dockview-core's own call stack for whatever
+          // action (a close, in practice) just emptied the tree — the same
+          // "let the current call stack finish" reasoning
+          // reactTabRenderer.tsx's `dispose()` already uses for its
+          // microtask-deferred unmount, at a coarser (but here, harmless)
+          // grain.
+          if (isEmptyDockviewTree(api.toJSON())) {
+            const usedFallback = applyPreset(api);
+            // `applyPreset`'s `api.fromJSON(...)` immediately re-fires this
+            // same `onDidLayoutChange`/`onDidMutateLayout` pair with the now
+            // non-empty tree, which schedules its OWN normal (non-empty)
+            // save below — deliberately NOT suppressed via
+            // `suppressRecoveryPersistRef`, unlike the import-refusal path:
+            // there is no existing saved arrangement worth protecting from
+            // this overwrite, the whole point is that storage must NOT keep
+            // holding the empty tree either, or a reload lands right back
+            // on the brick.
+            setNotice(
+              "Closing the last tab would have left this workspace with nothing open, so the default layout was reopened." +
+                (usedFallback ? ` ${presetFallbackNotice}` : ""),
+            );
+            return;
+          }
           maybePersist();
         }, PERSIST_DEBOUNCE_MS);
       };
@@ -462,36 +506,63 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
               panelRegistry,
               defaultTree,
             });
-            api.fromJSON(migration.tree);
 
-            const unknown = findUnknownPanelIds(migration.tree, panelRegistry.knownIds());
-            const notices: string[] = [];
-            if (unknown.length > 0) {
-              notices.push(
-                `This workspace's saved layout references a panel type no longer in the catalog (${unknown.join(", ")}). Shown as a quarantine card — close it or reset to remove it.`,
+            // Fix round, finding #1: belt-and-suspenders — `persist()`
+            // already refuses to WRITE an empty tree (see its own comment),
+            // so a file saved by a build with that guard should never
+            // reach here empty. But a file written before this fix
+            // existed, or restored from an export/import that skipped
+            // `persist()` — reachable via `handleImportFile`, guarded
+            // separately there — genuinely could still be empty. "Never a
+            // valid state to persist OR restore," restored halves this
+            // sentence.
+            //
+            // Deliberately an if/else, NOT an early `return` — this whole
+            // `if (loaded.status === "ok")` block sits above the
+            // `syncFloatingConstraints` loop and the
+            // `onDidLayoutChange`/`onDidMutateLayout` subscription setup
+            // further down this same function; a `return` here would exit
+            // `loadInitialLayout` before that subscription ever gets wired,
+            // silently turning off auto-save for the rest of this mount.
+            if (isEmptyDockviewTree(migration.tree)) {
+              const usedFallback = applyPreset(api);
+              setNotice(
+                `This workspace's saved layout was empty. Opened the default layout instead.` +
+                  (usedFallback ? ` ${presetFallbackNotice}` : ""),
               );
-            }
-            if (migration.unplaceablePanelIds.length > 0) {
-              // The one path where migration itself can't silently succeed —
-              // "say so rather than resetting" applies here exactly as much
-              // as it does to a corrupted file: the new panel(s) just won't
-              // be visible from THIS workspace's saved arrangement until a
-              // reset, and that's worth naming rather than leaving the user
-              // to wonder why a panel they've heard about isn't there.
-              notices.push(
-                `This workspace's saved layout couldn't be updated to include: ${migration.unplaceablePanelIds.join(", ")}. Reopen from the tab menu, or reset to get the current default layout.`,
-              );
-            }
-            setNotice(notices.length > 0 ? notices.join(" ") : null);
+            } else {
+              api.fromJSON(migration.tree);
 
-            if (migration.addedPanelIds.length > 0) {
-              // A successful migration IS a layout change — persist it now
-              // rather than leaving the on-disk file stale until the next
-              // incidental drag. Also refreshes `knownPanelIds` to include
-              // the panel(s) just added, so a LATER third panel's migration
-              // check has an accurate baseline rather than re-deriving one
-              // from a now-outdated snapshot.
-              persist(api);
+              const unknown = findUnknownPanelIds(migration.tree, panelRegistry.knownIds());
+              const notices: string[] = [];
+              if (unknown.length > 0) {
+                notices.push(
+                  `This workspace's saved layout references a panel type no longer in the catalog (${unknown.join(", ")}). Shown as a quarantine card — close it or reset to remove it.`,
+                );
+              }
+              if (migration.unplaceablePanelIds.length > 0) {
+                // The one path where migration itself can't silently
+                // succeed — "say so rather than resetting" applies here
+                // exactly as much as it does to a corrupted file: the new
+                // panel(s) just won't be visible from THIS workspace's
+                // saved arrangement until a reset, and that's worth naming
+                // rather than leaving the user to wonder why a panel
+                // they've heard about isn't there.
+                notices.push(
+                  `This workspace's saved layout couldn't be updated to include: ${migration.unplaceablePanelIds.join(", ")}. Reopen from the tab menu, or reset to get the current default layout.`,
+                );
+              }
+              setNotice(notices.length > 0 ? notices.join(" ") : null);
+
+              if (migration.addedPanelIds.length > 0) {
+                // A successful migration IS a layout change — persist it
+                // now rather than leaving the on-disk file stale until the
+                // next incidental drag. Also refreshes `knownPanelIds` to
+                // include the panel(s) just added, so a LATER third
+                // panel's migration check has an accurate baseline rather
+                // than re-deriving one from a now-outdated snapshot.
+                persist(api);
+              }
             }
           } catch {
             // Passed shape validation but dockview still rejected it (e.g. a
@@ -684,8 +755,33 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     );
 
     return (
-      <div className={cn("flex h-full min-h-0 flex-col", className)}>
+      <div className={cn("relative flex h-full min-h-0 flex-col", className)}>
         {notice ? <LayoutNotice message={notice} onDismiss={() => setNotice(null)} /> : null}
+        {/*
+          Fix round, finding #1 ("app bricks in 3 clicks"): the reachable
+          recovery affordance for `DockviewLayoutHandle.reset()` — implemented
+          since step 1, never attached to anything a person could actually
+          click. A SIBLING of `containerRef`'s div, not a child, and
+          absolutely positioned over it: it must render (and stay clickable)
+          regardless of whatever dockview itself is currently showing in
+          there, blank or not — the whole point is this can't itself become
+          part of the brick. The empty-layout guards above make reaching a
+          genuinely blank dock unlikely now, but this is deliberately
+          unconditional, not shown only when things look broken: a
+          defense-in-depth escape hatch for any OTHER way this workspace's
+          layout could end up stuck that this fix round didn't anticipate.
+        */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          aria-label="Reset workspace layout"
+          title="Reset workspace layout"
+          onClick={handleReset}
+          className="absolute top-1.5 right-1.5 z-10 text-muted-foreground hover:text-foreground"
+        >
+          <RotateCcw size={14} strokeWidth={2} />
+        </Button>
         <div ref={containerRef} className="min-h-0 flex-1" />
         {panelEntries.map((entry) =>
           createPortal(

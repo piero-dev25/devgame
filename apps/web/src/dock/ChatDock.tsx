@@ -277,26 +277,9 @@ function buildChatDockPreset(): SerializedDockview {
       },
     },
     panels: {
-      [SIDEBAR_PANEL_ID]: {
-        id: SIDEBAR_PANEL_ID,
-        contentComponent: SIDEBAR_PANEL_ID,
-        title: "Sidebar",
-        tabComponent: TAB_COMPONENT_NO_CLOSE,
-      },
-      [CHAT_PANEL_ID]: {
-        id: CHAT_PANEL_ID,
-        contentComponent: CHAT_PANEL_ID,
-        title: "Chat",
-        tabComponent: TAB_COMPONENT_NO_CLOSE,
-      },
-      [FILES_PANEL_ID]: {
-        id: FILES_PANEL_ID,
-        contentComponent: FILES_PANEL_ID,
-        title: "Files",
-        // Deliberately no `tabComponent: TAB_COMPONENT_NO_CLOSE` here — see
-        // this file's Files-panel registration comment for why it stays
-        // closeable, unlike sidebar/chat above.
-      },
+      [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
+      [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
+      [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
     },
     activeGroup: CHAT_GROUP_ID,
   };
