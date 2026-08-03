@@ -40,8 +40,11 @@ large upstream files.
 
 ## Where we already comply
 
-Measured against `69dfb7f09`: 82 files changed, 7,848 insertions, **104
-deletions**. Almost purely additive.
+Measured against `69dfb7f09`, first at 82 files / 7,848 insertions / **104
+deletions**, and again after the editor-presence work at 153 files / 18,320
+insertions / **106 deletions**. The fork more than doubled in size and added
+**two** deletions. Almost purely additive, and staying that way under growth is
+the part that matters.
 
 - **Our dock is 36 self-contained files** under `apps/web/src/dock/`. Zero
   merge surface. This is exactly "extract local UI into small components".
