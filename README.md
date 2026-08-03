@@ -1,4 +1,16 @@
-# T3 Code
+# GameDev Assist
+
+> **GameDev Assist is a fork of [T3 Code](https://github.com/pingdotgg/t3code), built by T3 Tools, Inc. and MIT-licensed.**
+>
+> Almost everything that makes this application work was written by them — the
+> agent harness, the terminal, checkpointing, source control, device pairing,
+> and all four client apps. We specialised it for game development; we did not
+> build it. Full credit, and what we actually added, in
+> [ATTRIBUTION.md](./ATTRIBUTION.md).
+>
+> If you want the general-purpose agent harness rather than the game-dev one,
+> **use [T3 Code](https://github.com/pingdotgg/t3code)** — it is the better tool
+> for that job and it is where this came from.
 
 T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 
