@@ -45,6 +45,7 @@ import {
   buildPresetSafely,
   createLocalStorageLayoutStorage,
   findUnknownPanelIds,
+  migrateLoadedLayout,
   parseLayoutFile,
   syncFloatingConstraints,
   type LayoutPresetFactory,
@@ -117,6 +118,17 @@ export interface DockviewLayoutProps {
    */
   fallbackPreset: LayoutPresetFactory;
   storage?: LayoutStorage;
+  /**
+   * Fix round after 7606dff45: workspace ids this caller has permanently
+   * retired (e.g. a previous `workspaceId` from before this dock started
+   * migrating layouts instead of bumping the key) and no longer reads from.
+   * Cleared from `storage` once, best-effort, on mount — `storage.clear()`
+   * on an already-absent key is a harmless no-op, so this is safe to pass
+   * the same list on every render/mount without tracking whether cleanup
+   * already ran. Generic on this component (not hardcoded to any one
+   * caller's history) so any consumer can retire a key the same way.
+   */
+  staleWorkspaceIds?: string[];
   // `| undefined` spelled out explicitly — this fork's tsconfig.base.json
   // sets `exactOptionalPropertyTypes: true` (the source repo's does not),
   // and ChatDock.tsx passes this straight through from its own optional
@@ -200,6 +212,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       presetRegistry,
       fallbackPreset,
       storage: storageProp,
+      staleWorkspaceIds,
       className,
     },
     forwardedRef,
@@ -234,6 +247,25 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     const saveFailureNoticeShownRef = useRef(false);
 
     const storage = useMemo(() => storageProp ?? createLocalStorageLayoutStorage(), [storageProp]);
+
+    // Best-effort, once per mount: purge any workspace ids the caller has
+    // permanently retired. Deliberately its own effect, independent of the
+    // main mount effect below (which only re-runs on workspaceId/presetId
+    // changes) — this has nothing to do with loading/persisting THIS
+    // workspace, and `storage.clear()` on an already-gone key is a no-op, so
+    // there's no correctness reason to gate it any more tightly than "ran
+    // once, this mount."
+    useEffect(() => {
+      for (const staleId of staleWorkspaceIds ?? []) {
+        void storage.clear(staleId);
+      }
+      // Deliberately `staleWorkspaceIds`-less deps — it's a caller-supplied
+      // constant list (ChatDock.tsx builds it at module scope), and
+      // re-running this on every render-identity change of that array would
+      // defeat the "once per mount" intent for no benefit: clearing an
+      // already-cleared key is a no-op either way.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [storage]);
 
     // `useState`'s lazy initializer, not `useMemo(..., [])` — React documents
     // `useMemo` as a discardable performance cache it may recompute, while
@@ -288,10 +320,21 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
 
     const persist = useCallback(
       (api: DockviewApi) => {
-        const file = buildLayoutFile({ preset: presetId, dockviewJson: api.toJSON() });
+        // `knownPanelIds` stamped on EVERY save (not just after a migration)
+        // — fix round after 7606dff45: this is what lets a FUTURE newly
+        // registered panel be told apart from one the user closes on
+        // purpose, the whole distinction `migrateLoadedLayout` depends on.
+        // Every save from here on refreshes the baseline to the CURRENT
+        // catalog, so it can never drift stale the way a one-time stamp
+        // would.
+        const file = buildLayoutFile({
+          preset: presetId,
+          dockviewJson: api.toJSON(),
+          knownPanelIds: panelRegistry.ids(),
+        });
         void storage.save(workspaceId, file).then(reportSaveResult);
       },
-      [storage, workspaceId, presetId, reportSaveResult],
+      [storage, workspaceId, presetId, panelRegistry, reportSaveResult],
     );
 
     useEffect(() => {
@@ -395,13 +438,61 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           loaded.status === "invalid" && loaded.reason === "version-mismatch";
         if (loaded.status === "ok") {
           try {
-            api.fromJSON(loaded.file.dockview);
-            const unknown = findUnknownPanelIds(loaded.file.dockview, panelRegistry.knownIds());
-            setNotice(
-              unknown.length > 0
-                ? `This workspace's saved layout references a panel type no longer in the catalog (${unknown.join(", ")}). Shown as a quarantine card — close it or reset to remove it.`
-                : null,
+            // Fix round after 7606dff45: a saved layout predating a newly
+            // registered panel used to just render as-is, missing that
+            // panel entirely — `CHAT_DOCK_WORKSPACE_ID` bumps were how
+            // ChatDock.tsx worked around that, which doesn't migrate
+            // anything, it points `storage.load` at a brand-new empty key
+            // and silently discards the whole saved arrangement. This is
+            // the real fix: reconcile the loaded tree against the CURRENT
+            // registry before applying it, grafting in anything newly
+            // registered at its default-preset position while leaving
+            // everything the user already had untouched. See
+            // `lib/layoutMigration.ts`'s own module doc for the full
+            // reasoning, including why "closed on purpose" is NOT
+            // re-migrated back in.
+            const { tree: defaultTree } = buildPresetSafely(
+              presetRegistry,
+              presetId,
+              fallbackPreset,
             );
+            const migration = migrateLoadedLayout({
+              loaded: loaded.file.dockview,
+              knownPanelIds: loaded.file.knownPanelIds,
+              panelRegistry,
+              defaultTree,
+            });
+            api.fromJSON(migration.tree);
+
+            const unknown = findUnknownPanelIds(migration.tree, panelRegistry.knownIds());
+            const notices: string[] = [];
+            if (unknown.length > 0) {
+              notices.push(
+                `This workspace's saved layout references a panel type no longer in the catalog (${unknown.join(", ")}). Shown as a quarantine card — close it or reset to remove it.`,
+              );
+            }
+            if (migration.unplaceablePanelIds.length > 0) {
+              // The one path where migration itself can't silently succeed —
+              // "say so rather than resetting" applies here exactly as much
+              // as it does to a corrupted file: the new panel(s) just won't
+              // be visible from THIS workspace's saved arrangement until a
+              // reset, and that's worth naming rather than leaving the user
+              // to wonder why a panel they've heard about isn't there.
+              notices.push(
+                `This workspace's saved layout couldn't be updated to include: ${migration.unplaceablePanelIds.join(", ")}. Reopen from the tab menu, or reset to get the current default layout.`,
+              );
+            }
+            setNotice(notices.length > 0 ? notices.join(" ") : null);
+
+            if (migration.addedPanelIds.length > 0) {
+              // A successful migration IS a layout change — persist it now
+              // rather than leaving the on-disk file stale until the next
+              // incidental drag. Also refreshes `knownPanelIds` to include
+              // the panel(s) just added, so a LATER third panel's migration
+              // check has an accurate baseline rather than re-deriving one
+              // from a now-outdated snapshot.
+              persist(api);
+            }
           } catch {
             // Passed shape validation but dockview still rejected it (e.g. a
             // panel referenced by the grid isn't in `panels`) — never crash on
@@ -547,9 +638,18 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
             return;
           }
           // Same reasoning as reset() — importing a file is an explicit
-          // replacement, so it persists and lifts any standing block.
+          // replacement, so it persists and lifts any standing block. The
+          // CURRENT registry (not whatever `knownPanelIds` the imported file
+          // itself carried, if any — it may have come from a different fork
+          // build with a different catalog entirely) becomes the new
+          // baseline: only a panel registered AFTER this import is eligible
+          // for a future migration, the same "explicit replacement" contract
+          // `persist()`/`handleReset()` already give a splitter drag or a
+          // reset.
           autoSaveBlockedRef.current = false;
-          void storage.save(workspaceId, decision.file).then(reportSaveResult);
+          void storage
+            .save(workspaceId, { ...decision.file, knownPanelIds: panelRegistry.ids() })
+            .then(reportSaveResult);
           const unknown = findUnknownPanelIds(decision.file.dockview, panelRegistry.knownIds());
           setNotice(
             unknown.length > 0

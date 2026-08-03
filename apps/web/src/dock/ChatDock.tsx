@@ -51,18 +51,37 @@ const CHAT_DOCK_PRESET_ID = "chat-dock-default";
  * — the same "workspace" DockviewLayoutProps already models, just with
  * exactly one workspace for now.
  *
- * Bumped from step 1's `"chat-dock"` to `"chat-dock-v2"` when the sidebar
- * panel was added, and now to `"chat-dock-v3"` for the SAME reason again:
- * this dev machine (and any other with a persisted step-2 layout) has a
- * saved grid whose third slot references `placeholder` — dockview restores
- * exactly what was saved, not the current default preset, so without a new
- * key the Files panel would silently never appear for anyone who already
- * has a layout on disk (recoverable via "Add tab", but not automatic, and
- * indistinguishable from a bug to whoever hits it). No migration is asked
- * for by this spec; bumping the key is the same honest reset step 2 already
- * established the precedent for.
+ * STABLE FROM HERE ON — fix round after 7606dff45, reversing the precedent
+ * step 1/2 set. This key was bumped twice (`"chat-dock"` →
+ * `"chat-dock-v2"` when the sidebar panel shipped, → `"chat-dock-v3"` when
+ * Files did): each bump doesn't migrate anything, it just points
+ * `storage.load` at a brand-new, empty key, so the workspace's saved
+ * arrangement is silently replaced by the default preset the next time
+ * anyone opens it. The owner's own dragged arrangement was sitting in the
+ * orphaned `"chat-dock-v2"` key, thrown away the moment Files shipped — a
+ * real user-visible regression, not a hypothetical one, and the exact class
+ * of bug `DockviewLayout.tsx`'s save-failure notice exists to PREVENT
+ * (never lose a saved arrangement silently) reintroduced through a
+ * different door.
+ *
+ * `DockviewLayout.tsx`'s `loadInitialLayout` now migrates a saved layout
+ * forward via `lib/layoutMigration.ts`'s `migrateLoadedLayout` instead: a
+ * newly registered panel gets grafted into the EXISTING saved arrangement
+ * at its default-preset position, and every panel the saved layout already
+ * had stays exactly where the user put it. That makes bumping this key
+ * unnecessary going forward — the whole reason it existed was "a new panel
+ * won't show up in an old saved layout," and that's no longer true.
+ * `"chat-dock-v2"` was picked as the value to settle on (not a fresh
+ * `"chat-dock-v3"` or back to `"chat-dock"`) because it's the real key the
+ * owner's actual customized arrangement already lives under — reusing it
+ * means the very next load migrates that real arrangement forward instead
+ * of needing anyone to have foreseen this fix before it existed. The
+ * genuinely dead `"chat-dock"` (v1) key, and `"chat-dock-v3"` in case any
+ * environment wrote to it during the (brief) window it was live, are purged
+ * via `staleWorkspaceIds` below rather than left to accumulate forever.
  */
-const CHAT_DOCK_WORKSPACE_ID = "chat-dock-v3";
+const CHAT_DOCK_WORKSPACE_ID = "chat-dock-v2";
+const CHAT_DOCK_STALE_WORKSPACE_IDS = ["chat-dock", "chat-dock-v3"];
 const CHAT_DOCK_WORKSPACE_NAME = "Chat";
 
 /**
@@ -107,6 +126,13 @@ chatDockPanelRegistry.register({
   component: SidebarPanel,
   defaultLocation: "left",
   singleton: true,
+  // Fix round after the "app bricks in 3 clicks" critique: this is now the
+  // ONE place this is decided, read by buildChatDockPreset() below,
+  // tabContextMenu.ts's close-item gate, and its "Add tab" re-add call.
+  // Load-bearing, not decorative: SidebarPanel.tsx's window keydown
+  // listeners (thread prev/next, Cmd+1..9) only exist while this panel
+  // stays mounted — see this file's own comment further down.
+  closeable: false,
 });
 
 chatDockPanelRegistry.register({
@@ -125,6 +151,10 @@ chatDockPanelRegistry.register({
   // it (see catalog.tsx's `session` entry, which flips it the other way for
   // its own different reason).
   singleton: true,
+  // Same reasoning as sidebar's `closeable: false` above — this is the ONE
+  // dock a person actually talks to, closing it should never be one
+  // right-click away with no other route back in.
+  closeable: false,
 });
 
 // step-1/step-2 scratch panel. Kept REGISTERED (still reachable via the tab
@@ -189,7 +219,25 @@ chatDockPanelRegistry.register({
  * listeners (thread prev/next, Cmd+1..9) alive. Files is NOT no-close — see
  * its own registration comment above for why that's a deliberate
  * difference, not an oversight.
+ *
+ * `presetPanelEntry` below reads `closeable` off the REGISTRY rather than
+ * this function choosing `tabComponent` independently — fix round after the
+ * "app bricks in 3 clicks" critique: two places deciding the same fact
+ * (this preset builder, and `tabContextMenu.ts`'s close-gate/re-add) is
+ * exactly how "no-close" silently stopped meaning anything. Now there is
+ * one place (`PanelDefinition.closeable`, set at registration above), and
+ * every caller reads it.
  */
+function presetPanelEntry(id: string, title: string): SerializedDockview["panels"][string] {
+  const definition = chatDockPanelRegistry.get(id);
+  return {
+    id,
+    contentComponent: id,
+    title,
+    ...(definition?.closeable === false ? { tabComponent: TAB_COMPONENT_NO_CLOSE } : {}),
+  };
+}
+
 function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
@@ -364,6 +412,7 @@ export function ChatDock(props: ChatDockProps) {
         panelRegistry={chatDockPanelRegistry}
         presetRegistry={chatDockPresetRegistry}
         fallbackPreset={chatDockFallbackPreset}
+        staleWorkspaceIds={CHAT_DOCK_STALE_WORKSPACE_IDS}
         className={className}
       />
     </ThreadRouteContext.Provider>

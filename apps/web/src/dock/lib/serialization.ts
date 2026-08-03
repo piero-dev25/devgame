@@ -1,5 +1,6 @@
 // Ported verbatim (extension stripped) from gamedev-workbench's
-// app/web/src/lib/layout/serialization.ts.
+// app/web/src/lib/layout/serialization.ts. `knownPanelIds` added in the fix
+// round after 7606dff45 — not present in the source.
 import type { SerializedDockview } from "dockview";
 
 import { LAYOUT_SCHEMA_VERSION, type LayoutFile } from "./types";
@@ -7,6 +8,11 @@ import { LAYOUT_SCHEMA_VERSION, type LayoutFile } from "./types";
 export interface BuildLayoutFileParams {
   preset: string;
   dockviewJson: SerializedDockview;
+  /** Every panel id the catalog knows about at save time — see
+   * `LayoutFile.knownPanelIds`'s own doc. Optional so a caller that
+   * genuinely doesn't have a registry handy (none currently exist) still
+   * gets a valid file, just without a migration baseline. */
+  knownPanelIds?: string[];
   /** Injectable clock for tests; defaults to `() => new Date().toISOString()`. */
   now?: () => string;
 }
@@ -18,7 +24,12 @@ export interface BuildLayoutFileParams {
  * never reads `floating` back, so it can't drift from the opaque blob and
  * become a second source of truth.
  */
-export function buildLayoutFile({ preset, dockviewJson, now }: BuildLayoutFileParams): LayoutFile {
+export function buildLayoutFile({
+  preset,
+  dockviewJson,
+  knownPanelIds,
+  now,
+}: BuildLayoutFileParams): LayoutFile {
   const savedAt = (now ?? (() => new Date().toISOString()))();
   return {
     version: LAYOUT_SCHEMA_VERSION,
@@ -26,6 +37,9 @@ export function buildLayoutFile({ preset, dockviewJson, now }: BuildLayoutFilePa
     dockview: dockviewJson,
     floating: dockviewJson.floatingGroups ?? [],
     savedAt,
+    // `exactOptionalPropertyTypes: true` — omit the key entirely rather than
+    // ever assigning it an explicit `undefined`.
+    ...(knownPanelIds ? { knownPanelIds } : {}),
   };
 }
 
@@ -69,7 +83,7 @@ export function parseLayoutValue(parsed: unknown): ParseLayoutResult {
     return { ok: false, reason: "invalid-shape", message: "layout must be a JSON object" };
   }
 
-  const { version, preset, dockview, floating, savedAt } = parsed;
+  const { version, preset, dockview, floating, savedAt, knownPanelIds } = parsed;
 
   if (
     typeof preset !== "string" ||
@@ -96,6 +110,17 @@ export function parseLayoutValue(parsed: unknown): ParseLayoutResult {
     };
   }
 
+  // Genuinely optional, not just missing-therefore-invalid: every layout
+  // saved before this field existed lacks it, and that's a fully valid,
+  // fully readable file — see LayoutFile.knownPanelIds's own doc. Present
+  // but the wrong shape (not a string array) is different: that's a file
+  // this build should refuse to half-trust, so it's treated as absent
+  // rather than propagating a malformed value into the migration logic that
+  // reads it.
+  const isValidKnownPanelIds =
+    knownPanelIds === undefined ||
+    (Array.isArray(knownPanelIds) && knownPanelIds.every((id) => typeof id === "string"));
+
   return {
     ok: true,
     file: {
@@ -104,6 +129,7 @@ export function parseLayoutValue(parsed: unknown): ParseLayoutResult {
       dockview: dockview as unknown as SerializedDockview,
       floating: floating as LayoutFile["floating"],
       savedAt,
+      ...(isValidKnownPanelIds && Array.isArray(knownPanelIds) ? { knownPanelIds } : {}),
     },
   };
 }

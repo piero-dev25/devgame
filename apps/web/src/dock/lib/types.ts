@@ -34,6 +34,23 @@ export interface LayoutFile {
   dockview: SerializedDockview;
   floating: NonNullable<SerializedDockview["floatingGroups"]>;
   savedAt: string;
+  /**
+   * Fix round after 7606dff45 — every panel id the catalog knew about at
+   * save time. This is what `lib/layoutMigration.ts`'s `migrateLoadedLayout`
+   * uses to tell "newly registered since this was saved, migrate it in"
+   * apart from "was already known and the user closed it on purpose, leave
+   * it closed" — a distinction the grid/panels data alone can't make, since
+   * both cases look identical (the panel is simply absent from both).
+   *
+   * Optional, NOT because it's unimportant, but because every layout saved
+   * before this field existed doesn't have it — see `migrateLoadedLayout`'s
+   * own doc for the fallback rule that applies when it's absent. Not a
+   * `LAYOUT_SCHEMA_VERSION` bump: an old file without this field is still
+   * fully readable as-is, just with a less precise migration baseline —
+   * that's a smaller claim than "this build can't read this file at all,"
+   * which is the only thing a version bump is for.
+   */
+  knownPanelIds?: string[];
 }
 
 /**
@@ -58,6 +75,28 @@ export interface PanelDefinition<P extends object = Record<string, unknown>> {
   minHeight?: number;
   /** Only one instance of this panel may exist per workspace layout. */
   singleton?: boolean;
+  /**
+   * Fix round after the "app bricks in 3 clicks" critique: whether THIS
+   * panel type may ever be closed. Defaults to `true` (closeable) when
+   * omitted — most panels have no reason to refuse it.
+   *
+   * Previously "no-close" was expressed only as a literal `tabComponent:
+   * TAB_COMPONENT_NO_CLOSE` string on a PRESET's panel entry — which hid the
+   * × visually but did nothing else: `tabContextMenu.ts`'s right-click menu
+   * pushed `"close"` unconditionally regardless of it (closing the sidebar
+   * that way silently killed T3's Cmd+1..9 shortcuts), and re-adding a
+   * closed panel via "Add tab" called `api.addPanel()` with no
+   * `tabComponent` at all, silently downgrading a permanently-protected
+   * panel to closeable on every round trip. Two independent bugs, same root
+   * cause: "closeable" was a per-INSTANCE dockview string nobody but the
+   * preset builder ever set, instead of a property of the panel TYPE itself.
+   *
+   * This field is now the single source of truth, read by all three call
+   * sites that used to each decide independently: `buildChatDockPreset()`
+   * (ChatDock.tsx, for the initial default layout), `tabContextMenu.ts`'s
+   * close-item gate, and its `addPanel()` re-add call.
+   */
+  closeable?: boolean;
 }
 
 export interface PanelProps<P extends object = Record<string, unknown>> {

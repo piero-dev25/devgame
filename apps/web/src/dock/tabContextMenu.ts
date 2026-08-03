@@ -2,9 +2,16 @@
 // app/web/src/components/layout/tabContextMenu.ts. Required in step 1 —
 // DockviewLayout.tsx imports and calls this inside `createDockview()`;
 // omitting it fails the build (spec-dock-step-1.md, correction 1).
+//
+// Fix round after the "app bricks in 3 clicks" critique (findings #2/#3):
+// this file used to push `"close"` unconditionally and call `api.addPanel()`
+// with no `tabComponent`, both ignoring whether the panel's catalog entry
+// (`PanelDefinition.closeable`) says it must never be closed. Both are fixed
+// below — see `lib/types.ts`'s `closeable` doc for the full history.
 import type { ContextMenuItem, DockviewApi, DockviewGroupPanel, IDockviewPanel } from "dockview";
 
 import type { PanelRegistry } from "./lib/panelRegistry";
+import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
 
 export interface BuildTabContextMenuParams {
   panel: IDockviewPanel;
@@ -37,8 +44,20 @@ export function buildTabContextMenuItems({
         }
       },
     },
-    "close",
   ];
+
+  // Finding #2: `"close"` is dockview's own BUILT-IN menu item — it calls
+  // the panel's close action directly, with no awareness of this catalog's
+  // `closeable` flag at all. The visible × (reactTabRenderer.tsx's
+  // `showClose`) was never the only way to close a tab; this menu item was
+  // a second, unguarded door to the exact same action. Registry lookup
+  // defaults to closeable when a panel id isn't found at all (e.g. a
+  // quarantined/unknown panel) — refusing to close something we can't even
+  // identify would be a worse failure mode than allowing it.
+  const openPanelDefinition = registry.get(panel.id);
+  if (openPanelDefinition?.closeable !== false) {
+    items.push("close");
+  }
 
   // A panel id is unique across the whole dockview, so "addable" means
   // "not open anywhere yet" — including elsewhere in this same group.
@@ -66,6 +85,16 @@ export function buildTabContextMenuItems({
             component: definition.id,
             title: definition.title,
             position: { referenceGroup: group },
+            // Finding #3: omitting this used to mean re-adding a panel via
+            // "Add tab" silently fell through to `DockviewLayout.tsx`'s
+            // `defaultTabComponent` (`TAB_COMPONENT_WITH_CLOSE`) even for a
+            // permanently-protected panel — one close-then-reopen round trip
+            // downgraded it forever. Key omitted entirely (not
+            // `exactOptionalPropertyTypes`-legal to assign `undefined`) for
+            // a closeable panel: matches the "let the real default handle
+            // it" convention `buildChatDockPreset()`'s own panels map
+            // already uses, one behaviour, one place it's decided.
+            ...(definition.closeable === false ? { tabComponent: TAB_COMPONENT_NO_CLOSE } : {}),
           });
         },
       });

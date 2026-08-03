@@ -42,6 +42,14 @@ export { TAB_COMPONENT_NO_CLOSE, TAB_COMPONENT_WITH_CLOSE } from "./tabComponent
 // functions — see their own files for the finding each one closes.
 export { decideImportedLayoutAction, type ImportedLayoutAction } from "./importDecision";
 export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
+// Fix round after 7606dff45: migrates a saved layout forward when the
+// catalog has grown, instead of the workspaceId-bump-and-discard pattern
+// that used to be the only way this dock handled that case.
+export {
+  migrateLoadedLayout,
+  type MigrateLoadedLayoutInput,
+  type MigrateLoadedLayoutResult,
+} from "./layoutMigration";
 export {
   LAYOUT_SCHEMA_VERSION,
   type LayoutFile,
