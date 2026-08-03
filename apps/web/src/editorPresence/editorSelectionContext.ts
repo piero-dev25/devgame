@@ -86,3 +86,122 @@ export function appendEditorSelectionToPrompt(
   const trimmed = prompt.trim();
   return trimmed.length > 0 ? `${trimmed}\n\n${block}` : block;
 }
+
+// --------------------------------------------------------------------------
+// Transcript-side counterpart: extract, don't render raw markup
+// --------------------------------------------------------------------------
+//
+// Mirrors apps/web/src/lib/elementContext.ts's extractTrailingElementContexts
+// exactly: same trailing-anchored match, same "not found -> return the
+// prompt unchanged" contract, same header/body-style entry shape (adapted to
+// this block's own fields) so a message with both an `<element_context>` and
+// an `<editor_selection>` block extracts and renders in the same pattern.
+
+export interface ExtractedEditorSelectionEntry {
+  readonly label: string;
+  readonly kind: string;
+  readonly pinned: boolean;
+  readonly id: string | null;
+  readonly path: string | null;
+  readonly detail: string | null;
+}
+
+export interface ExtractedEditorSelection {
+  readonly promptText: string;
+  readonly entries: ReadonlyArray<ExtractedEditorSelectionEntry>;
+  /** From the block's own truncation notice, if present — surfaced in the
+   * transcript too, for the same reason it's surfaced at send time: fewer
+   * objects rode along than were actually selected/pinned, and that must
+   * never be silent. */
+  readonly truncatedCount: number;
+}
+
+const TRAILING_EDITOR_SELECTION_BLOCK_PATTERN =
+  /\n*<editor_selection>\n([\s\S]*?)\n<\/editor_selection>\s*$/;
+const EDITOR_SELECTION_HEADER_PATTERN = /^- (.+) \(([^()]+)\)( \[pinned\])?:$/;
+const EDITOR_SELECTION_TRUNCATION_PATTERN =
+  /^\(\+(\d+) more selected\/pinned objects? not shown\)$/;
+
+interface MutableEditorSelectionEntry {
+  label: string;
+  kind: string;
+  pinned: boolean;
+  id: string | null;
+  path: string | null;
+  detail: string | null;
+}
+
+function parseEditorSelectionBlockBody(body: string): {
+  entries: ExtractedEditorSelectionEntry[];
+  truncatedCount: number;
+} {
+  const entries: ExtractedEditorSelectionEntry[] = [];
+  let truncatedCount = 0;
+  let current: MutableEditorSelectionEntry | null = null;
+  const commit = () => {
+    if (current) entries.push(current);
+    current = null;
+  };
+  for (const line of body.split("\n")) {
+    const truncationMatch = EDITOR_SELECTION_TRUNCATION_PATTERN.exec(line);
+    if (truncationMatch) {
+      commit();
+      truncatedCount = Number(truncationMatch[1]);
+      continue;
+    }
+    const headerMatch = EDITOR_SELECTION_HEADER_PATTERN.exec(line);
+    if (headerMatch) {
+      commit();
+      current = {
+        label: headerMatch[1]!,
+        kind: headerMatch[2]!,
+        pinned: headerMatch[3] !== undefined,
+        id: null,
+        path: null,
+        detail: null,
+      };
+      continue;
+    }
+    if (!current) continue;
+    const idMatch = /^ {2}id: (.+)$/.exec(line);
+    if (idMatch) {
+      current.id = idMatch[1]!;
+      continue;
+    }
+    const pathMatch = /^ {2}path: (.+)$/.exec(line);
+    if (pathMatch) {
+      current.path = pathMatch[1]!;
+      continue;
+    }
+    const detailMatch = /^ {2}detail: (.+)$/.exec(line);
+    if (detailMatch) {
+      current.detail = detailMatch[1]!;
+    }
+  }
+  commit();
+  return { entries, truncatedCount };
+}
+
+/**
+ * Detects (and strips) a trailing `<editor_selection>` block for transcript
+ * display, so a sent message shows its chips rather than raw `<editor_selection>`
+ * markup. Returns the prompt unchanged, with no entries, whenever the block
+ * isn't there, isn't well-formed, or is well-formed but contains no
+ * recognizable entry — the last case matters as much as the first two: a
+ * `<editor_selection>...</editor_selection>` block that happens not to be
+ * ours (hand-typed by a user, or from a future format this build doesn't
+ * understand) must render as plain text, not silently vanish because the
+ * outer tags matched.
+ */
+export function extractTrailingEditorSelection(prompt: string): ExtractedEditorSelection {
+  const match = TRAILING_EDITOR_SELECTION_BLOCK_PATTERN.exec(prompt);
+  if (!match) {
+    return { promptText: prompt, entries: [], truncatedCount: 0 };
+  }
+  const { entries, truncatedCount } = parseEditorSelectionBlockBody(match[1] ?? "");
+  if (entries.length === 0) {
+    return { promptText: prompt, entries: [], truncatedCount: 0 };
+  }
+  const promptText = prompt.slice(0, match.index).replace(/\n+$/, "");
+  return { promptText, entries, truncatedCount };
+}

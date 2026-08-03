@@ -4696,20 +4696,26 @@ function ChatViewContent(props: ChatViewProps) {
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
-    const messageTextWithContexts = appendEditorSelectionToPrompt(
-      appendElementContextsToPrompt(
-        appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
-        composerElementContextsSnapshot,
-      ),
-      getCurrentEditorPresenceChips(),
+    const messageTextWithContexts = appendElementContextsToPrompt(
+      appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
+      composerElementContextsSnapshot,
     );
     const messageTextWithPreviewAnnotations = composerPreviewAnnotationsSnapshot.reduce(
       (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
       messageTextWithContexts,
     );
-    const messageTextForSend = appendReviewCommentsToPrompt(
-      messageTextWithPreviewAnnotations,
-      composerReviewCommentsSnapshot,
+    // Appended outermost (after review comments too), not interleaved with
+    // the terminal/element chain above: that keeps it the one, unconditional
+    // trailing block on the read side, so MessagesTimeline.tsx can strip it
+    // before any of the existing terminal/element/preview-annotation
+    // extraction runs, rather than that existing chain needing to learn a
+    // new nesting order.
+    const messageTextForSend = appendEditorSelectionToPrompt(
+      appendReviewCommentsToPrompt(
+        messageTextWithPreviewAnnotations,
+        composerReviewCommentsSnapshot,
+      ),
+      getCurrentEditorPresenceChips(),
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();

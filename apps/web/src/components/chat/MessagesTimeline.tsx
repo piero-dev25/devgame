@@ -95,6 +95,8 @@ import {
   extractTrailingPreviewAnnotation,
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
+import { extractTrailingEditorSelection } from "~/editorPresence/editorSelectionContext";
+import { EditorSelectionMessageChips } from "~/editorPresence/EditorSelectionMessageChips";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { type TimestampFormat } from "@t3tools/contracts/settings";
@@ -869,7 +871,11 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const userImages = row.message.attachments ?? [];
-  const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
+  // Sent outermost (see ChatView.tsx's send path), so it's stripped first,
+  // unconditionally, before the existing terminal/element/preview-annotation
+  // chain below ever sees the text.
+  const editorSelection = extractTrailingEditorSelection(row.message.text);
+  const displayedUserMessage = deriveDisplayedUserMessageState(editorSelection.promptText);
   const terminalContexts = displayedUserMessage.contexts;
   const previewAnnotations: ParsedPreviewAnnotation[] = [];
   let visibleText = displayedUserMessage.visibleText;
@@ -941,6 +947,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         ) : null}
+        <EditorSelectionMessageChips selection={editorSelection} />
         <CollapsibleUserMessageBody
           text={elementContextState.promptText}
           terminalContexts={terminalContexts}
