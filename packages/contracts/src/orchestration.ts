@@ -349,6 +349,19 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+/**
+ * `TaskRef` — an opaque pointer at an item in an external tracker (JIRA,
+ * Linear, GitHub) reached through MCP. It carries only what's needed to look
+ * the item back up: no status, assignee, title, or due date. Adding any of
+ * those would mean building a task tracker by accident, which is explicitly
+ * not the product.
+ */
+export const TaskRef = Schema.Struct({
+  source: TrimmedNonEmptyString,
+  id: TrimmedNonEmptyString,
+});
+export type TaskRef = typeof TaskRef.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -360,6 +373,10 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Opaque pointer at an external tracker item (see TaskRef). Optional so
+  // threads constructed before this field existed — older servers' stored
+  // events, and any code literal-constructing a thread — still decode.
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -418,6 +435,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // See OrchestrationThread.taskRef.
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -564,6 +583,9 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Optional so existing callers that never set a task ref at creation time
+  // don't need to change. Omitted or explicit null both mean "no task ref".
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   createdAt: IsoDateTime,
 });
 
@@ -632,6 +654,9 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Tri-state: absent leaves the task ref alone, null clears it, a value
+  // sets it. This is the field this step exists to prove out end to end.
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
 }).check(
   Schema.makeFilter(
     (input) =>
@@ -974,6 +999,11 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Optional: historical thread.created events are re-decoded on every
+  // projector bootstrap and never had this field, so it must decode as
+  // absent rather than fail. Absent and explicit null both mean "no task
+  // ref" at creation time — there's no "leave alone" state to create.
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1036,6 +1066,9 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Tri-state, mirroring the command: absent leaves it alone, null clears
+  // it, a value sets it.
+  taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   updatedAt: IsoDateTime,
 });
 

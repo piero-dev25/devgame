@@ -293,6 +293,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          taskRef: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -408,6 +409,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          taskRef: null,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",

@@ -2664,8 +2664,11 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
 const engineLayer = it.layer(
   OrchestrationEngineLive.pipe(
     Layer.provide(OrchestrationProjectionSnapshotQueryLive),
-    Layer.provide(OrchestrationProjectionPipelineLive),
-    Layer.provide(OrchestrationEventStoreLive),
+    // Merged (not just provided) so tests can reach the pipeline / event
+    // store directly — needed to assert raw projection state and to drive a
+    // bootstrap replay from within a test.
+    Layer.provideMerge(OrchestrationProjectionPipelineLive),
+    Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolver.layer),
     Layer.provideMerge(SqlitePersistenceMemory),
@@ -2772,6 +2775,219 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
           defaultModelSelection: '{"instanceId":"codex","model":"gpt-5"}',
         },
       ]);
+    }),
+  );
+
+  // Wave 1 step 1 (docs/workbench/spec-wave-1-step-1.md): task_ref is an
+  // opaque {source,id} threaded through the whole existing thread-create /
+  // thread-meta-update path. The interesting risk isn't the migration, it's
+  // the tri-state on thread.meta.update: undefined means "leave alone", null
+  // means "clear", a value means "set" — collapsing any two of those is the
+  // bug this test exists to flush out. All assertions read raw columns via
+  // SQL, never the repository's own echo of what it was given, and space_id
+  // is asserted NULL throughout since nothing wires it up in this step.
+  const readTaskRefRow = (sql: SqlClient.SqlClient, threadId: string) =>
+    sql<{ readonly taskRefJson: string | null; readonly spaceId: string | null }>`
+      SELECT
+        task_ref_json AS "taskRefJson",
+        space_id AS "spaceId"
+      FROM projection_threads
+      WHERE thread_id = ${threadId}
+    `;
+  const linearTaskRef = { source: "linear", id: "ENG-42" };
+  const githubTaskRef = { source: "github", id: "42" };
+  const linearTaskRefJson = JSON.stringify(linearTaskRef);
+  const githubTaskRefJson = JSON.stringify(githubTaskRef);
+
+  it.effect(
+    "threads task_ref through create, proves the tri-state on meta.update, and survives a bootstrap replay",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const sql = yield* SqlClient.SqlClient;
+        const createdAt = "2026-01-01T00:00:00.000Z";
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-taskref-project"),
+          projectId: ProjectId.make("project-taskref"),
+          title: "TaskRef Project",
+          workspaceRoot: "/tmp/project-taskref",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        });
+
+        // 1. The column really holds it: upsert via a real thread.create
+        // dispatch, then a raw SELECT — never the repository echoing its own
+        // input back.
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-taskref-thread-create"),
+          threadId: ThreadId.make("thread-taskref"),
+          projectId: ProjectId.make("project-taskref"),
+          title: "TaskRef Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          taskRef: linearTaskRef,
+          createdAt,
+        });
+
+        const afterCreate = yield* readTaskRefRow(sql, "thread-taskref");
+        assert.deepEqual(afterCreate, [
+          {
+            taskRefJson: linearTaskRefJson,
+            spaceId: null,
+          },
+        ]);
+
+        // 2. Tri-state, proven three ways. First: omitting taskRef from a
+        // thread.meta.update must leave the existing value untouched.
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-taskref-update-untouched"),
+          threadId: ThreadId.make("thread-taskref"),
+          title: "TaskRef Thread (renamed)",
+        });
+
+        const afterUndefinedUpdate = yield* readTaskRefRow(sql, "thread-taskref");
+        assert.deepEqual(afterUndefinedUpdate, [
+          {
+            taskRefJson: linearTaskRefJson,
+            spaceId: null,
+          },
+        ]);
+
+        // Second: an explicit null must clear it. This is the assertion that
+        // goes red if task_ref_json is dropped from the upsert's
+        // ON CONFLICT DO UPDATE SET list (the column would silently keep the
+        // pre-clear value instead), and it's equally red if the tri-state
+        // check collapses null into "leave alone".
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-taskref-update-clear"),
+          threadId: ThreadId.make("thread-taskref"),
+          taskRef: null,
+        });
+
+        const afterNullUpdate = yield* readTaskRefRow(sql, "thread-taskref");
+        assert.deepEqual(afterNullUpdate, [{ taskRefJson: null, spaceId: null }]);
+
+        // Third: setting a value again after a clear must persist through
+        // the same ON CONFLICT path a second time.
+        yield* engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-taskref-update-reset"),
+          threadId: ThreadId.make("thread-taskref"),
+          taskRef: githubTaskRef,
+        });
+
+        const afterResetUpdate = yield* readTaskRefRow(sql, "thread-taskref");
+        assert.deepEqual(afterResetUpdate, [
+          {
+            taskRefJson: githubTaskRefJson,
+            spaceId: null,
+          },
+        ]);
+
+        // 3. It survives a replay: wipe the threads projector's bookmark and
+        // re-run bootstrap so the row is rebuilt purely from the stored
+        // event payloads, not carried over from the live upserts above.
+        yield* sql`
+          DELETE FROM projection_state WHERE projector = ${ORCHESTRATION_PROJECTOR_NAMES.threads}
+        `;
+        yield* sql`DELETE FROM projection_threads WHERE thread_id = 'thread-taskref'`;
+        yield* projectionPipeline.bootstrap;
+
+        // The row was deleted above, and the threads projector's bookmark
+        // was reset to zero — this value can only have come from re-decoding
+        // the stored thread.created / thread.meta-updated event payloads,
+        // which is exactly what proves the event stream carries task_ref
+        // rather than only the (now-deleted) projection row having carried
+        // it.
+        const afterReplay = yield* readTaskRefRow(sql, "thread-taskref");
+        assert.deepEqual(afterReplay, [
+          {
+            taskRefJson: githubTaskRefJson,
+            spaceId: null,
+          },
+        ]);
+      }),
+  );
+
+  // 4. Old events still decode: a thread.created event stored before this
+  // step existed (no taskRef key at all in the payload) must still project
+  // cleanly, with task_ref_json landing NULL rather than failing decode.
+  it.effect("projects a pre-existing thread.created event with no task_ref field at all", () =>
+    Effect.gen(function* () {
+      const eventStore = yield* OrchestrationEventStore;
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* eventStore.append({
+        type: "project.created",
+        eventId: EventId.make("evt-legacy-project"),
+        aggregateKind: "project",
+        aggregateId: ProjectId.make("project-legacy"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-legacy-project"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-legacy-project"),
+        metadata: {},
+        payload: {
+          projectId: ProjectId.make("project-legacy"),
+          title: "Legacy Project",
+          workspaceRoot: "/tmp/project-legacy",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      // No `taskRef` key at all — this is what a thread.created event
+      // written before this step landed looks like on disk.
+      yield* eventStore.append({
+        type: "thread.created",
+        eventId: EventId.make("evt-legacy-thread"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-legacy"),
+        occurredAt: now,
+        commandId: CommandId.make("cmd-legacy-thread"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-legacy-thread"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.make("thread-legacy"),
+          projectId: ProjectId.make("project-legacy"),
+          title: "Legacy Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      // Must complete with no decode error.
+      yield* projectionPipeline.bootstrap;
+
+      const rows = yield* readTaskRefRow(sql, "thread-legacy");
+      assert.deepEqual(rows, [{ taskRefJson: null, spaceId: null }]);
     }),
   );
 });

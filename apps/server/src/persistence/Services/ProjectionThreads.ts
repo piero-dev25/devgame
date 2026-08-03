@@ -14,6 +14,7 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  TaskRef,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -33,6 +34,10 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
+  // Opaque tracker pointer. Space_id is deliberately absent from this row:
+  // this step lands the column via migration only, wired to nothing — the
+  // space aggregate doesn't exist yet (see docs/workbench/spec-wave-1-step-1.md).
+  taskRef: Schema.NullOr(TaskRef),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,

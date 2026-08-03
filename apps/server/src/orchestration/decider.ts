@@ -372,6 +372,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          // No tri-state at creation — there's nothing to "leave alone" yet.
+          // Omitted and explicit null both collapse to "no task ref".
+          taskRef: command.taskRef ?? null,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
@@ -672,6 +675,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
+          // Tri-state passthrough: undefined stays undefined (leave alone),
+          // null and a value both pass through as-is (clear / set). This is
+          // the exact spread the tri-state bug collapses if written wrong.
+          ...(command.taskRef !== undefined ? { taskRef: command.taskRef } : {}),
           updatedAt: occurredAt,
         },
       };
