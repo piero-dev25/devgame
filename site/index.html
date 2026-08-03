@@ -8,14 +8,20 @@
       name="description"
       content="DevGame runs Claude Code, Codex, Cursor, Grok and OpenCode against your game project — and whatever you have selected in Unity, Unreal or Godot is already in the prompt. Local-first, open source, your own subscriptions."
     />
-    <link rel="canonical" href="https://devgame.fun/" />
+    <!--
+      Canonical points at the Pages URL because that is where the site actually
+      lives. devgame.fun is not registered yet; a canonical aimed at a domain
+      that does not resolve tells crawlers the real page is the wrong one.
+      Switch both this and og:url the day the domain is bought and bound.
+    -->
+    <link rel="canonical" href="https://devgame-98m.pages.dev/" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content="DevGame — the agent workbench that can see your engine" />
     <meta
       property="og:description"
       content="Select a prefab in Unity. It is already in the prompt. Local-first, open source, bring your own agent subscriptions."
     />
-    <meta property="og:url" content="https://devgame.fun/" />
+    <meta property="og:url" content="https://devgame-98m.pages.dev/" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="theme-color" content="#07090C" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
@@ -879,9 +885,7 @@
           <a href="#local">Local-first</a>
           <a href="https://github.com/piero-dev25/devgame">GitHub</a>
         </div>
-        <a class="nav-cta" href="https://github.com/piero-dev25/devgame/releases/latest">
-          Download for macOS
-        </a>
+        <a class="nav-cta" href="https://github.com/piero-dev25/devgame">Get DevGame</a>
       </nav>
     </div>
 
@@ -902,27 +906,21 @@
         </p>
 
         <div class="cta-row rise" style="animation-delay: 0.34s">
-          <a class="btn btn-primary" href="https://github.com/piero-dev25/devgame/releases/latest">
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-              <path
-                d="M10.9 8.5c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-2-1.3-2.4-1.3-1-.1-2 .6-2.5.6s-1.3-.6-2.1-.6c-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 4.9.8 6.5.5.8 1.2 1.7 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.6.6-.9.9-1.8.9-1.8s-1.6-.6-1.6-2.6zM9.3 3.6c.4-.5.7-1.3.6-2-.6 0-1.4.4-1.9 1-.4.5-.7 1.3-.6 2 .7.1 1.4-.4 1.9-1z"
-              />
-            </svg>
-            Download for macOS
-          </a>
-          <a class="btn btn-ghost" href="https://github.com/piero-dev25/devgame">
+          <a class="btn btn-primary" href="https://github.com/piero-dev25/devgame">
             <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
               <path
                 d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
               />
             </svg>
-            Read the source
+            Get the source
           </a>
+          <a class="btn btn-ghost" href="#presence">See how it works</a>
         </div>
 
         <p class="sub-note rise" style="animation-delay: 0.42s">
-          Free and MIT-licensed. There are iOS and Android clients too — they pair to the machine
-          your project is on.
+          Free and MIT-licensed, and it builds from a clone today. Packaged macOS, iOS and Android
+          builds are not published yet — when they are, they will be
+          <a href="https://github.com/piero-dev25/devgame/releases">on the releases page</a>.
         </p>
       </header>
 
