@@ -35,10 +35,14 @@ export function SettingsLegalDocumentCloseHeaderButton() {
 export function SettingsLegalDocumentExternalHeaderButton({
   externalUrl = LEGAL_URL,
 }: {
-  readonly externalUrl?: string;
+  readonly externalUrl?: string | null;
 }) {
   const iconColor = useThemeColor("--color-icon");
-  const safeExternalUrl = isLegalDocumentUrl(externalUrl) ? externalUrl : LEGAL_URL;
+  const safeExternalUrl =
+    externalUrl !== null && isLegalDocumentUrl(externalUrl) ? externalUrl : LEGAL_URL;
+
+  // A build that publishes no legal documents has nothing to open.
+  if (safeExternalUrl === null) return null;
 
   return (
     <Pressable
@@ -61,7 +65,7 @@ export function SettingsLegalDocumentExternalHeaderButton({
 
 interface SettingsLegalDocumentRouteScreenProps {
   readonly documentName: string;
-  readonly documentUrl: string;
+  readonly documentUrl: string | null;
 }
 
 export function SettingsLegalDocumentRouteScreen({
@@ -88,6 +92,31 @@ export function SettingsLegalDocumentRouteScreen({
   const openExternalUrl = useCallback((url: string) => {
     void Linking.openURL(url).catch(() => undefined);
   }, []);
+
+  // Correct by absence: with no marketing site configured there is no document
+  // to show, and pointing the WebView at a default would publish someone else's
+  // terms as ours. Say so plainly instead of rendering a blank page.
+  if (documentUrl === null) {
+    return (
+      <View className="flex-1 items-center justify-center gap-4 bg-sheet px-8">
+        <SymbolView
+          name="doc.text"
+          size={32}
+          tintColor={iconColor}
+          type="monochrome"
+          weight="regular"
+        />
+        <View className="items-center gap-2">
+          <Text className="text-center font-t3-bold text-lg text-foreground">
+            No {documentName.toLowerCase()} published
+          </Text>
+          <Text className="text-center text-sm leading-normal text-foreground-muted">
+            This build has no legal documents configured.
+          </Text>
+        </View>
+      </View>
+    );
+  }
   if (loadError) {
     return (
       <View className="flex-1 items-center justify-center gap-4 bg-sheet px-8">
