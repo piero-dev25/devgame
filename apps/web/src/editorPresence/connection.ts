@@ -12,20 +12,22 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 30_000;
 /**
  * Close codes >= 4000 are the application-specific range (RFC 6455 §7.4.2).
- * The server uses it for reasons worth surfacing to the user verbatim (auth
- * rejected, scope missing) rather than a generic "disconnected", and for
- * not hammering a reconnect that is likely to fail the same way again. A
- * plain transport-level close (browser default on a dropped connection —
- * code < 4000, empty reason) is treated as transient and retried on the
- * normal backoff.
+ * The server authenticates AFTER accepting the WebSocket upgrade and rejects
+ * by closing with a 4xxx code plus a human-readable reason — it never
+ * refuses the upgrade with an HTTP 401 (see
+ * docs/workbench/godot-probe-findings.md, measured against a real engine: an
+ * HTTP-layer refusal and "nothing listening" are indistinguishable to a
+ * WebSocket client, so the server deliberately always completes the
+ * handshake before it can say why it's rejecting the connection).
+ *
+ * Ratified rule for every client (web included): code >= 4000 means the
+ * server told us why — show that reason verbatim, and do NOT reconnect (a
+ * credential problem cannot be fixed by retrying). Anything else means no
+ * WebSocket session was ever established — a plain reachability problem,
+ * not a credential one — so show a fixed "cannot reach" message and keep
+ * backing off.
  */
 const APPLICATION_CLOSE_CODE_THRESHOLD = 4000;
-/** On an application-level close, jump the attempt counter forward so the
- * next retry starts closer to the backoff ceiling instead of the fast base
- * delay — "don't hammer-reconnect on an auth rejection" without giving up
- * on reconnecting altogether (the rejection could be transient, e.g. a
- * revoked session that gets re-granted). */
-const APPLICATION_CLOSE_ATTEMPT_FLOOR = 3;
 const WS_TICKET_QUERY_PARAM = "wsTicket";
 const WS_ROLE_QUERY_PARAM = "role";
 const EDITOR_PRESENCE_PATH = "/editor-presence";
@@ -35,9 +37,14 @@ export type EditorPresenceConnectionPhase = "disconnected" | "connecting" | "con
 export interface EditorPresenceConnectionState {
   readonly phase: EditorPresenceConnectionPhase;
   readonly editors: ReadonlyArray<EditorPresenceEntry>;
-  /** Verbatim reason from the most recent close that carried one. Cleared
+  /**
+   * What to tell the user instead of a generic "disconnected": the
+   * server's own verbatim reason for an application-level close (code
+   * >= 4000, and retrying has stopped), or a fixed "cannot reach Workbench"
+   * message when no session was ever established (still retrying). Cleared
    * on a successful open and on a message; only meaningful while
-   * disconnected/reconnecting. */
+   * disconnected/reconnecting.
+   */
   readonly disconnectReason: string | null;
 }
 
@@ -94,13 +101,20 @@ function buildSubscriberUrl(socketUrl: string, ticket: string | null): string {
   return url.toString();
 }
 
+function cannotReachMessage(httpBaseUrl: string): string {
+  return `cannot reach Workbench at ${httpBaseUrl}`;
+}
+
 /**
- * Opens (and, on close, reopens with backoff) one subscriber connection.
- * Every state transition — connecting, connected, a new `presence` frame,
- * disconnected — is reported to `onStateChange`. Returns a `dispose()` that
- * tears the connection down and suppresses any further callbacks, safe to
- * call unconditionally from a React effect cleanup (including before the
- * in-flight ticket mint or the socket has even opened).
+ * Opens one subscriber connection, and — unless the server rejected it with
+ * an application-level close (code >= 4000, not retried; see
+ * `APPLICATION_CLOSE_CODE_THRESHOLD` above) — reopens it with backoff on
+ * every close. Every state transition — connecting, connected, a new
+ * `presence` frame, disconnected — is reported to `onStateChange`. Returns
+ * a `dispose()` that tears the connection down and suppresses any further
+ * callbacks, safe to call unconditionally from a React effect cleanup
+ * (including before the in-flight ticket mint or the socket has even
+ * opened).
  */
 export function openEditorPresenceConnection(config: EditorPresenceConnectionConfig): {
   readonly dispose: () => void;
@@ -117,9 +131,9 @@ export function openEditorPresenceConnection(config: EditorPresenceConnectionCon
     if (!disposed) config.onStateChange(state);
   };
 
-  const scheduleReconnect = (escalate: boolean) => {
+  const scheduleReconnect = () => {
     if (disposed) return;
-    attempt = escalate ? Math.max(attempt + 1, APPLICATION_CLOSE_ATTEMPT_FLOOR) : attempt + 1;
+    attempt += 1;
     const delay = Math.min(RECONNECT_BASE_MS * 2 ** attempt, RECONNECT_MAX_MS);
     reconnectTimer = setTimeout(connect, delay);
   };
@@ -156,15 +170,34 @@ export function openEditorPresenceConnection(config: EditorPresenceConnectionCon
 
         ws.onclose = (event) => {
           if (disposed) return;
-          const reason = event.reason.trim().length > 0 ? event.reason : null;
-          emit({ phase: "disconnected", editors: [], disconnectReason: reason });
-          scheduleReconnect(event.code >= APPLICATION_CLOSE_CODE_THRESHOLD);
+          if (event.code >= APPLICATION_CLOSE_CODE_THRESHOLD) {
+            // The server told us why, and a credential problem cannot be
+            // fixed by retrying — stop, rather than hammering a reconnect
+            // that will fail the same way again.
+            emit({ phase: "disconnected", editors: [], disconnectReason: event.reason });
+            return;
+          }
+          // No WebSocket session was ever meaningfully established — a
+          // rejected handshake and a dead port are indistinguishable to a
+          // browser client, both surfacing as an early, reasonless close.
+          // A plain reachability problem, not a credential one, so keep
+          // retrying.
+          emit({
+            phase: "disconnected",
+            editors: [],
+            disconnectReason: cannotReachMessage(config.httpBaseUrl),
+          });
+          scheduleReconnect();
         };
       })
       .catch(() => {
         if (disposed) return;
-        emit({ phase: "disconnected", editors: [], disconnectReason: null });
-        scheduleReconnect(false);
+        emit({
+          phase: "disconnected",
+          editors: [],
+          disconnectReason: cannotReachMessage(config.httpBaseUrl),
+        });
+        scheduleReconnect();
       });
   };
 

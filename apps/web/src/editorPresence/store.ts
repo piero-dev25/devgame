@@ -116,3 +116,28 @@ export function mergeEditorPresenceChips(
   }
   return merged;
 }
+
+// --------------------------------------------------------------------------
+// Current-selection snapshot: a plain, non-reactive read-model
+// --------------------------------------------------------------------------
+//
+// EditorPresenceChips.tsx (mounted once, always live per the owner's "chips
+// appear before you type" requirement) already computes the merged
+// live+pinned list on every render for display. It publishes that same
+// list here so ChatView.tsx's send path — a different component, one level
+// up the tree, that runs at a specific instant rather than reactively — can
+// read "what would attach right now" with a single synchronous call
+// instead of mounting a second socket connection or subscribing to a hook
+// of its own. Not a hook on purpose: a component that only needs this at
+// send time must not re-render on every incoming presence frame.
+let currentChipsSnapshot: ReadonlyArray<EditorPresenceRenderChip> = [];
+
+export function publishCurrentEditorPresenceChips(
+  chips: ReadonlyArray<EditorPresenceRenderChip>,
+): void {
+  currentChipsSnapshot = chips;
+}
+
+export function getCurrentEditorPresenceChips(): ReadonlyArray<EditorPresenceRenderChip> {
+  return currentChipsSnapshot;
+}

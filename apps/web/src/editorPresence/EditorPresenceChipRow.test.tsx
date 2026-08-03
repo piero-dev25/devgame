@@ -21,16 +21,26 @@ function chip(overrides: Partial<EditorPresenceRenderChip> = {}): EditorPresence
 }
 
 describe("EditorPresenceChipRow", () => {
-  it("renders nothing when there are no chips and no reason to report", () => {
+  it("renders nothing when there are no chips and the connection is healthy (connected, no reason)", () => {
     const markup = renderToStaticMarkup(
-      <EditorPresenceChipRow chips={[]} disconnectReason={null} onTogglePin={() => {}} />,
+      <EditorPresenceChipRow
+        chips={[]}
+        phase="connected"
+        disconnectReason={null}
+        onTogglePin={() => {}}
+      />,
     );
     expect(markup).toBe("");
   });
 
   it("renders an unpinned live chip as not pressed", () => {
     const markup = renderToStaticMarkup(
-      <EditorPresenceChipRow chips={[chip()]} disconnectReason={null} onTogglePin={() => {}} />,
+      <EditorPresenceChipRow
+        chips={[chip()]}
+        phase="connected"
+        disconnectReason={null}
+        onTogglePin={() => {}}
+      />,
     );
     expect(markup).toContain("Player");
     expect(markup).toContain('aria-pressed="false"');
@@ -40,6 +50,7 @@ describe("EditorPresenceChipRow", () => {
     const markup = renderToStaticMarkup(
       <EditorPresenceChipRow
         chips={[chip({ pinned: true })]}
+        phase="connected"
         disconnectReason={null}
         onTogglePin={() => {}}
       />,
@@ -57,6 +68,7 @@ describe("EditorPresenceChipRow", () => {
           chip({ key: "session-1:live", label: "Live Object", pinned: false }),
           chip({ key: "session-1:pinned", label: "Pinned Object", pinned: true }),
         ]}
+        phase="connected"
         disconnectReason={null}
         onTogglePin={() => {}}
       />,
@@ -72,6 +84,7 @@ describe("EditorPresenceChipRow", () => {
       renderToStaticMarkup(
         <EditorPresenceChipRow
           chips={[chip({ kind: "a-brand-new-object-kind-nobody-has-seen" })]}
+          phase="connected"
           disconnectReason={null}
           onTogglePin={() => {}}
         />,
@@ -79,10 +92,11 @@ describe("EditorPresenceChipRow", () => {
     ).not.toThrow();
   });
 
-  it("surfaces the disconnect reason verbatim", () => {
+  it("surfaces the disconnect reason verbatim while disconnected", () => {
     const markup = renderToStaticMarkup(
       <EditorPresenceChipRow
         chips={[chip()]}
+        phase="disconnected"
         disconnectReason="Session revoked"
         onTogglePin={() => {}}
       />,
@@ -94,11 +108,66 @@ describe("EditorPresenceChipRow", () => {
     const markup = renderToStaticMarkup(
       <EditorPresenceChipRow
         chips={[]}
+        phase="disconnected"
         disconnectReason="Session revoked"
         onTogglePin={() => {}}
       />,
     );
     expect(markup).not.toBe("");
     expect(markup).toContain("Session revoked");
+  });
+
+  describe("persistent connection indicator", () => {
+    it("shows a connecting indicator even with zero chips (the dominant runtime state during a Unity domain reload)", () => {
+      const markup = renderToStaticMarkup(
+        <EditorPresenceChipRow
+          chips={[]}
+          phase="connecting"
+          disconnectReason={null}
+          onTogglePin={() => {}}
+        />,
+      );
+      expect(markup).not.toBe("");
+      expect(markup).toContain("connecting");
+      expect(markup).toContain('role="status"');
+    });
+
+    it("prefers the connecting label over a stale reason from a previous attempt", () => {
+      const markup = renderToStaticMarkup(
+        <EditorPresenceChipRow
+          chips={[]}
+          phase="connecting"
+          disconnectReason="cannot reach Workbench at https://environment.example"
+          onTogglePin={() => {}}
+        />,
+      );
+      expect(markup).toContain("connecting");
+      expect(markup).not.toContain("cannot reach Workbench");
+    });
+
+    it("shows nothing while connected and healthy, even though phase transitions through connecting first", () => {
+      const markup = renderToStaticMarkup(
+        <EditorPresenceChipRow
+          chips={[]}
+          phase="connected"
+          disconnectReason={null}
+          onTogglePin={() => {}}
+        />,
+      );
+      expect(markup).toBe("");
+    });
+
+    it("stays quiet when connected even if pinned chips are showing (no separate status noise once healthy)", () => {
+      const markup = renderToStaticMarkup(
+        <EditorPresenceChipRow
+          chips={[chip({ pinned: true })]}
+          phase="connected"
+          disconnectReason={null}
+          onTogglePin={() => {}}
+        />,
+      );
+      expect(markup).toContain("Player");
+      expect(markup).not.toContain('role="status"');
+    });
   });
 });

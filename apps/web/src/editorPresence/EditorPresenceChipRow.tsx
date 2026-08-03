@@ -14,6 +14,14 @@
 // after the live editor selection moves past it, until clicked again to
 // unpin. Pinned and live chips coexist in the same row and are visually
 // distinguished (tinted + a pin glyph vs. plain outline).
+//
+// Persistent connection indicator: required in step 1, not deferred
+// (docs/workbench/spec-editor-presence.md) — a Unity domain reload kills
+// the socket on every play-mode entry and every recompile, so reconnecting
+// is the dominant runtime state there, not an edge case. Shown even with
+// zero chips so a mid-session drop is visible rather than the composer
+// just going quiet; hidden while connected and healthy so it never becomes
+// a permanent widget.
 import { Box, Pin } from "lucide-react";
 
 import {
@@ -23,6 +31,7 @@ import {
 } from "../components/composerInlineChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { cn } from "~/lib/utils";
+import type { EditorPresenceConnectionPhase } from "./connection";
 import type { EditorPresenceRenderChip } from "./store";
 
 function buildTooltipContent(item: EditorPresenceRenderChip): string {
@@ -72,34 +81,63 @@ function EditorPresenceChip({ item, onToggle }: EditorPresenceChipProps) {
 
 export interface EditorPresenceChipRowProps {
   readonly chips: ReadonlyArray<EditorPresenceRenderChip>;
-  /** Verbatim reason from the socket's most recent close, surfaced instead
-   * of a generic "disconnected" (owner requirement). `null` when there is
-   * nothing worth reporting — a quiet reconnect, or no connection attempted
-   * yet. */
+  readonly phase: EditorPresenceConnectionPhase;
+  /** Verbatim reason from the socket's most recent close (owner
+   * requirement — never a generic "disconnected"). `null` before any close
+   * has happened, e.g. still on the first connect attempt. */
   readonly disconnectReason: string | null;
   readonly onTogglePin: (item: EditorPresenceRenderChip) => void;
   readonly className?: string | undefined;
 }
 
+/**
+ * What the persistent connection indicator says, or `null` to show
+ * nothing — the "quiet when connected and healthy" rule. `connecting`
+ * always gets a label (even with a stale reason from a prior attempt still
+ * around) because it's the more current, more useful thing to say; a
+ * `disconnected` phase with no reason yet (the very first render, before
+ * any attempt has resolved) has nothing worth saying either.
+ */
+function connectionStatusLabel(
+  phase: EditorPresenceConnectionPhase,
+  disconnectReason: string | null,
+): string | null {
+  if (phase === "connected") return null;
+  if (phase === "connecting") return "connecting…";
+  return disconnectReason;
+}
+
 /** Self-gating: renders nothing when there is nothing to show (no chips,
- * live or pinned, and no reason to report), so the single call site in
- * ChatComposer.tsx needs no surrounding visibility condition. */
+ * live or pinned, and the connection is healthy), so the single call site
+ * in ChatComposer.tsx needs no surrounding visibility condition. */
 export function EditorPresenceChipRow({
   chips,
+  phase,
   disconnectReason,
   onTogglePin,
   className,
 }: EditorPresenceChipRowProps) {
-  if (chips.length === 0 && disconnectReason === null) return null;
+  const statusLabel = connectionStatusLabel(phase, disconnectReason);
+  if (chips.length === 0 && statusLabel === null) return null;
 
   return (
     <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
       {chips.map((item) => (
         <EditorPresenceChip key={item.key} item={item} onToggle={onTogglePin} />
       ))}
-      {disconnectReason !== null ? (
-        <span role="status" className="text-[11px] text-muted-foreground/70 italic">
-          Editor presence: {disconnectReason}
+      {statusLabel !== null ? (
+        <span
+          role="status"
+          className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground/70 italic"
+        >
+          <span
+            aria-hidden
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              phase === "connecting" ? "animate-pulse bg-amber-500" : "bg-red-500/70",
+            )}
+          />
+          Editor presence: {statusLabel}
         </span>
       ) : null}
     </div>

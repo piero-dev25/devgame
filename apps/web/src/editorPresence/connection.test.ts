@@ -225,7 +225,68 @@ describe("openEditorPresenceConnection", () => {
     connection.dispose();
   });
 
-  it("surfaces the close reason verbatim, and clears it on the next successful open", async () => {
+  it("a transport-level close (no session established) shows a fixed 'cannot reach' message and keeps retrying", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const states: EditorPresenceConnectionState[] = [];
+
+    const connection = openEditorPresenceConnection({
+      ...BASE_CONFIG,
+      httpAuthorization: null,
+      createSocket: factory,
+      onStateChange: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    // A rejected handshake and a dead port both surface this way to a
+    // browser client — no application close code, no meaningful reason.
+    sockets[0]!.onclose?.({ code: 1006, reason: "" });
+    expect(states[states.length - 1]!.disconnectReason).toBe(
+      `cannot reach Workbench at ${BASE_CONFIG.httpBaseUrl}`,
+    );
+
+    // Not a credential problem, so it keeps backing off and retrying.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    sockets[1]!.onopen?.();
+    expect(states[states.length - 1]!.disconnectReason).toBeNull();
+
+    connection.dispose();
+  });
+
+  it("a ticket-mint failure is treated the same as no session established: 'cannot reach' plus retry", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const states: EditorPresenceConnectionState[] = [];
+    let shouldFail = true;
+    const mintTicket = vi.fn(async () => {
+      if (shouldFail) throw new Error("network error minting ticket");
+      return "ticket-after-recovery";
+    });
+
+    const connection = openEditorPresenceConnection({
+      ...BASE_CONFIG,
+      httpAuthorization: { _tag: "Bearer", token: "bearer-token" },
+      createSocket: factory,
+      mintTicket,
+      onStateChange: (state) => states.push(state),
+    });
+
+    await vi.waitFor(() => expect(mintTicket).toHaveBeenCalledTimes(1));
+    expect(sockets).toHaveLength(0);
+    await vi.waitFor(() =>
+      expect(states[states.length - 1]!.disconnectReason).toBe(
+        `cannot reach Workbench at ${BASE_CONFIG.httpBaseUrl}`,
+      ),
+    );
+
+    shouldFail = false;
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+    expect(queryParams(sockets[0]!.url).get("wsTicket")).toBe("ticket-after-recovery");
+
+    connection.dispose();
+  });
+
+  it("an application-level close (code >= 4000) shows the server's reason verbatim and does not reconnect", async () => {
     const { factory, sockets } = makeSocketFactory();
     const states: EditorPresenceConnectionState[] = [];
 
@@ -238,47 +299,18 @@ describe("openEditorPresenceConnection", () => {
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
 
     sockets[0]!.onclose?.({ code: 4003, reason: "Session revoked" });
-    expect(states[states.length - 1]!.disconnectReason).toBe("Session revoked");
+    expect(states[states.length - 1]!).toEqual({
+      phase: "disconnected",
+      editors: [],
+      disconnectReason: "Session revoked",
+    });
 
-    await vi.advanceTimersByTimeAsync(30_000);
-    await vi.waitFor(() => expect(sockets).toHaveLength(2));
-    sockets[1]!.onopen?.();
-    expect(states[states.length - 1]!.disconnectReason).toBeNull();
+    // A credential problem cannot be fixed by retrying — no reconnect,
+    // ever, no matter how long we wait.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(sockets).toHaveLength(1);
 
     connection.dispose();
-  });
-
-  it("escalates the reconnect backoff after an application-level close (code >= 4000)", async () => {
-    const transient = makeSocketFactory();
-    const transientConnection = openEditorPresenceConnection({
-      ...BASE_CONFIG,
-      httpAuthorization: null,
-      createSocket: transient.factory,
-      onStateChange: () => {},
-    });
-    await vi.waitFor(() => expect(transient.sockets).toHaveLength(1));
-    transient.sockets[0]!.onclose?.({ code: 1006, reason: "" });
-    // A first transient close reconnects fast (base delay).
-    await vi.advanceTimersByTimeAsync(2_000);
-    await vi.waitFor(() => expect(transient.sockets).toHaveLength(2));
-    transientConnection.dispose();
-
-    const application = makeSocketFactory();
-    const applicationConnection = openEditorPresenceConnection({
-      ...BASE_CONFIG,
-      httpAuthorization: null,
-      createSocket: application.factory,
-      onStateChange: () => {},
-    });
-    await vi.waitFor(() => expect(application.sockets).toHaveLength(1));
-    application.sockets[0]!.onclose?.({ code: 4003, reason: "Session revoked" });
-    // The same short delay must NOT be enough after an application close.
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(application.sockets).toHaveLength(1);
-    // But it does still eventually retry, rather than giving up forever.
-    await vi.advanceTimersByTimeAsync(30_000);
-    await vi.waitFor(() => expect(application.sockets).toHaveLength(2));
-    applicationConnection.dispose();
   });
 
   it("dispose tears the socket down and suppresses any further callbacks", async () => {

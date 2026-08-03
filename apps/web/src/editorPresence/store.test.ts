@@ -3,9 +3,12 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EditorPresenceEntry } from "./protocol";
 import {
   deriveLiveEditorPresenceChips,
+  getCurrentEditorPresenceChips,
   mergeEditorPresenceChips,
+  publishCurrentEditorPresenceChips,
   useEditorPresencePinStore,
   type EditorPresenceChipItem,
+  type EditorPresenceRenderChip,
 } from "./store";
 
 function entry(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntry {
@@ -235,5 +238,32 @@ describe("mergeEditorPresenceChips", () => {
 
     merged = mergeEditorPresenceChips([otherLiveItem], new Map());
     expect(merged).toEqual([{ ...otherLiveItem, pinned: false }]);
+  });
+});
+
+describe("publishCurrentEditorPresenceChips / getCurrentEditorPresenceChips", () => {
+  it("defaults to empty, and returns whatever was last published", () => {
+    publishCurrentEditorPresenceChips([]);
+    expect(getCurrentEditorPresenceChips()).toEqual([]);
+
+    const chip: EditorPresenceRenderChip = {
+      id: "obj-1",
+      kind: "gameObject",
+      label: "Player",
+      path: null,
+      detail: null,
+      key: "session-1:obj-1",
+      editorId: "unity",
+      editorName: "Unity",
+      sessionId: "session-1",
+      pinned: false,
+    };
+    publishCurrentEditorPresenceChips([chip]);
+    expect(getCurrentEditorPresenceChips()).toEqual([chip]);
+
+    // A later publish (e.g. the component unmounting) replaces it, not
+    // merges with it.
+    publishCurrentEditorPresenceChips([]);
+    expect(getCurrentEditorPresenceChips()).toEqual([]);
   });
 });
