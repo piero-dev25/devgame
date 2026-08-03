@@ -258,3 +258,56 @@ Stated plainly, because tonight has already produced two claims that dissolved o
 
 **Evidence artifacts on disk** (all outside the repo; repo confirmed clean, `git status --short` empty before and after every operation):
 `/Users/pieroherrera/.claude/jobs/d1eda764/tmp/` → `mobile-typecheck.log`, `mobile-test.log`, `expo-prebuild.log`, `pod-install.log`, `xcodebuild.log` (`** BUILD SUCCEEDED **` at tail), `win-build-attempt.log`, `wsl-tests-verbose.log`, `t3code-sim-screenshot.png`, `mobile-prebuild-mirror/`, `derived-data/Build/Products/Debug-iphonesimulator/T3Code.app`.
+
+---
+
+## 7. Post-severance verification (added after the de-fork)
+
+Run after `c2875b087` / `c2eef4346` removed upstream's network identity, to prove
+the one build the audit had proven still works.
+
+**Procedure:** `expo prebuild --platform ios --clean --no-install` with **no
+configuration set at all** — the unconfigured-fork case — then `pod install`,
+then `xcodebuild` for the simulator.
+
+**Result: `** BUILD SUCCEEDED **`**, a 224 MB `T3Code.app`. The de-fork did not
+regress the build.
+
+What the generated native project and the built artifact contain:
+
+| Check                                                            | Result                                                                |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `DEVELOPMENT_TEAM` pinned in `project.pbxproj`                   | **Absent** — Xcode picks a team instead of hard-failing on upstream's |
+| Entitlement naming an associated domain                          | **Absent entirely** — claims nothing rather than claiming theirs      |
+| `t3.codes` / `ARK85ZXQ4Z` in generated `ios/`                    | **Zero occurrences**                                                  |
+| Upstream domain, team, PostHog key or EAS id in the built `.app` | **Zero occurrences**                                                  |
+| `CFBundleIdentifier`                                             | `com.t3tools.t3code` — **still upstream's, deliberately**             |
+| `CFBundleDisplayName`                                            | `T3 Code` — **still upstream's, deliberately**                        |
+
+So **network identity is severed and proven in the shipping artifact**, while
+**product identity is untouched** and remains an owner decision (§3.1 D1–D2).
+Those are different things and the distinction matters: nothing phones home,
+but the app still presents as theirs.
+
+### Build gotcha that costs an hour if you hit it cold
+
+The iOS build **requires an arm64-pinned destination**:
+
+```
+xcodebuild -workspace T3Code.xcworkspace -scheme T3Code \
+  -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+  ARCHS=arm64 ONLY_ACTIVE_ARCH=YES EXCLUDED_ARCHS=x86_64 CODE_SIGNING_ALLOWED=NO
+```
+
+Without the arch pin the build fails with:
+
+```
+modules/t3-terminal/ios/T3TerminalView.swift:3:8: error: no such module 'GhosttyKit'
+```
+
+The cause is not the module and not a missing dependency. The vendored
+`GhosttyKit.xcframework` is checked in and ships **only** `ios-arm64` and
+`ios-arm64-simulator` slices; a generic simulator destination also asks for
+`x86_64`, which has no slice. The error names a Swift module rather than an
+architecture, so it points away from the real cause — it reads exactly like
+someone broke the terminal module.
