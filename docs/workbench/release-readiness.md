@@ -311,3 +311,61 @@ The cause is not the module and not a missing dependency. The vendored
 `x86_64`, which has no slice. The error names a Swift module rather than an
 architecture, so it points away from the real cause — it reads exactly like
 someone broke the terminal module.
+
+### 7.1 What the fork WOULD have shipped — before/after, from generated projects
+
+A stale pre-change prebuild mirror preserved the generated project as it stood
+before the severance. That accident is the best evidence in this document,
+because it shows the defect in the artifact rather than in the config:
+
+**BEFORE** (generated from the pre-change `app.config.ts`):
+
+```
+project.pbxproj:719,757,788,811   DEVELOPMENT_TEAM = ARK85ZXQ4Z;   (4 build configurations)
+
+T3Code.entitlements
+  com.apple.developer.associated-domains
+    applinks:clerk.t3.codes
+    webcredentials:clerk.t3.codes
+
+Expo.plist
+  EXUpdatesEnabled  true
+  EXUpdatesURL      https://u.expo.dev/d763fcb8-d37c-41ea-a773-b54a0ab4a454
+```
+
+Upstream's Apple team in four configurations, their passkey domain in the
+entitlements, and OTA **enabled and pointed at their production channel**.
+
+**AFTER**: zero `DEVELOPMENT_TEAM`, no associated-domains entitlement at all,
+`EXUpdatesEnabled false` with **no `EXUpdatesURL` key**, and no match for any
+upstream literal anywhere under `ios/`.
+
+### 7.2 Correction: what the "running app" screenshot actually showed
+
+The original audit reported a screenshot of the running app. That screenshot —
+and the identical post-severance one — is the **expo-dev-client launcher**
+("Development Build / No development servers found"), not the app's own UI. It
+proves the process launches. It does not prove the app renders.
+
+A **Release** simulator build was therefore made, which embeds the JS bundle
+(23 MB `main.jsbundle`) and bypasses dev-client. That one shows the real home
+screen — "T3 Code ALPHA" header, Add environment, search — rendering from its
+own bundle, with `EXUpdatesEnabled false`, no `EXUpdatesURL`, and no upstream
+literal in the bundle.
+
+So the claim is now stronger than the audit's, and stated accurately: the app
+**renders**, from a Release artifact that is provably severed.
+
+### 7.3 Constraint: Apple Silicon only, today
+
+The vendored `GhosttyKit.xcframework` ships `ios-arm64` and
+`ios-arm64-simulator` and **no x86_64 slice**. Debug builds only the active
+architecture and so passes; **Release defaults to `ONLY_ACTIVE_ARCH=NO` and
+fails** with `no such module 'GhosttyKit'` — an error that names a Swift module
+rather than an architecture and sends you to the wrong file.
+
+Consequences: an Intel Mac cannot build this app, an x86_64 simulator target
+cannot be built, and a fat Release build fails unless `ONLY_ACTIVE_ARCH=YES` is
+passed. Pre-existing, unrelated to the severance, and not blocking for
+TestFlight since device builds are arm64 — but it is a real constraint on who
+can build this and should be in the build docs rather than rediscovered.
