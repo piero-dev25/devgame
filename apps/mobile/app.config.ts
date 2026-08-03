@@ -52,24 +52,24 @@ const RELEASE_ASSETS = {
 
 const VARIANT_CONFIG = {
   development: {
-    appName: "T3 Code Dev",
+    appName: "DevGame Dev",
     scheme: "t3code-dev",
-    iosBundleIdentifier: "com.t3tools.t3code.dev",
-    androidPackage: "com.t3tools.t3code.dev",
+    iosBundleIdentifier: "com.devgame.app.dev",
+    androidPackage: "com.devgame.app.dev",
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
-    appName: "T3 Code Preview",
+    appName: "DevGame Preview",
     scheme: "t3code-preview",
-    iosBundleIdentifier: "com.t3tools.t3code.preview",
-    androidPackage: "com.t3tools.t3code.preview",
+    iosBundleIdentifier: "com.devgame.app.preview",
+    androidPackage: "com.devgame.app.preview",
     assets: PREVIEW_ASSETS,
   },
   production: {
-    appName: "T3 Code",
+    appName: "DevGame",
     scheme: "t3code",
-    iosBundleIdentifier: "com.t3tools.t3code",
-    androidPackage: "com.t3tools.t3code",
+    iosBundleIdentifier: "com.devgame.app",
+    androidPackage: "com.devgame.app",
     assets: RELEASE_ASSETS,
   },
 } as const;
@@ -134,7 +134,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
       !IOS_BUNDLE_IDENTIFIER_PATTERN.test(personalTeamBundleIdentifier))
   ) {
     throw new Error(
-      "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.t3code when T3CODE_IOS_PERSONAL_TEAM=1.",
+      "T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID must be a reverse-DNS identifier such as com.example.devgame when T3CODE_IOS_PERSONAL_TEAM=1.",
     );
   }
 
@@ -166,7 +166,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
         {
           name: "AgentActivity",
           displayName: "Agent Activity",
-          description: "Shows the current state of active T3 Code agents.",
+          description: "Shows the current state of active DevGame agents.",
           supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
         },
       ],
@@ -203,7 +203,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
 
   return {
     name: variant.appName,
-    slug: "t3-code",
+    slug: "devgame",
     platforms: ["ios", "android"],
     scheme: variant.scheme,
     version: "1.0.1",
@@ -249,7 +249,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
           NSAllowsArbitraryLoads: true,
         },
         NSLocalNetworkUsageDescription:
-          "Allow T3 Code to connect to T3 Code servers on your local network or tailnet.",
+          "Allow DevGame to connect to DevGame servers on your local network or tailnet.",
         ITSAppUsesNonExemptEncryption: false,
         // The App Store screenshot harness rotates the iPad interface from
         // inside the app (CI denies osascript the Accessibility access that
@@ -343,7 +343,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
       [
         "expo-camera",
         {
-          cameraPermission: "Allow T3 Code to access your camera so you can scan pairing QR codes.",
+          cameraPermission: "Allow DevGame to access your camera so you can scan pairing QR codes.",
           microphonePermission: false,
           barcodeScannerEnabled: true,
           recordAudioAndroid: false,

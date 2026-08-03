@@ -31,7 +31,12 @@ import {
 
 const REPO_ROOT = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "..");
 const MOBILE_ROOT = NodePath.join(REPO_ROOT, "apps/mobile");
-const ANDROID_PACKAGE = "com.t3tools.t3code";
+const ANDROID_PACKAGE = "com.devgame.app";
+// Deliberately still `t3code`, unlike the package id above. The URL scheme is
+// not merely a name: it is the registered deep-link protocol, it carries the
+// Clerk OAuth redirect, and its siblings in DesktopEnvironment.ts name the
+// user-data directory and the Linux WM class. Renaming it is a migration
+// affecting existing installs, not a rename. Tracked in the release plan.
 const APP_SCHEME = "t3code";
 const IOS_READY_FILENAME = "T3ShowcaseReadyScene";
 const SERVER_HOST = "0.0.0.0";

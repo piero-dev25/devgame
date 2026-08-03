@@ -1,6 +1,6 @@
-# GameDev Assist
+# DevGame
 
-> **GameDev Assist is a fork of [T3 Code](https://github.com/pingdotgg/t3code), built by T3 Tools, Inc. and MIT-licensed.**
+> **DevGame is a fork of [T3 Code](https://github.com/pingdotgg/t3code), built by T3 Tools, Inc. and MIT-licensed.**
 >
 > Almost everything that makes this application work was written by them — the
 > agent harness, the terminal, checkpointing, source control, device pairing,

@@ -1,4 +1,68 @@
-# STILL OPEN: the app cannot complete connection setup with its own environment
+# SOLVED (mechanism), and it was very likely never a product bug
+
+> **Update 2026-08-03, root cause found.**
+>
+> **Nothing hangs and nothing is swallowed. The server answers in ~75 ms. The
+> client then spends ~42 seconds DECODING the reply, and the 15-second
+> `CONNECTION_ESTABLISHMENT_TIMEOUT` fires first.**
+>
+> `server.getConfig` returns ~292 KB — `providers` alone is 300,618 bytes, of
+> which opencode contributes 159,754 enumerating 381 models. Decoding it yields
+> to Effect's fiber scheduler **48 times**, and that scheduler yields via
+> `setTimeout(fn, 0)`. Chrome clamps nested timers to ~1000 ms **in a hidden
+> tab**: 48 × ~1000 ms predicts 48 s, and 42 s was measured.
+>
+> Proven three ways: an A/B on the same socket (a small `server.probe` round
+> trips in 20 ms while the large reply never resumes — so dispatch, socket and
+> auth are all fine); the same decode run in Node costs 13–27 ms of CPU across
+> 48 yields; and raising the timeout to 600 s let the app connect normally.
+>
+> **Why eight hypotheses missed it.** Chrome's network panel and
+> `read_network_requests` **do not show WebSocket frames**. The "app makes two
+> HTTP calls and then nothing" clue that drove the whole investigation was an
+> artifact of the instrument — the socket, the request and the 285 KB reply
+> were there the entire time.
+>
+> **Independently confirmed here.** Timing twelve nested `setTimeout(0)` calls
+> in the live hidden tab did not complete within a 45-second limit, while a
+> synchronous evaluation in the same tab returns instantly. Synchronous work
+> runs; timer chains are throttled to a standstill. A 48-yield decode cannot
+> finish in 15 s under those conditions.
+>
+> **This is upstream's code, untouched by the fork.** `git log
+69dfb7f09a..HEAD -- packages/client-runtime packages/contracts/src/server.ts`
+> is empty. The 15 s constant is upstream's and byte-identical at the
+> merge-base. Do not patch it here.
+>
+> **THE MEASUREMENT TRAP, which is the real lesson.** Any agent-driven
+> verification through a background or occluded browser window reproduces this
+> as a false product failure — and will do so for any other large RPC. Hours
+> went into chasing a defect that may not exist outside the instrument.
+>
+> **STILL UNCONFIRMED: the foreground case.** At Chrome's foreground clamp of
+> 4 ms the same decode predicts ~205 ms, comfortably inside budget — but that
+> is a prediction, not an observation. Both tabs report
+> `visibilityState: "hidden"` because the window is occluded, and desktop
+> control is owner-policy routed through Codex rather than driven here.
+>
+> **The one-minute check that settles it:** bring Chrome to the front, focused
+> and unoccluded, and reload the app. If the banner never appears, there is no
+> product bug and the fix is documentation only. If it still appears, the
+> payload is genuinely too large for the budget and the fix is the design change
+> below.
+>
+> **If it does fail in the foreground**, the defect is upstream's design: a flat
+> 15 s deadline covering socket-open _plus_ a decode whose cost scales with the
+> installed provider catalog, with no progress signal — so a slow environment
+> becomes an unwinnable retry loop that redoes the same work on the same budget.
+> The right fix is a **progress-based deadline** (arm for the handshake, disarm
+> once the response is in flight), not a larger constant, and it belongs
+> upstream. A local workaround would be to keep `providers` off the
+> establishment critical path.
+
+---
+
+# Original investigation (superseded above, kept for the eliminated hypotheses)
 
 > **Update 2026-08-03, after the dev-proxy fix (`e8c02bfbd`).**
 >

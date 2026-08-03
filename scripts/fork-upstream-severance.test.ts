@@ -26,13 +26,24 @@ const UPSTREAM_LITERALS = [
   "com.t3tools.t3code",
 ] as const;
 
-/** Bundle identifiers are a separate owner decision; only network identity is in scope here. */
-const BUNDLE_IDENTIFIER_LITERAL = "com.t3tools.t3code";
+/**
+ * The bundle/application identifier used to be exempted from app.config.ts
+ * here, with a comment noting it was "a separate owner decision" pending an
+ * App Store registration call — an App Store record, once registered under a
+ * given identifier, cannot be renamed. That decision was made on 2026-08-03:
+ * product **DevGame**, bundle **com.devgame.app**. The exemption is removed
+ * as of this change — upstream's bundle id is a live platform identity
+ * exactly like the analytics key or the EAS project, so it is asserted
+ * absent here on the same terms as every other upstream literal: no
+ * exemptions, in any of the files below.
+ */
+const OWN_BUNDLE_IDENTIFIER = "com.devgame.app";
 
 const SEVERED_FILES = [
   "apps/server/src/telemetry/AnalyticsService.ts",
   "apps/server/src/cloud/publicConfig.ts",
   "apps/mobile/eas.json",
+  "apps/mobile/app.config.ts",
   "apps/web/src/components/desktopUpdate.logic.ts",
   "apps/web/vercel.ts",
   "packages/shared/src/connectAuth.ts",
@@ -41,6 +52,26 @@ const SEVERED_FILES = [
   "apps/marketing/src/layouts/Layout.astro",
   "apps/marketing/src/pages/index.astro",
   "apps/marketing/src/pages/download.astro",
+  "scripts/build-desktop-artifact.ts",
+  "scripts/mobile-showcase.ts",
+  "apps/desktop/src/app/DesktopEnvironment.ts",
+  "apps/desktop/scripts/electron-launcher.mjs",
+] as const;
+
+/**
+ * Files that define our own bundle/application identifier as a literal.
+ * These are the A1/A4 sources in docs/workbench/release-readiness.md §4.8 —
+ * if any of them stops naming com.devgame.app (blanked, reverted, or
+ * silently repointed at something else), that is exactly as much a fork-
+ * identity defect as upstream's id reappearing, so it is asserted present,
+ * not just asserted-absent-for-upstream.
+ */
+const FILES_REQUIRING_OWN_BUNDLE_IDENTIFIER = [
+  "apps/mobile/app.config.ts",
+  "scripts/build-desktop-artifact.ts",
+  "scripts/mobile-showcase.ts",
+  "apps/desktop/src/app/DesktopEnvironment.ts",
+  "apps/desktop/scripts/electron-launcher.mjs",
 ] as const;
 
 function readRepoFile(relativePath: string): string {
@@ -56,17 +87,16 @@ describe("fork severance from upstream infrastructure", () => {
     }
   });
 
-  it("keeps every upstream literal out of app.config.ts except the bundle identifiers", () => {
-    // app.config.ts still names the bundle/package identifiers, which are an
-    // owner decision (an App Store record, once registered, cannot be renamed).
-    // Nothing else upstream may survive there.
-    const source = readRepoFile("apps/mobile/app.config.ts");
+  it.each(FILES_REQUIRING_OWN_BUNDLE_IDENTIFIER)(
+    "%s carries our own bundle identifier",
+    (relativePath) => {
+      const source = readRepoFile(relativePath);
 
-    for (const literal of UPSTREAM_LITERALS) {
-      if (literal === BUNDLE_IDENTIFIER_LITERAL) continue;
-      expect(source, `app.config.ts contains ${literal}`).not.toContain(literal);
-    }
-  });
+      expect(source, `${relativePath} is missing ${OWN_BUNDLE_IDENTIFIER}`).toContain(
+        OWN_BUNDLE_IDENTIFIER,
+      );
+    },
+  );
 
   it("leaves no upstream domain as a shell default in the release workflow", () => {
     const workflow = readRepoFile(".github/workflows/release.yml");

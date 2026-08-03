@@ -73,8 +73,8 @@ Work through top to bottom. Items marked **PARALLEL** can be started immediately
 
 | #   | Decision                                                                                                                                            | Why it blocks                                                                                                                                                                                                                                                                                                                                                                         |
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| D1  | **Product name** (final, store-facing)                                                                                                              | Drives `productName`, `appName`, window titles, installer names, GitHub Release titles, marketing copy. Apple rejects apps that appear to duplicate an existing one — it must not read as a T3 Code variant.                                                                                                                                                                          |
-| D2  | **Reverse-DNS bundle identifier**, e.g. `com.ironmindstudios.<app>`                                                                                 | Once registered with Apple it is **permanent and unchangeable** for that App Store record. Also derives the iOS widget/sharing extension IDs and App Group (`group.<bundleId>`), the Android package, the Windows AppUserModelID, and the Linux desktop entry. Get it right the first time.                                                                                           |
+| D1  | **Product name** (final, store-facing) — **DECIDED: `DevGame`.**                                                                                    | Drives `productName`, `appName`, window titles, installer names, GitHub Release titles, marketing copy. Apple rejects apps that appear to duplicate an existing one — it must not read as a T3 Code variant.                                                                                                                                                                          |
+| D2  | **Reverse-DNS bundle identifier** — **DECIDED: `com.devgame.app`.**                                                                                 | Once registered with Apple it is **permanent and unchangeable** for that App Store record. Also derives the iOS widget/sharing extension IDs and App Group (`group.<bundleId>`), the Android package, the Windows AppUserModelID, and the Linux desktop entry. Get it right the first time.                                                                                           |
 | D3  | **Apple enrollment: Organization or Individual**                                                                                                    | Organization requires a **D-U-N-S number** (free, typically 1–5 business days to obtain/verify) and lists the app under the company name. Individual is faster but publishes under your personal legal name. Not changeable later without a transfer process.                                                                                                                         |
 | D4  | **npm CLI package name** — currently the unscoped `t3`, which is upstream's real published package                                                  | Any publish attempt from our CI targets their identity. Pick e.g. `@ironmind/<cli>` or an unscoped name we own.                                                                                                                                                                                                                                                                       |
 | D5  | **Do we run "T3 Connect" (relay + Clerk) at all, or strip it for v1?**                                                                              | The entire `relay_public_config` CI job assumes a Cloudflare account + SST `t3code-relay` stack + a Clerk tenant. There is **no "stand up our own relay" path in this repo** — it's the first hard failure in CI. Standing it up is real infra work; ripping it out for v1 is a scoping decision. **This also gates signed macOS builds** (the passkey-entitlement coupling in §2.1). |
@@ -188,7 +188,7 @@ Optimised for **TestFlight-in-your-hands soonest**, since that was the explicit 
 1. **A1: start Apple Developer Program enrollment.** Longest lead item; nothing else on the iOS path can finish without it. Decide D3 (org vs individual) to start it.
 2. **A6: create the Expo account/org.** Free, five minutes.
 3. **A12: buy the domain.**
-4. **Settle D1 (name) and D2 (bundle ID).** Every engineering task below is blocked on these two strings.
+4. ~~Settle D1 (name) and D2 (bundle ID).~~ **Decided: `DevGame` / `com.devgame.app`.** Every engineering task below was blocked on these two strings; they are now fixed inputs to §4.8's change surface.
 
 ### Phase 1 — Identity repoint, mobile-only (engineering, ~0.5–1 day)
 
@@ -285,9 +285,12 @@ What the generated native project and the built artifact contain:
 | `CFBundleDisplayName`                                            | `T3 Code` — **still upstream's, deliberately**                        |
 
 So **network identity is severed and proven in the shipping artifact**, while
-**product identity is untouched** and remains an owner decision (§3.1 D1–D2).
+**product identity, at the time of this audit, was untouched** — §3.1 D1–D2
+were still open. They are now decided (`DevGame` / `com.devgame.app`, see
+§4.8) and the audit-night measurements above should be treated as a snapshot
+of the pre-decision state, not the current one.
 Those are different things and the distinction matters: nothing phones home,
-but the app still presents as theirs.
+but the app still presents as theirs until the §4.8 sweep lands.
 
 ### Build gotcha that costs an hour if you hit it cold
 
