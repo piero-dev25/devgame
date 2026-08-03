@@ -27,6 +27,15 @@ class_name EppClient
 ## presence route is designed to always accept the upgrade and reject with
 ## an application close instead, specifically so engine clients get a real
 ## reason here.
+##
+## RECONNECT POLICY, tied to that same code: an application close (>= 4000)
+## does NOT auto-reconnect. The server told us definitively why (e.g. an
+## expired token) and retrying with the same credential fails the same way
+## every time — auto-retrying just produces an infinite amber dot. Recovery
+## is the toolbar indicator's click-to-retry (force_reconnect_now), once the
+## user has actually fixed the problem. Any OTHER close (including -1,
+## "never connected") keeps retrying with backoff, since that class of
+## failure — network blip, server mid-restart — is plausibly transient.
 
 signal state_changed(state: int, message: String)
 
@@ -36,7 +45,6 @@ const APPLICATION_CLOSE_THRESHOLD := 4000
 const RECONNECT_BASE_SEC := 0.5
 const RECONNECT_MAX_SEC := 30.0
 const RECONNECT_JITTER_FRACTION := 0.2
-const APPLICATION_CLOSE_ATTEMPT_FLOOR := 3
 const CIRCUIT_BREAKER_LIMIT := 3
 const PING_INTERVAL_SEC := 20.0
 const PONG_TIMEOUT_SEC := 10.0
@@ -80,13 +88,11 @@ static func describe_close(code: int, reason: String, url: String) -> String:
 	return "cannot reach Workbench at %s" % url
 
 ## Pure: exponential backoff with jitter, matching
-## spec-godot-publisher.md step 4 (0.5s base, 30s cap, +/-20% jitter).
-## `escalate` jumps the attempt counter to the floor so an application
-## close (e.g. a bad token) does not hammer-retry at the fast base delay.
-static func compute_backoff_sec(attempt: int, escalate: bool, rng: RandomNumberGenerator) -> Dictionary:
+## spec-godot-publisher.md step 4 (0.5s base, 30s cap, +/-20% jitter). Only
+## reached for non-application closes now — an application close (>= 4000)
+## does not call this at all, see _stop_retrying().
+static func compute_backoff_sec(attempt: int, rng: RandomNumberGenerator) -> Dictionary:
 	var next_attempt := attempt + 1
-	if escalate:
-		next_attempt = maxi(next_attempt, APPLICATION_CLOSE_ATTEMPT_FLOOR)
 	var base_delay: float = minf(RECONNECT_BASE_SEC * pow(2.0, float(next_attempt)), RECONNECT_MAX_SEC)
 	var jitter_span: float = base_delay * RECONNECT_JITTER_FRACTION
 	var jitter: float = rng.randf_range(-jitter_span, jitter_span)
@@ -137,7 +143,7 @@ func connect_now() -> void:
 	var err := _peer.connect_to_url(connect_url)
 	if err != OK:
 		_peer = null
-		_schedule_retry(0.0, false)
+		_schedule_retry(0.0)
 		_set_state(State.DISCONNECTED, "connect_to_url failed (error %d)" % err)
 		return
 	_set_state(State.CONNECTING, "")
@@ -170,7 +176,7 @@ func poll(now_sec: float) -> bool:
 				# No pong within the deadline — treat as a dead half-open
 				# socket (the laptop-sleep case) and force a reconnect.
 				_peer = null
-				_schedule_retry(now_sec, false)
+				_schedule_retry(now_sec)
 				_set_state(State.DISCONNECTED, "no response to ping — connection presumed dead")
 				return just_opened
 			_send_json({"v": 1, "type": "ping"})
@@ -181,8 +187,10 @@ func poll(now_sec: float) -> bool:
 		var code := _peer.get_close_code()
 		var reason := _peer.get_close_reason()
 		_peer = null
-		var escalate := code >= APPLICATION_CLOSE_THRESHOLD
-		_schedule_retry(now_sec, escalate)
+		if code >= APPLICATION_CLOSE_THRESHOLD:
+			_stop_retrying()
+		else:
+			_schedule_retry(now_sec)
 		_set_state(State.DISCONNECTED, describe_close(code, reason, _url))
 
 	return just_opened
@@ -226,15 +234,21 @@ func _send_json(obj: Dictionary) -> void:
 		if _consecutive_errors >= CIRCUIT_BREAKER_LIMIT:
 			push_error("[T3 Editor Presence] %d consecutive send failures, disconnecting" % _consecutive_errors)
 			_peer = null
-			_schedule_retry(Time.get_ticks_msec() / 1000.0, false)
+			_schedule_retry(Time.get_ticks_msec() / 1000.0)
 			_set_state(State.DISCONNECTED, "repeated send failures — check the connection")
 	else:
 		_consecutive_errors = 0
 
-func _schedule_retry(now_sec: float, escalate: bool) -> void:
-	var result := compute_backoff_sec(_reconnect_attempt, escalate, _rng)
+func _schedule_retry(now_sec: float) -> void:
+	var result := compute_backoff_sec(_reconnect_attempt, _rng)
 	_reconnect_attempt = result["attempt"]
 	_next_connect_at_sec = now_sec + result["delay_sec"]
+
+## An application close (>= 4000) does not get a retry scheduled at all —
+## should_attempt_connect() stays false forever until force_reconnect_now()
+## resets it. See the RECONNECT POLICY note in this file's header comment.
+func _stop_retrying() -> void:
+	_next_connect_at_sec = INF
 
 func _set_state(state: int, message: String) -> void:
 	_state = state

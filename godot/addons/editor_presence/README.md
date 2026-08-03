@@ -86,17 +86,51 @@ tracks it. It only breaks on delete-and-recreate.
   `docs/workbench/godot-probe-findings.md` for the measurement that forced
   this design.
 
+## Reconnect policy
+
+An application close (code >= 4000 — the server telling you exactly why,
+e.g. a bad token) does **not** auto-reconnect. Retrying with the same
+credential fails the same way every time, so this stops and waits for the
+toolbar indicator to be clicked (which retries immediately) once you've
+actually fixed the problem. Any other close — including `-1` ("never
+connected", the ambiguous case) — keeps retrying with exponential backoff,
+since that class of failure (network blip, server mid-restart) is
+plausibly transient.
+
 ## What is proven and what is not
 
 **Proven, headlessly, with a real Godot process** (`godot --headless`):
-frame construction (`epp_selection_test.gd`) and the pure transport helpers
-— close-code interpretation, backoff timing, session id shape
-(`epp_client_test.gd`). Run them yourself:
+
+- Frame construction (`tests/epp_selection_test.gd`) — pure, fake Node/path objects.
+- The pure transport helpers — close-code interpretation, backoff timing,
+  session id shape (`tests/epp_client_test.gd`).
+- **The actual EppClient talking to a real WebSocket connection**
+  (`tests/epp_client_integration_test.gd`), against a self-contained,
+  dependency-free fake server (`tests/fake_epp_server.gd`, plain GDScript —
+  `TCPServer` + `WebSocketPeer.accept_stream()`, both confirmed present in
+  this engine) that validates every inbound frame against the real wire
+  contract in `apps/server/src/editorPresence/protocol.ts` rather than
+  just recording raw text — a fake that accepts anything proves nothing,
+  and a "record raw text" fake is exactly what let a different engine's
+  plugin ship a nested-instead-of-flat `selection` frame that the real
+  server would have silently discarded every time. This test asserts the
+  reconnect policy above directly: an application close stops retrying
+  (still exactly one connection after 4 real seconds), a transient close
+  keeps retrying (a second connection arrives). Mutation-proven — see the
+  PR/commit history for exactly which mutation broke which assertion.
+
+Run them yourself:
 
 ```
 godot --headless --path godot --script addons/editor_presence/tests/epp_selection_test.gd
 godot --headless --path godot --script addons/editor_presence/tests/epp_client_test.gd
+godot --headless --path godot --script addons/editor_presence/tests/epp_client_integration_test.gd
 ```
+
+The integration test binds real localhost TCP ports (39812/39813) for its
+own throwaway server — it never touches a shared dev server and takes a
+few real seconds to run (it exercises actual backoff timing, not simulated
+time).
 
 **NOT proven — needs the actual editor open, which this environment cannot
 do:**

@@ -25,7 +25,6 @@ func _initialize() -> void:
 	_test_describe_close_no_reason_fallback()
 	_test_describe_close_minus_one()
 	_test_backoff_grows_and_caps()
-	_test_backoff_escalation_floor()
 	_test_backoff_jitter_bounded()
 	_test_session_id_shape_and_uniqueness()
 
@@ -68,31 +67,13 @@ func _test_backoff_grows_and_caps() -> void:
 	var delays: Array[float] = []
 	var attempt := 0
 	for i in 10:
-		var result := EppClient.compute_backoff_sec(attempt, false, rng)
+		var result := EppClient.compute_backoff_sec(attempt, rng)
 		attempt = result["attempt"]
 		delays.append(result["delay_sec"])
 
 	_check("backoff: first delay is near the 0.5s*2^1 base", delays[0] > 0.5 and delays[0] < 1.5, str(delays[0]))
 	_check("backoff: caps at <= 30s * 1.2 jitter headroom", delays[-1] <= 36.0, str(delays[-1]))
 	_check("backoff: attempt counter increments monotonically", attempt == 10, str(attempt))
-
-func _test_backoff_escalation_floor() -> void:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 2
-	# An application close (escalate=true) from attempt 0 must jump straight
-	# toward the floor rather than retry at the fast base delay — this is
-	# the "don't hammer-reconnect on an auth rejection" rule.
-	var result := EppClient.compute_backoff_sec(0, true, rng)
-	_check(
-		"backoff: application close escalates attempt to the floor",
-		result["attempt"] >= 3,
-		str(result["attempt"]),
-	)
-	_check(
-		"backoff: escalated delay is meaningfully larger than the base 0.5s",
-		result["delay_sec"] > 2.0,
-		str(result["delay_sec"]),
-	)
 
 func _test_backoff_jitter_bounded() -> void:
 	var rng := RandomNumberGenerator.new()
@@ -105,7 +86,7 @@ func _test_backoff_jitter_bounded() -> void:
 	var high: float = base * (1.0 + EppClient.RECONNECT_JITTER_FRACTION) + 0.001
 	var all_in_band := true
 	for i in 50:
-		var result := EppClient.compute_backoff_sec(attempt, false, rng)
+		var result := EppClient.compute_backoff_sec(attempt, rng)
 		var delay: float = result["delay_sec"]
 		if delay < low or delay > high:
 			all_in_band = false
