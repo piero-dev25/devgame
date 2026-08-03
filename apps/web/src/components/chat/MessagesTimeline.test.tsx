@@ -490,6 +490,37 @@ describe("MessagesTimeline", () => {
     expect(markup).not.toContain("<element_context");
   });
 
+  it("renders chips for editor-selection messages, hides the raw tags, and keeps the rest of the prompt visible", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          buildUserTimelineEntry(
+            [
+              "move that object left",
+              "",
+              "<editor_selection>",
+              "- PlayerRoot (gameObject) [pinned]:",
+              "  id: obj-1",
+              "  path: Assets/Player.prefab",
+              "</editor_selection>",
+            ].join("\n"),
+          ),
+        ]}
+      />,
+    );
+
+    // The chip rendered — proves the extractor ran and its entries reached
+    // EditorSelectionMessageChips.
+    expect(markup).toContain("PlayerRoot");
+    // The rest of the prompt is still there — proves the component body is
+    // fed the extractor's `promptText`, not the raw `row.message.text`
+    // (which would still have the tag-wrapped block attached).
+    expect(markup).toContain("move that object left");
+    expect(markup).not.toContain("&lt;editor_selection");
+    expect(markup).not.toContain("<editor_selection");
+  });
+
   it("keeps the copy button for collapsed long user messages", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline
