@@ -53,6 +53,23 @@ deletions**. Almost purely additive.
 - **A live `git merge-tree` against `upstream/main` returns zero conflicts**
   today.
 
+**The first real test of the "small mounts" rule, and it passed.** As of
+2026-08-03 the fork is 153 files / 18,320 insertions / 106 deletions off
+`69dfb7f09`, and the editor-presence work added mounts to BOTH named
+high-conflict files. The one upstream commit since our base
+(`30c962280`, "polish interface spacing") happens to touch
+`ChatView.tsx` and `ChatComposer.tsx` — _exactly_ the two files we edited.
+
+`git merge-tree --write-tree HEAD upstream/main` still reports **zero
+conflicts**, because our edits total 15 inserted lines and sit in different
+regions from theirs: one import plus a three-line conditional in the composer,
+two imports plus one wrapping call in `ChatView`.
+
+This is the concrete argument for the rule. Had the presence chips been
+implemented _inside_ those components rather than mounted into them, the same
+upstream commit would have conflicted. Keep the mount to a call; keep the
+logic in our own directory.
+
 ## Where we do not comply
 
 **`packages/contracts/src/orchestration.ts`: +132 lines in a file upstream
