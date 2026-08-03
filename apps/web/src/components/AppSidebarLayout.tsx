@@ -15,8 +15,7 @@ import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings"
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
 import { useEnvironmentIdentificationMode, useSidebarV2Enabled } from "../hooks/useSettings";
-import ThreadSidebar from "./Sidebar";
-import ThreadSidebarV2 from "./SidebarV2";
+import { useThreadSidebarComponent } from "../hooks/useThreadSidebarComponent";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import {
   resolveInitialThreadSidebarWidth,
@@ -123,8 +122,18 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   // and is identical for both sidebars — so v1 stays mounted there.
   const pathname = useLocation({ select: (location) => location.pathname });
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
-  const useSidebarV2 = sidebarV2Enabled && !isOnSettings;
-  const useSidebarV2Theme = useSidebarV2 || isOnSettings;
+  // `sidebarV2Enabled || isOnSettings` is `(sidebarV2Enabled && !isOnSettings)
+  // || isOnSettings` simplified (A||B is equivalent to (A&&!B)||B) — themed as
+  // v2 whenever the flag would pick it OR we're on settings, independent of
+  // which component actually renders below (see `ThreadSidebarComponent`,
+  // which forces v1 specifically ON settings — this stays themed "v2" there
+  // by design, matching the pre-existing behaviour this replaces).
+  const useSidebarV2Theme = sidebarV2Enabled || isOnSettings;
+  // Which CONTENT component renders is now resolved by the shared hook (spec
+  // correction: the dock's SidebarPanel.tsx uses the exact same hook, so the
+  // v1-vs-v2 decision lives in exactly one place instead of being duplicated
+  // here and there).
+  const ThreadSidebarComponent = useThreadSidebarComponent({ forceV1: isOnSettings });
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -200,7 +209,7 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           onResize: setSidebarWidth,
         }}
       >
-        {useSidebarV2 ? <ThreadSidebarV2 /> : <ThreadSidebar />}
+        <ThreadSidebarComponent />
         <SidebarRail />
       </Sidebar>
       {children}

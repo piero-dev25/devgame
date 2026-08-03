@@ -75,23 +75,25 @@ export const chatDockPanelRegistry: PanelRegistry = createPanelRegistry();
 /**
  * Part A: T3's sidebar as an ordinary dock panel.
  *
- * Hosts `SidebarV2`, not `Sidebar` (v1) — the spec is explicit: "decide
- * which one the dock panel hosts and say why. Do not try to host both."
- * `useSidebarV2Enabled()` (`~/hooks/useSettings.ts`) resolves v2 as the
- * default "for nightly and dev" build stages absent an explicit user
- * override, and this fork's `APP_STAGE_LABEL` is a dev/nightly stage — the
- * same "dev/nightly default" language the spec itself uses to describe v2.
- * A single hard-coded choice (rather than replicating `AppSidebarLayout`'s
- * live `sidebarV2Enabled` switch inside this panel) is what "do not try to
- * host both" is asking for: one panel, one component, no runtime branch
- * duplicating a decision `AppSidebarLayout` already owns for `/settings`.
- * If a user has explicitly opted into v1 via Settings → Beta, the docked
- * sidebar will show v2 anyway while `/settings` still shows v1 — a real,
- * visible gap, documented here rather than silently accepted.
+ * OWNER CORRECTION to the original spec (spec-dock-step-2.md's "decide which
+ * one the dock panel hosts... do not try to host both" was overruled): both
+ * `Sidebar` (v1) and `SidebarV2` stay live, neither gets deleted or
+ * hardcoded away. `SidebarPanel.tsx` hosts WHICHEVER one
+ * `useThreadSidebarComponent()` resolves — the exact same flag
+ * `AppSidebarLayout` reads, via a hook extracted out of `AppSidebarLayout`'s
+ * own inline ternary specifically so the two call sites share one
+ * component-selection decision rather than each independently forking it.
+ * "Do not try to host both" is satisfied at the RENDER level (this panel
+ * only ever mounts one of the two at a time, matching what
+ * `AppSidebarLayout` already does for every non-settings route today) —
+ * it's not "pick one forever," it's "don't render two competing sidebars
+ * simultaneously."
  *
  * `singleton: true`: `SidebarV2.tsx:2778` hardcodes
- * `id="sidebar-thread-search-results"`, which a second instance would
- * collide on.
+ * `id="sidebar-thread-search-results"`, which a second SidebarV2 instance
+ * would collide on. Applies regardless of which variant is currently
+ * resolved — only one "sidebar" panel can ever be open in this dock either
+ * way.
  */
 chatDockPanelRegistry.register({
   id: SIDEBAR_PANEL_ID,
