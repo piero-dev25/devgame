@@ -1,0 +1,24 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "T3 Editor Presence",
+  "Description": "Streams the current Unreal Editor selection (level actors and Content Browser assets) to a T3 Code chat composer over the Editor Presence Protocol (EPP). See docs/workbench/spec-editor-presence.md in the t3code repo for the protocol and pairing flow. Content-only Python plugin: no compiler, no per-engine-version binary, works on a Blueprint-only project. Editor-only; nothing here ships in a packaged game.",
+  "Category": "Editor",
+  "CreatedBy": "Ironmind Studios",
+  "CreatedByURL": "",
+  "DocsURL": "",
+  "MarketplaceURL": "",
+  "SupportURL": "",
+  "EnabledByDefault": true,
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": false,
+  "Installed": false,
+  "Plugins": [
+    {
+      "Name": "PythonScriptPlugin",
+      "Enabled": true
+    }
+  ]
+}
