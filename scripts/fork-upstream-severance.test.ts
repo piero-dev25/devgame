@@ -116,7 +116,17 @@ describe("fork severance from upstream infrastructure", () => {
    * precisely because the existing guard only looked for the hyphenated
    * `t3-code`, and `t3code-dev` walked straight through it.
    */
-  const SCHEME_DECLARING_FILES = ["apps/mobile/app.config.ts", "scripts/build-desktop-artifact.ts"];
+  const SCHEME_DECLARING_FILES = [
+    "apps/mobile/app.config.ts",
+    "scripts/build-desktop-artifact.ts",
+    // Added after the first pass shipped with this file still declaring
+    // `["t3code-dev"] : ["t3code"]`. It writes CFBundleURLSchemes for the DEV
+    // runtime, so the packaged build was renamed while the app developers run
+    // every day was not -- and the only way that surfaced was reading the
+    // running app's Info.plist. Two files declaring the same OS-level identity
+    // is exactly the shape a single-file check misses.
+    "apps/desktop/scripts/electron-launcher.mjs",
+  ];
 
   it.each(SCHEME_DECLARING_FILES)("%s registers our own URL scheme, not upstream's", (path) => {
     const source = readRepoFile(path);

@@ -19,7 +19,7 @@ export const APP_DISPLAY_NAME = isDevelopment ? "DevGame (Dev)" : "DevGame (Alph
 export const APP_BUNDLE_ID = isDevelopment
   ? `com.devgame.app.dev.${devBundleIdSuffix || "local"}`
   : "com.devgame.app";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code"];
+const APP_PROTOCOL_SCHEMES = isDevelopment ? ["devgame-dev"] : ["devgame"];
 const LAUNCHER_VERSION = 14;
 const defaultIconPath = NodePath.join(desktopDir, "resources", "icon.icns");
 const developmentMacIconPngPath = NodePath.join(

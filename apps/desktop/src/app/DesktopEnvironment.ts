@@ -209,8 +209,8 @@ const make = Effect.fn("desktop.environment.make")(function* (
     appUserModelId: Option.getOrElse(config.appUserModelIdOverride, () =>
       isDevelopment ? "com.devgame.app.dev" : "com.devgame.app",
     ),
-    linuxDesktopEntryName: isDevelopment ? "t3code-dev.desktop" : "t3code.desktop",
-    linuxWmClass: isDevelopment ? "t3code-dev" : "t3code",
+    linuxDesktopEntryName: isDevelopment ? "devgame-dev.desktop" : "devgame.desktop",
+    linuxWmClass: isDevelopment ? "devgame-dev" : "devgame",
     linuxApplicationsDir,
     appImagePath: config.appImagePath,
     userDataDirName,
