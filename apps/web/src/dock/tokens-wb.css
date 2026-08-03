@@ -1,0 +1,151 @@
+/**
+ * Dock chrome tokens — the raw `--wb-*` custom properties, ported from
+ * gamedev-workbench's app/web/src/styles/tokens.css.
+ *
+ * Deliberately NOT ported: the `@import "tailwindcss";` line (this file is
+ * imported into an app that already has its own Tailwind entry point — see
+ * apps/web/src/index.css) and the entire `@theme { ... }` block at the end
+ * of the source file, which maps these vars onto Tailwind utility classes
+ * like `bg-surface`/`text-dim`/`rounded-card`. Merging that would silently
+ * restyle every Tailwind utility in this app that happens to share a name
+ * with one of the source app's tokens — spec-dock-step-1.md correction 5
+ * calls this out as the worst available outcome, because nothing would
+ * error. `dockviewTheme.css` (the only consumer of these vars in this
+ * fork) reaches every one of them through `var(--wb-*)` directly, never
+ * through a generated utility, so it needs nothing from `@theme`.
+ *
+ * THEME-SWITCH MECHANISM REWRITTEN, not ported verbatim: the source app
+ * toggles theme via a `[data-theme="dark"|"light"]` attribute (plus an
+ * `@media (prefers-color-scheme)` fallback for "no explicit choice yet").
+ * This fork's `~/hooks/useTheme.ts` uses a different, incompatible
+ * mechanism — `document.documentElement.classList.toggle("dark", isDark)`
+ * — and resolves "system" preference to a concrete class via
+ * `matchMedia` in JS *before first paint* ("Apply immediately on module
+ * load to prevent flash"), so there is never a moment where a CSS-level
+ * `prefers-color-scheme` fallback is needed: the `.dark` class is always
+ * either present or absent by the time anything renders. Porting the
+ * source's `[data-theme]` selectors as-is would silently never match in
+ * this app (it never sets that attribute) — the dock would stay locked to
+ * this file's dark values regardless of the app's actual theme, a bug of
+ * exactly the "renders unstyled/wrong with no error" shape correction 3
+ * warns about for the import site, just one level deeper. Fixed by
+ * restructuring onto this app's real mechanism: bare `:root` now holds the
+ * LIGHT values (matching `useTheme.ts`'s "no .dark class = light"
+ * default) and `:root.dark` holds the DARK values — `<html>` is both
+ * `:root` and the element `classList.toggle` mutates, so `:root.dark` is
+ * the exact, most-specific match. The `@media (prefers-color-scheme)`
+ * fallback block is dropped rather than translated: it would be dead
+ * weight in an app where JS always resolves the class before paint.
+ *
+ * ONE further addition beyond the source: `--wb-surface-3`, referenced by
+ * dockviewTheme.css:120,165 (tab-action hover, context-menu-item hover) but
+ * never defined in the source file — spec-dock-step-1.md correction 4 calls
+ * this a live, silently-dead-hover bug in the source app and asks that it be
+ * defined here rather than ported. Derived the same way the source's own
+ * `--wb-surface-2` describes itself as derived from `--wb-surface` ("a few
+ * RGB units lighter... used only for hover/pressed backgrounds"): one more
+ * step in the same direction, by the same per-channel delta that produced
+ * surface-2 from surface. Dark: surface #12161b → surface-2 #181c22 is
+ * (+6,+6,+7) per channel; one more step lands surface-3 at #1e2229. Light:
+ * surface #ffffff → surface-2 #f0f0f4 is (-15,-15,-11); one more step lands
+ * surface-3 at #e1e1e9.
+ *
+ * Every other value below is unchanged from the source file — see that
+ * file's own comments (not repeated here) for how each was measured or
+ * derived.
+ */
+
+:root {
+  color-scheme: light;
+
+  --wb-rail: #f5f5f8;
+  --wb-topbar: #ffffff;
+  --wb-bg: #f5f5f8;
+  --wb-surface: #ffffff;
+  --wb-sidebar: #fafafc;
+  --wb-rail-right: #fafafc;
+  --wb-sunken: #eeeef2;
+  --wb-surface-2: #f0f0f4;
+  --wb-surface-3: #e1e1e9;
+
+  --wb-border: #e2e2e8;
+  --wb-border-strong: #cfcfd9;
+
+  --wb-accent: #5230ac;
+  --wb-accent-bright: #6c45de;
+  --wb-accent-hover: #42268a;
+  --wb-accent-soft: rgba(82, 48, 172, 0.1);
+  --wb-accent-soft-weak: rgba(82, 48, 172, 0.06);
+
+  --wb-text: #16161d;
+  --wb-text-dim: #62626f;
+  --wb-text-muted: #696973;
+  --wb-text-on-accent: #ffffff;
+
+  --wb-success: #107a37;
+  --wb-success-soft: rgba(22, 163, 74, 0.1);
+  --wb-warn: #a05804;
+  --wb-warn-soft: rgba(217, 119, 6, 0.1);
+  --wb-danger: #ce2323;
+  --wb-danger-soft: rgba(220, 38, 38, 0.1);
+  --wb-info: #2462e8;
+  --wb-info-soft: rgba(37, 99, 235, 0.1);
+
+  --wb-radius-card: 12px;
+  --wb-radius-control: 8px;
+  --wb-radius-chip: 6px;
+
+  --wb-font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --wb-font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --wb-rail-width: 64px;
+  --wb-sidebar-width: 298px;
+  --wb-right-rail-width: 416px;
+  --wb-topbar-height: 56px;
+
+  --wb-ease: cubic-bezier(0.2, 0, 0, 1);
+  --wb-duration-fast: 120ms;
+  --wb-duration-base: 180ms;
+}
+
+/**
+ * Dark theme — applied whenever `~/hooks/useTheme.ts` has put `.dark` on
+ * `<html>` (`:root`). See this file's module doc for why this selector,
+ * not the source's `[data-theme="dark"]`.
+ */
+:root.dark {
+  color-scheme: dark;
+
+  --wb-rail: #0c0f14;
+  --wb-topbar: #0d1115;
+  --wb-bg: #13171c;
+  --wb-surface: #12161b;
+  --wb-sidebar: #12161a;
+  --wb-rail-right: #121618;
+  --wb-sunken: #0e1115;
+  --wb-surface-2: #181c22;
+  --wb-surface-3: #1e2229;
+
+  --wb-border: #262b33;
+  --wb-border-strong: #333944;
+
+  --wb-accent: #5230ac;
+  --wb-accent-bright: #6c45de;
+  --wb-accent-hover: var(--wb-accent-bright);
+  --wb-accent-soft: #201b38;
+  --wb-accent-soft-weak: rgba(82, 48, 172, 0.1);
+
+  --wb-text: #ffffff;
+  --wb-text-dim: #91959e;
+  --wb-text-muted: #848a96;
+  --wb-text-on-accent: #ffffff;
+
+  --wb-success: #79c871;
+  --wb-success-soft: rgba(121, 200, 113, 0.12);
+  --wb-warn: #efb455;
+  --wb-warn-soft: rgba(239, 180, 85, 0.12);
+  --wb-danger: #e2685e;
+  --wb-danger-soft: rgba(226, 104, 94, 0.12);
+  --wb-info: #6ba3e8;
+  --wb-info-soft: rgba(107, 163, 232, 0.12);
+}

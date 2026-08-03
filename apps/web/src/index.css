@@ -1,4 +1,18 @@
 @import "tailwindcss";
+/*
+ * Dock chrome tokens (spec-dock-step-1.md correction 3): the raw `--wb-*`
+ * custom properties `apps/web/src/dock/dockviewTheme.css` reads via
+ * `var(--wb-*)`. Chosen as the import site because it's this app's single
+ * global CSS entry (imported once from main.tsx, ahead of any route/component
+ * code) — nothing else guarantees these vars exist before the dock's own
+ * CSS module (imported lazily, from DockviewLayout.tsx, only once the dock
+ * route is actually visited) gets evaluated. Loading them here instead
+ * means the tokens are already on `:root` well before that ever happens, no
+ * matter which route mounts first. Must stay a plain `@import`, and stay
+ * above the `@custom-variant` lines below: CSS requires every `@import` to
+ * precede all other rules.
+ */
+@import "./dock/tokens-wb.css";
 
 @custom-variant dark (&:is(.dark, .dark *));
 /* Window Controls Overlay: active when Electron exposes native titlebar control geometry. */

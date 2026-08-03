@@ -1,0 +1,181 @@
+/**
+ * Ported verbatim from gamedev-workbench's
+ * app/web/src/components/layout/dockviewTheme.css. Consumes `--wb-*`
+ * exclusively through `var(--wb-*)`, never through a Tailwind utility class
+ * — so no mechanical sweep applies here (spec-dock-step-1.md correction 5).
+ * The `--wb-*` custom properties themselves are defined in tokens-wb.css,
+ * imported once from apps/web/src/index.css — see that file for why.
+ *
+ * dockview ships its own CSS (imported once in DockviewLayout.tsx, before
+ * this file so these rules win) whose defaults look nothing like the source
+ * app's design — this file maps the library's `--dv-*` variables onto the
+ * `--wb-*` tokens and then overrides the handful of structural rules
+ * variables can't reach: the active-tab underline, the drop-target preview,
+ * the splitter hit area, and floating-window chrome.
+ *
+ * Cards are RECESSED (a hair darker than the page, not lighter), separation
+ * is a hairline border, never a shadow. Applied here as:
+ * --dv-floating-box-shadow: none, and every fill mapped straight to
+ * --wb-surface rather than a lighter tier.
+ */
+
+.dockview-theme-workbench {
+  --dv-tabs-and-actions-container-font-size: 12px;
+  --dv-tabs-and-actions-container-height: 36px;
+  --dv-drag-over-background-color: var(--wb-accent-soft);
+  --dv-drag-over-border-color: var(--wb-accent-bright);
+  --dv-drag-over-border: 2px solid var(--wb-accent-bright);
+  --dv-tabs-container-scrollbar-color: var(--wb-border-strong);
+  --dv-icon-hover-background-color: var(--wb-surface-2);
+  --dv-overlay-z-index: 40;
+  --dv-tab-font-size: 13px;
+  --dv-border-radius: 0px;
+  --dv-tab-margin: 0;
+  --dv-sash-color: transparent;
+  --dv-active-sash-color: var(--wb-accent);
+  --dv-active-sash-transition-duration: 0.1s;
+  --dv-active-sash-transition-delay: 0s;
+  --dv-spacing-padding: 0px;
+  --dv-tab-border-radius: 0px;
+  --dv-sash-border-radius: 0px;
+  --dv-dropdown-border-radius: var(--wb-radius-control);
+  --dv-tab-close-icon-size: 14px;
+
+  /* Floating windows: hairline border, no shadow (never elevate). */
+  --dv-floating-group-border: 1px solid var(--wb-border-strong);
+  --dv-floating-group-dragging-opacity: 0.6;
+  --dv-floating-titlebar-height: 28px;
+  --dv-floating-titlebar-background-color: var(--wb-surface-2);
+  --dv-floating-titlebar-border-bottom: 1px solid var(--wb-border);
+  --dv-floating-border: 1px solid var(--wb-border-strong);
+  --dv-floating-box-shadow: none;
+
+  /* Recessed surfaces, hairline separation — never a lighter fill. */
+  --dv-group-view-background-color: var(--wb-surface);
+  --dv-tabs-and-actions-container-background-color: var(--wb-surface);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--wb-surface);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--wb-surface);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--wb-surface);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--wb-surface);
+  --dv-tab-divider-color: var(--wb-border);
+  --dv-activegroup-visiblepanel-tab-color: var(--wb-text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--wb-text-dim);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--wb-text-dim);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--wb-text-muted);
+  --dv-separator-border: var(--wb-border);
+
+  --dv-context-menu-background-color: var(--wb-surface-2);
+  --dv-context-menu-color: var(--wb-text);
+  --dv-scrollbar-background-color: var(--wb-border-strong);
+
+  /* We drive the active-tab underline ourselves (below) rather than the
+     per-group colour-chip system, so every workspace shows the one
+     measured accent regardless of which of dockview's built-in tab-group
+     colours a group happens to have. */
+  --dv-tab-group-line-height: 2px;
+  --dv-tab-group-line-opacity: 1;
+}
+
+/* ---- Group / tab-strip chrome ------------------------------------------------- */
+
+.dockview-theme-workbench .dv-groupview {
+  border: 1px solid var(--wb-border);
+  background-color: var(--wb-surface);
+}
+
+.dockview-theme-workbench .dv-tabs-and-actions-container {
+  border-bottom: 1px solid var(--wb-border);
+}
+
+.dockview-theme-workbench .dv-default-tab {
+  gap: 6px;
+  padding: 0 12px;
+  font-weight: 500;
+  transition:
+    color var(--wb-duration-fast) var(--wb-ease),
+    background-color var(--wb-duration-fast) var(--wb-ease);
+}
+
+.dockview-theme-workbench .dv-tab {
+  position: relative;
+}
+
+/* The measured accent underline on the active tab — applied directly rather
+   than through dockview's colour-chip system so it's the same regardless
+   of a group's assigned tab-group colour. */
+.dockview-theme-workbench .dv-tab.dv-active-tab::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background-color: var(--wb-accent-bright);
+}
+
+.dockview-theme-workbench .dv-tab.dv-inactive-tab:hover {
+  background-color: var(--wb-surface-2);
+}
+
+.dockview-theme-workbench .dv-default-tab-action {
+  border-radius: var(--wb-radius-chip);
+}
+
+.dockview-theme-workbench .dv-default-tab-action:hover {
+  background-color: var(--wb-surface-3);
+}
+
+/* ---- Splitters ----------------------------------------------------------------- */
+
+.dockview-theme-workbench .dv-sash:hover,
+.dockview-theme-workbench .dv-sash.dv-active {
+  background-color: var(--wb-accent);
+}
+
+/* ---- Drag / drop preview -------------------------------------------------------- */
+
+.dockview-theme-workbench .dv-drop-target-anchor {
+  border: 2px solid var(--wb-accent-bright);
+  background-color: var(--wb-accent-soft);
+  border-radius: var(--wb-radius-control);
+}
+
+/* ---- Floating windows ------------------------------------------------------------ */
+
+.dockview-theme-workbench .dv-floating-titlebar {
+  border-radius: var(--wb-radius-card) var(--wb-radius-card) 0 0;
+}
+
+.dockview-theme-workbench .dv-groupview.dv-resize-container-with-titlebar {
+  border-radius: var(--wb-radius-card);
+  overflow: hidden;
+}
+
+/* ---- Context menu ---------------------------------------------------------------- */
+
+.dockview-theme-workbench .dv-context-menu {
+  border: 1px solid var(--wb-border-strong);
+  border-radius: var(--wb-radius-control);
+  padding: 4px;
+  box-shadow: none;
+}
+
+.dockview-theme-workbench .dv-context-menu-item {
+  border-radius: var(--wb-radius-chip);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.dockview-theme-workbench .dv-context-menu-item:hover {
+  background-color: var(--wb-surface-3);
+}
+
+.dockview-theme-workbench .dv-context-menu-separator {
+  background-color: var(--wb-border);
+}
+
+/* ---- Watermark (empty group) ------------------------------------------------------ */
+
+.dockview-theme-workbench .dv-watermark-container {
+  color: var(--wb-text-muted);
+}
