@@ -132,6 +132,27 @@ export interface DockviewLayoutProps {
    * caller's history) so any consumer can retire a key the same way.
    */
   staleWorkspaceIds?: string[];
+  /**
+   * Fix round, finding #5 ("selecting a thread does not show you the
+   * thread"): with one dock instance persisted across every route
+   * (deliberately — see ChatDock.tsx's own doc on why it never remounts on
+   * a thread switch), whatever tab happened to be active before a
+   * navigation stays active after it. Clicking a thread in the sidebar with
+   * some OTHER panel active leaves the visible content exactly what it was
+   * — no composer, no transcript, no hint that chat is one click away. A
+   * straight regression against plain T3, where selecting a thread always
+   * shows you the thread.
+   *
+   * When `activationKey`'s IDENTITY changes, the panel named by
+   * `activateOnChangeId` (if currently open) is brought to the front of its
+   * group via `panel.api.setActive()` — WITHOUT tearing down or reloading
+   * anything else, unlike `workspaceId`/`presetId`, which do. Both optional
+   * together: omit both to opt out of this entirely (a future second dock
+   * with no equivalent "which thing is the user looking at" concept has no
+   * reason to force anything active on its own).
+   */
+  activationKey?: string | number;
+  activateOnChangeId?: string;
   // `| undefined` spelled out explicitly — this fork's tsconfig.base.json
   // sets `exactOptionalPropertyTypes: true` (the source repo's does not),
   // and ChatDock.tsx passes this straight through from its own optional
@@ -216,6 +237,8 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       fallbackPreset,
       storage: storageProp,
       staleWorkspaceIds,
+      activationKey,
+      activateOnChangeId,
       className,
     },
     forwardedRef,
@@ -269,6 +292,26 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // already-cleared key is a no-op either way.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [storage]);
+
+    // Fix round, finding #5: brings `activateOnChangeId`'s panel (Chat, from
+    // ChatDock.tsx) to the front of its group whenever `activationKey`
+    // (that route's thread identity) changes — including on this
+    // component's OWN first render, which naturally no-ops harmlessly if
+    // `apiRef.current` isn't populated yet (nothing has loaded to activate)
+    // or if the panel isn't open. Deliberately NOT part of the main mount
+    // effect below: that effect intentionally does NOT re-run on a thread
+    // switch (see ChatDock.tsx's own doc on why the dock must not remount
+    // when the route's thread changes) — this needs the opposite behaviour,
+    // firing on EVERY thread switch while touching nothing else about the
+    // live dockview instance.
+    useEffect(() => {
+      if (activateOnChangeId === undefined) return;
+      apiRef.current?.getPanel(activateOnChangeId)?.api.setActive();
+      // Deliberately `activateOnChangeId`-less deps — it's a caller-supplied
+      // constant (ChatDock.tsx passes the same panel id every render); only
+      // `activationKey`'s IDENTITY is meant to retrigger this.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activationKey]);
 
     // `useState`'s lazy initializer, not `useMemo(..., [])` — React documents
     // `useMemo` as a discardable performance cache it may recompute, while
@@ -380,6 +423,21 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           buildTabContextMenuItems({ panel, group, api, registry: panelRegistry }),
       });
       apiRef.current = api;
+
+      // Fix round, finding #6: a maximized group hides the sidebar, every
+      // other tab, and any navigation — indistinguishable, at a glance,
+      // from the finding-#1 brick. The only documented way out was
+      // right-click -> Restore; Escape (the conventional exit for a
+      // full-screen-ish overlay in literally every other context) did
+      // nothing. `hasMaximizedGroup`/`exitMaximizedGroup` are top-level
+      // `DockviewApi` methods, not per-group — one listener covers whichever
+      // group is currently maximized, no group reference needed.
+      const handleEscape = (event: KeyboardEvent) => {
+        if (event.key === "Escape" && api.hasMaximizedGroup()) {
+          api.exitMaximizedGroup();
+        }
+      };
+      window.addEventListener("keydown", handleEscape);
 
       // `LayoutStorage.load` is async — a server-backed adapter's `load()`
       // reads across the network, so `cancelled` guards every side effect
@@ -626,6 +684,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           // anything, not the absence of an observer.
           maybePersist();
         }
+        window.removeEventListener("keydown", handleEscape);
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
         api.dispose();

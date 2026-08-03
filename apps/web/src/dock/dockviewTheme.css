@@ -88,12 +88,26 @@
 }
 
 .dockview-theme-workbench .dv-default-tab {
-  gap: 6px;
   padding: 0 12px;
   font-weight: 500;
   transition:
     color var(--wb-duration-fast) var(--wb-ease),
     background-color var(--wb-duration-fast) var(--wb-ease);
+}
+
+/* Fix round, finding #8: `.dv-default-tab`'s own `gap`/layout rules never
+   affected the tab's title+close-button row, because they're not direct
+   children of it — reactTabRenderer.tsx's `TabContent` renders them inside
+   a NESTED `.dv-default-tab-content` div, which had NO layout rule of its
+   own anywhere in this file, so the browser default (`display: block`)
+   applied and the × rendered on its own line below the label instead of
+   beside it. Measured live: the × at y:18-38 against a tab bottom of
+   y:36 — spilling below the tab entirely, not just visually cramped. */
+.dockview-theme-workbench .dv-default-tab-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
 .dockview-theme-workbench .dv-tab {

@@ -40,6 +40,16 @@ export function buildTabContextMenuItems({
         if (isMaximized) {
           group.api.exitMaximized();
         } else {
+          // Finding #6: `maximizeGroup` maximizes PANEL's group as a
+          // whole — it does not also make `panel` itself the active tab
+          // within that (now-maximized) group. Right-clicking Chat's tab
+          // and choosing Maximize while some other tab in the same group
+          // (e.g. Files) happened to be active left Files showing,
+          // maximized — the menu you right-clicked ON did not show you
+          // what you right-clicked. `setActive()` first, so the panel
+          // whose own context menu triggered this is always what the
+          // maximize actually reveals.
+          panel.api.setActive();
           api.maximizeGroup(panel);
         }
       },

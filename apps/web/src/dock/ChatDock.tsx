@@ -11,18 +11,36 @@
 //    `ChatDock` mounts on both the server-thread and draft routes.
 //
 // Extended again for spec-files-panel.md: the placeholder's slot in the
-// default preset is now the real Files panel (live git status). See
-// FilesPanel.tsx for what the real data can and cannot honestly represent.
+// default preset became the real Files panel (live git status).
+//
+// Fix round after the "app bricks in 3 clicks" critique: the step-1/step-2
+// placeholder panel itself was REMOVED (finding #7 — see its own removal
+// comment further down).
+//
+// DELETED again — spec-surfaces-as-dock-panels.md, Part A: our Files panel
+// itself is gone. A fresh critic proved it wrong on the same screen T3's own
+// file tree and diff surface were correct: ours listed a file that did not
+// exist and reported changes to a file identical to HEAD, with no refresh
+// control and no way to know it was stale. T3's own surfaces are strictly
+// better at the thing ours existed to do, so ours is deleted rather than
+// fixed — the goal's own definition of a win. (Part B — promoting T3's
+// `RightPanelTabs` surfaces, including its OWN files/diff view, into this
+// dock as first-class panels — is real future work, explicitly DEFERRED by
+// the owner: "let's delete our files for now, dont need to make the other
+// ones full tabs yet." Not started here.) The default preset is now sidebar
+// | chat — two columns, not three, and not backfilled with the placeholder
+// finding #7 already removed for its own reasons. See buildChatDockPreset's
+// own comment for why two is the honest answer for now rather than
+// reinventing a third slot to fill.
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { Files, LayoutDashboard, MessageCircle, PanelLeft } from "lucide-react";
+import { MessageCircle, PanelLeft } from "lucide-react";
 
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import { DockviewLayout } from "./DockviewLayout";
-import { FilesPanel } from "./FilesPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -31,16 +49,12 @@ import {
   type PresetRegistry,
 } from "./lib/index";
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
-import { PlaceholderPanel } from "./PlaceholderPanel";
 import { SidebarPanel } from "./SidebarPanel";
 
 const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
-const PLACEHOLDER_PANEL_ID = "placeholder";
-const FILES_PANEL_ID = "files";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
-const FILES_GROUP_ID = "group-files";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -157,58 +171,47 @@ chatDockPanelRegistry.register({
   closeable: false,
 });
 
-// step-1/step-2 scratch panel. Kept REGISTERED (still reachable via the tab
-// context menu's "Add tab", still a real catalog entry) but, as of
-// spec-files-panel.md, no longer in the default preset — Files took its
-// slot. Deliberately not deleted: nothing else in the catalog offers "an
-// empty tab to put something in later," which is a real, if minor, use case
-// for exercising the dock's own machinery independent of any real panel's
-// behaviour, and removing a registered catalog entry is a bigger, more
-// permanent decision than this spec asked for.
-chatDockPanelRegistry.register({
-  id: PLACEHOLDER_PANEL_ID,
-  title: "Panel",
-  icon: LayoutDashboard,
-  component: PlaceholderPanel,
-  defaultLocation: "right",
-});
+// The step-1/step-2 scratch panel (registered here, previously) is REMOVED
+// as of the fix round after the "app bricks in 3 clicks" critique, finding
+// #7: it shipped as the ONLY "Add tab" entry in a fresh workspace's default
+// state, and its own copy told the user to "drag the splitter to resize it
+// against the chat panel" — a splitter that does not exist in the exact
+// state ("Add tab" opening it as a new grouped tab, not a fresh split) the
+// user actually reaches it from. Removed rather than fixed: nothing else in
+// this catalog depended on it, and there was no real content to preserve —
+// the "empty tab to exercise the dock's own machinery" use case it existed
+// for is still available generically (any panel can be dragged/tabbed
+// around), so losing this ONE specific placeholder loses nothing real.
+
+// The Files panel that briefly lived HERE (spec-files-panel.md's "the first
+// panel reading this fork's REAL data") is DELETED —
+// spec-surfaces-as-dock-panels.md, Part A. See the top-of-file doc comment
+// for why: T3's own file tree and diff surface were proven correct where
+// ours lied, on the same screen, at the same moment. Nothing replaces this
+// registration; the default preset below is sidebar | chat, not a
+// re-filled third slot.
 
 /**
- * The first panel reading this fork's REAL data (spec-files-panel.md) —
- * everything else in this dock is fixture- or T3-component-fed. See
- * FilesPanel.tsx's own module doc for what `VcsStatusResult.workingTree.files`
- * can and cannot honestly represent, and this step's report for what was
- * actually observed testing it against a real repo.
+ * The default preset: sidebar on the left, chat filling the rest.
  *
- * `singleton: true` per the spec's default ("prefer singleton unless you can
- * argue two Files panels are useful") — a read-only status view of one
- * thread's one project has no case for a second simultaneous instance the
- * way multi-agent `session` panels do.
+ * TWO columns, not three — spec-surfaces-as-dock-panels.md, Part A. The
+ * third slot (placeholder, then Files) is not backfilled with anything:
+ * finding #7 already ruled out putting the placeholder back (it shipped as
+ * the ONLY "Add tab" entry with copy describing a splitter that doesn't
+ * exist in the state you reach it from), and Files is deleted outright, not
+ * replaced by a stand-in. Two is the honest answer for what this dock
+ * actually has right now — a fabricated third column would be the same
+ * mistake the placeholder already was, just wearing a different label.
+ * Nothing stops a real third panel from filling this slot again later (Part
+ * B's promoted T3 surfaces are the likely candidate), but that is
+ * deliberately NOT this change — the owner deferred it explicitly.
  *
- * Deliberately CLOSEABLE (no `tabComponent: TAB_COMPONENT_NO_CLOSE` on its
- * preset entry, unlike sidebar/chat below) — nothing depends on this panel
- * staying mounted the way the sidebar's window keydown listeners do, so
- * there's no reason to take away the user's ability to close it.
- */
-chatDockPanelRegistry.register({
-  id: FILES_PANEL_ID,
-  title: "Files",
-  icon: Files,
-  component: FilesPanel,
-  defaultLocation: "right",
-  singleton: true,
-});
-
-/**
- * The default preset: sidebar on the left, chat next to it, Files further
- * right in the slot step 1/2's placeholder used to occupy — "same pixels,
- * today" per spec's Part A, with the sidebar's initial width seeded from
- * `THREAD_SIDEBAR_DEFAULT_WIDTH` (`~/components/threadSidebarWidth.ts`,
- * 256px), the SAME constant `AppSidebarLayout`'s fixed sidebar already
- * defaults to — not a re-guessed number. No measured mock exists for the
- * chat:files split (unchanged proportions from step 1/2's chat:placeholder
- * split); dockview stretches this initial tree to fit the real container,
- * so only the RATIOS matter, not the absolute pixels.
+ * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
+ * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
+ * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
+ * number. Chat takes the rest; dockview stretches this initial tree to fit
+ * the real container, so only the SIDEBAR:CHAT ratio matters, not the
+ * absolute pixels.
  *
  * Sidebar and chat get the no-close tab component, for the same reason step
  * 1 gave them both: no "+"/catalog UI exists yet to reopen a closed panel
@@ -216,9 +219,7 @@ chatDockPanelRegistry.register({
  * open. For the sidebar specifically this is load-bearing, not just
  * convenient — see SidebarPanel.tsx/this file's registration comment on why
  * a panel that can never unmount is what keeps the sidebar's window keydown
- * listeners (thread prev/next, Cmd+1..9) alive. Files is NOT no-close — see
- * its own registration comment above for why that's a deliberate
- * difference, not an oversight.
+ * listeners (thread prev/next, Cmd+1..9) alive.
  *
  * `presetPanelEntry` below reads `closeable` off the REGISTRY rather than
  * this function choosing `tabComponent` independently — fix round after the
@@ -241,9 +242,8 @@ function presetPanelEntry(id: string, title: string): SerializedDockview["panels
 function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
-  const CHAT_WIDTH = 544;
-  const FILES_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + FILES_WIDTH;
+  const CHAT_WIDTH = 944;
+  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH;
 
   return {
     grid: {
@@ -264,22 +264,12 @@ function buildChatDockPreset(): SerializedDockview {
             size: CHAT_WIDTH,
             data: { id: CHAT_GROUP_ID, views: [CHAT_PANEL_ID], activeView: CHAT_PANEL_ID },
           },
-          {
-            type: "leaf",
-            size: FILES_WIDTH,
-            data: {
-              id: FILES_GROUP_ID,
-              views: [FILES_PANEL_ID],
-              activeView: FILES_PANEL_ID,
-            },
-          },
         ],
       },
     },
     panels: {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
-      [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
     },
     activeGroup: CHAT_GROUP_ID,
   };
@@ -396,6 +386,16 @@ export function ChatDock(props: ChatDockProps) {
         presetRegistry={chatDockPresetRegistry}
         fallbackPreset={chatDockFallbackPreset}
         staleWorkspaceIds={CHAT_DOCK_STALE_WORKSPACE_IDS}
+        // Fix round, finding #5 ("selecting a thread does not show you the
+        // thread"): a plain string built from primitive props, not an
+        // object — no memoization needed, React's deps-array comparison
+        // already works correctly on a primitive's VALUE. Covers both
+        // routes identically: a click on an existing thread AND "New
+        // thread" (a draft's own threadId) both change this string, both
+        // must bring Chat forward the same way — team-lead's report named
+        // both as regressions, not just the server-thread case.
+        activationKey={`${props.environmentId}:${props.threadId}`}
+        activateOnChangeId={CHAT_PANEL_ID}
         className={className}
       />
     </ThreadRouteContext.Provider>
