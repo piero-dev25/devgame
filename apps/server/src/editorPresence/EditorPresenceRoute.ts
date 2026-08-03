@@ -52,30 +52,32 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "../auth/http.ts";
 import * as EditorPresenceRegistry from "./EditorPresenceRegistry.ts";
 import type { EditorPresenceConnectionToken } from "./EditorPresenceRegistry.ts";
-import { buildPongFrame, parseEditorPresenceInboundFrame } from "./protocol.ts";
+import {
+  buildPongFrame,
+  describeHelloValidationFailure,
+  EDITOR_PRESENCE_CLOSE_CODE,
+  parseEditorPresenceInboundFrame,
+} from "./protocol.ts";
 
 const EDITOR_PRESENCE_PATH = "/editor-presence";
 
 /**
- * Application-range close codes (RFC 6455 §7.4.2, >= 4000) the publisher
- * path uses to reject an unauthenticated upgrade — see the module doc's
- * "AUTH ORDERING NOTE". One code per failure class so an engine client can
- * tell "no credential was sent" from "the credential was rejected" from
- * "the server broke" without parsing the reason string.
+ * Every application-range code this route ever sends itself, in one place
+ * so the read loop's "was this MY deliberate close, not a crash" filter
+ * (see `isServerInitiatedCloseCode` below) can't quietly drift out of sync
+ * with the codes actually being sent — that mismatch is exactly the shape
+ * of bug that would make a routine, correct rejection log like a crash.
  */
-const PUBLISHER_MISSING_CREDENTIAL_CLOSE_CODE = 4400;
-const PUBLISHER_INVALID_CREDENTIAL_CLOSE_CODE = 4401;
-const PUBLISHER_AUTH_INTERNAL_ERROR_CLOSE_CODE = 4500;
-
-const isPublisherAuthCloseCode = (code: number): boolean =>
-  code === PUBLISHER_MISSING_CREDENTIAL_CLOSE_CODE ||
-  code === PUBLISHER_INVALID_CREDENTIAL_CLOSE_CODE ||
-  code === PUBLISHER_AUTH_INTERNAL_ERROR_CLOSE_CODE;
+const SERVER_INITIATED_CLOSE_CODES: ReadonlySet<number> = new Set(
+  Object.values(EDITOR_PRESENCE_CLOSE_CODE),
+);
+const isServerInitiatedCloseCode = (code: number): boolean =>
+  SERVER_INITIATED_CLOSE_CODES.has(code);
 
 function publisherCredentialCloseCode(error: EnvironmentAuth.ServerAuthCredentialError): number {
   return error._tag === "ServerAuthMissingCredentialError"
-    ? PUBLISHER_MISSING_CREDENTIAL_CLOSE_CODE
-    : PUBLISHER_INVALID_CREDENTIAL_CLOSE_CODE;
+    ? EDITOR_PRESENCE_CLOSE_CODE.missingCredential
+    : EDITOR_PRESENCE_CLOSE_CODE.invalidCredential;
 }
 
 type EditorPresenceRole = "publisher" | "subscriber";
@@ -98,24 +100,38 @@ const runPublisherConnection = (
   Effect.gen(function* () {
     const write = yield* socket.writer;
 
+    const rejectUpgrade = (code: number, reason: string) =>
+      write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
+
     // Set only once authentication succeeds. Every registry mutation below
     // is gated on this so a rejected upgrade never allocates a connection
     // token, registers a publisher, or otherwise touches registry state —
     // moving auth after the upgrade must not widen that surface.
     let connectionToken: EditorPresenceConnectionToken | null = null;
-    // sessionId is learned from the publisher's own `hello` frame; frames
-    // that arrive before `hello` (or a `selection` from a connection that
-    // never said hello) are dropped rather than guessed at.
-    let sessionId: string | null = null;
 
-    const cleanup = Effect.suspend(() =>
-      sessionId === null || connectionToken === null
-        ? Effect.void
-        : registry.removePublisher(sessionId, connectionToken),
-    );
+    // EVERY session id this connection has ever registered, not just the
+    // most recent one. A publisher can legitimately say `hello` more than
+    // once on the same socket (regenerating its session id without
+    // reconnecting is valid per the protocol — nothing forbids it, and a
+    // live critic pass measured exactly this: a second hello with a
+    // different session.id, then closing the socket, left the FIRST
+    // session's registry entry permanently unreachable, because cleanup
+    // only ever removed the single last-seen id). `close()` below removes
+    // every id this connection ever claimed, each independently guarded by
+    // `connectionToken` — so an id already taken over by a LATER, different
+    // connection (see EditorPresenceRegistry's session-takeover doc) is
+    // correctly left alone rather than deleted out from under its new owner.
+    const registeredSessionIds = new Set<string>();
 
-    const rejectUpgrade = (code: number, reason: string) =>
-      write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
+    const cleanup = Effect.suspend(() => {
+      if (connectionToken === null || registeredSessionIds.size === 0) return Effect.void;
+      const token = connectionToken;
+      return Effect.forEach(
+        Array.from(registeredSessionIds),
+        (id) => registry.removePublisher(id, token),
+        { discard: true },
+      );
+    });
 
     yield* socket
       .runString(
@@ -125,24 +141,46 @@ const runPublisherConnection = (
             // nothing to process — the close written from `onOpen` below is
             // already on its way out.
             if (connectionToken === null) return;
+            const token = connectionToken;
+
             const frame = parseEditorPresenceInboundFrame(raw);
-            if (!frame) return;
+            if (!frame) {
+              // Not parseable as ANY known frame — but it might specifically
+              // be a `hello` that fails validation, which needs to be loud:
+              // a publisher that thinks it said hello has no other way to
+              // learn it was never registered (ping still works, since ping
+              // doesn't require a prior hello, so the connection looks
+              // perfectly healthy while no subscriber ever sees it — a live
+              // critic pass measured exactly this). Any OTHER malformed
+              // frame keeps the previous silent-drop behavior; that's a
+              // deliberate scope line, not an oversight — see protocol.ts's
+              // "KNOWN GAP" notes on item-level drops and `v` mismatches.
+              const helloFailure = describeHelloValidationFailure(raw);
+              if (helloFailure !== null) {
+                yield* rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.malformedHello, helloFailure);
+              }
+              return;
+            }
+
             switch (frame.type) {
               case "hello": {
-                sessionId = frame.session.id;
-                yield* registry.registerPublisher(frame.session.id, connectionToken, {
-                  editor: frame.editor,
-                  workspace: frame.workspace,
-                });
+                registeredSessionIds.add(frame.session.id);
+                yield* registry.registerPublisher(
+                  frame.session.id,
+                  token,
+                  { editor: frame.editor, workspace: frame.workspace },
+                  (code, reason) => rejectUpgrade(code, reason),
+                );
                 return;
               }
               case "selection": {
-                if (sessionId === null) return;
-                yield* registry.updatePublisherSelection(
-                  sessionId,
-                  connectionToken,
-                  frame.selection,
-                );
+                if (registeredSessionIds.size === 0) return;
+                // Selections apply to whichever session this connection
+                // most recently said hello as — the same "last hello wins
+                // for new frames" semantics as before; only CLEANUP now
+                // covers every id, not just the latest.
+                const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
+                yield* registry.updatePublisherSelection(latestSessionId, token, frame.selection);
                 return;
               }
               case "ping": {
@@ -167,7 +205,7 @@ const runPublisherConnection = (
               ),
             ),
             Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
-              rejectUpgrade(PUBLISHER_AUTH_INTERNAL_ERROR_CLOSE_CODE, "internal_error"),
+              rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
             ),
             Effect.map(() => {
               connectionToken = registry.newConnectionToken();
@@ -180,10 +218,10 @@ const runPublisherConnection = (
         // a FAILURE of the read loop, not a clean completion —
         // `closeCodeIsError` defaults to treating every close code as an
         // error. Recognise our own deliberate close and treat it as normal
-        // so a routine auth rejection doesn't read as a crash; any other
-        // close (peer-initiated, network error) still propagates as-is.
+        // so a routine rejection doesn't read as a crash; any other close
+        // (peer-initiated, network error) still propagates as-is.
         Effect.catchFilter(
-          Socket.SocketCloseError.filterClean(isPublisherAuthCloseCode),
+          Socket.SocketCloseError.filterClean(isServerInitiatedCloseCode),
           () => Effect.void,
         ),
         Effect.ensuring(cleanup),

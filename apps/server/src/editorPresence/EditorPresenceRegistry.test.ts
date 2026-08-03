@@ -185,3 +185,94 @@ it.effect("removeSubscriber stops future broadcasts from reaching it", () =>
     }),
   ),
 );
+
+// Bug #2: a live critic pass measured registerPublisher overwriting an
+// existing record unconditionally, with no check for whether it belonged
+// to a DIFFERENT connection — a total, silent hijack. The victim's socket
+// stayed open and kept publishing into a record every write was then
+// discarded from. Fixed: the takeover still happens (that's what makes
+// reconnect-after-domain-reload work), but the SUPERSEDED connection is now
+// told, via its own `close` callback, with a coded reason — never silent
+// for either party.
+it.effect("a new connection claiming an existing session.id closes the superseded connection", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const closeCalls: Array<{ code: number; reason: string }> = [];
+      const victimClose = (code: number, reason: string) => {
+        closeCalls.push({ code, reason });
+        return Effect.void;
+      };
+
+      const victimToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("shared-session", victimToken, HELLO, victimClose);
+
+      const attackerToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("shared-session", attackerToken, {
+        editor: { id: "attacker", name: "Attacker Editor", version: "0.0.0" },
+        workspace: { root: "/not/the/victims/project" },
+      });
+
+      // The victim's own connection must be told — this is the "not
+      // silent for either party" half of the fix.
+      expect(closeCalls).toHaveLength(1);
+      expect(closeCalls[0]!.code).toBeGreaterThanOrEqual(4000);
+      expect(closeCalls[0]!.reason.length).toBeGreaterThan(0);
+
+      // The takeover itself is intentional and unchanged: the record now
+      // reflects the NEW connection's data.
+      const subscriber = makeRecorder();
+      const initialFrame = yield* registry.addSubscriber(subscriber.send);
+      const parsed = parseFrame(initialFrame);
+      expect(parsed.editors).toHaveLength(1);
+      expect(parsed.editors[0]!.editor.id).toBe("attacker");
+    }),
+  ),
+);
+
+it.effect(
+  "the superseded connection's belated removePublisher does not delete the connection that took over",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const victimToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("shared-session", victimToken, HELLO);
+
+        const attackerToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("shared-session", attackerToken, HELLO);
+
+        // The superseded connection's own cleanup finally runs (its
+        // read-loop finalizer fires late) — the connectionToken guard
+        // must stop it from deleting the entry the new connection owns.
+        yield* registry.removePublisher("shared-session", victimToken);
+
+        const subscriber = makeRecorder();
+        const initialFrame = yield* registry.addSubscriber(subscriber.send);
+        expect(parseFrame(initialFrame).editors).toHaveLength(1);
+      }),
+    ),
+);
+
+// Cheap capacity guard (unbounded maps were the "also, cheap and worth
+// doing" note) — a genuinely new session past the cap is refused, logged,
+// and does not silently grow the map forever. An existing session being
+// taken over never counts against the cap.
+it.effect("refuses a new publisher session once at capacity, without touching existing ones", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const CAP = 64; // must match EditorPresenceRegistry.ts's MAX_PUBLISHERS
+      for (let i = 0; i < CAP; i++) {
+        const token = registry.newConnectionToken();
+        yield* registry.registerPublisher(`session-${i}`, token, HELLO);
+      }
+
+      const overflowToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-overflow", overflowToken, HELLO);
+
+      const subscriber = makeRecorder();
+      const initialFrame = yield* registry.addSubscriber(subscriber.send);
+      const parsed = parseFrame(initialFrame);
+      expect(parsed.editors).toHaveLength(CAP);
+      expect(parsed.editors.some((e) => e.session.id === "session-overflow")).toBe(false);
+    }),
+  ),
+);
