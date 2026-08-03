@@ -17,6 +17,7 @@ import { toPersistenceSqlError, type ProjectionRepositoryError } from "../../per
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepository } from "../../persistence/Services/ProjectionProjects.ts";
+import { ProjectionSpaceRepository } from "../../persistence/Services/ProjectionSpaces.ts";
 import { ProjectionStateRepository } from "../../persistence/Services/ProjectionState.ts";
 import { ProjectionThreadActivityRepository } from "../../persistence/Services/ProjectionThreadActivities.ts";
 import { type ProjectionThreadActivity } from "../../persistence/Services/ProjectionThreadActivities.ts";
@@ -36,6 +37,7 @@ import {
 import { ProjectionThreadRepository } from "../../persistence/Services/ProjectionThreads.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
+import { ProjectionSpaceRepositoryLive } from "../../persistence/Layers/ProjectionSpaces.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
@@ -57,6 +59,7 @@ import {
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
+  spaces: "projection.spaces",
   threads: "projection.threads",
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
@@ -473,6 +476,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const eventStore = yield* OrchestrationEventStore;
     const projectionStateRepository = yield* ProjectionStateRepository;
     const projectionProjectRepository = yield* ProjectionProjectRepository;
+    const projectionSpaceRepository = yield* ProjectionSpaceRepository;
     const projectionThreadRepository = yield* ProjectionThreadRepository;
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
@@ -544,6 +548,57 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const applySpacesProjection: ProjectorDefinition["apply"] = Effect.fn("applySpacesProjection")(
+      function* (event, _attachmentSideEffects) {
+        switch (event.type) {
+          case "space.created":
+            yield* projectionSpaceRepository.upsert({
+              spaceId: event.payload.spaceId,
+              projectId: event.payload.projectId,
+              title: event.payload.title,
+              createdAt: event.payload.createdAt,
+              updatedAt: event.payload.updatedAt,
+              deletedAt: null,
+            });
+            return;
+
+          case "space.deleted": {
+            const existingRow = yield* projectionSpaceRepository.getById({
+              spaceId: event.payload.spaceId,
+            });
+            if (Option.isNone(existingRow)) {
+              return;
+            }
+            yield* projectionSpaceRepository.upsert({
+              ...existingRow.value,
+              deletedAt: event.payload.deletedAt,
+              updatedAt: event.payload.deletedAt,
+            });
+            // Clearing thread.space_id references lives in
+            // applyThreadsProjection, NOT here, even though this event is the
+            // trigger. Bootstrap runs each projector as its own full
+            // sequential pass over the ENTIRE event history (see
+            // bootstrapProjector) — projector by projector, not interleaved
+            // event by event. If the reference-clearing UPDATE ran in THIS
+            // (spaces) projector, its one full pass would finish — clearing
+            // whatever thread rows happen to already exist at that moment —
+            // before the threads projector's own later, separate full pass
+            // re-creates those rows from their thread.created events (which
+            // still carry the now-stale space_id in their payload), silently
+            // undoing the clear. Owning it in applyThreadsProjection puts the
+            // clear in the same single ordered pass as those thread.created /
+            // thread.meta-updated events, so replay reconstructs it correctly
+            // regardless of projector order. (Caught by the replay mutation
+            // test — first draft had it here and failed exactly this way.)
+            return;
+          }
+
+          default:
+            return;
+        }
+      },
+    );
+
     const refreshThreadShellSummary = Effect.fn("refreshThreadShellSummary")(function* (
       threadId: ThreadId,
     ) {
@@ -593,6 +648,23 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       "applyThreadsProjection",
     )(function* (event, attachmentSideEffects) {
       switch (event.type) {
+        // Owned here (not in applySpacesProjection, which only touches the
+        // space's own row) so it lands in the SAME single ordered pass as
+        // thread.created / thread.meta-updated. Bootstrap runs each
+        // projector as its own full sequential pass over the whole event
+        // history; if this clear ran in a different projector's pass, it
+        // could finish before (or after, depending on array order) this
+        // projector re-derives space_id from those events during replay,
+        // silently losing the clear. Never a cascade: only space_id is
+        // touched, on rows that already exist — nothing here creates,
+        // deletes, or reaches into any other column.
+        case "space.deleted":
+          yield* projectionThreadRepository.clearSpaceReferences({
+            spaceId: event.payload.spaceId,
+            updatedAt: event.payload.deletedAt,
+          });
+          return;
+
         case "thread.created":
           yield* projectionThreadRepository.upsert({
             threadId: event.payload.threadId,
@@ -603,6 +675,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             interactionMode: event.payload.interactionMode,
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
+            spaceId: event.payload.spaceId ?? null,
             taskRef: event.payload.taskRef ?? null,
             latestTurnId: null,
             createdAt: event.payload.createdAt,
@@ -741,6 +814,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
               : {}),
+            ...(event.payload.spaceId !== undefined ? { spaceId: event.payload.spaceId } : {}),
             ...(event.payload.taskRef !== undefined ? { taskRef: event.payload.taskRef } : {}),
             updatedAt: event.payload.updatedAt,
           });
@@ -1554,6 +1628,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyProjectsProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.spaces,
+        apply: applySpacesProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadMessages,
         apply: applyThreadMessagesProjection,
       },
@@ -1680,6 +1758,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   makeOrchestrationProjectionPipeline(),
 ).pipe(
   Layer.provideMerge(ProjectionProjectRepositoryLive),
+  Layer.provideMerge(ProjectionSpaceRepositoryLive),
   Layer.provideMerge(ProjectionThreadRepositoryLive),
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),

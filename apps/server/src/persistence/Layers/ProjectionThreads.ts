@@ -7,6 +7,7 @@ import * as Struct from "effect/Struct";
 
 import { toPersistenceSqlError } from "../Errors.ts";
 import {
+  ClearThreadSpaceReferencesInput,
   DeleteProjectionThreadInput,
   GetProjectionThreadInput,
   ListProjectionThreadsByProjectInput,
@@ -40,6 +41,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           interaction_mode,
           branch,
           worktree_path,
+          space_id,
           task_ref_json,
           latest_turn_id,
           created_at,
@@ -66,6 +68,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.interactionMode},
           ${row.branch},
           ${row.worktreePath},
+          ${row.spaceId},
           ${row.taskRef !== null ? JSON.stringify(row.taskRef) : null},
           ${row.latestTurnId},
           ${row.createdAt},
@@ -92,6 +95,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           interaction_mode = excluded.interaction_mode,
           branch = excluded.branch,
           worktree_path = excluded.worktree_path,
+          space_id = excluded.space_id,
           task_ref_json = excluded.task_ref_json,
           latest_turn_id = excluded.latest_turn_id,
           created_at = excluded.created_at,
@@ -125,6 +129,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          space_id AS "spaceId",
           task_ref_json AS "taskRef",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
@@ -160,6 +165,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           interaction_mode AS "interactionMode",
           branch,
           worktree_path AS "worktreePath",
+          space_id AS "spaceId",
           task_ref_json AS "taskRef",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
@@ -191,6 +197,17 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       `,
   });
 
+  const clearThreadSpaceReferencesRow = SqlSchema.void({
+    Request: ClearThreadSpaceReferencesInput,
+    execute: ({ spaceId, updatedAt }) =>
+      sql`
+        UPDATE projection_threads
+        SET space_id = NULL,
+            updated_at = ${updatedAt}
+        WHERE space_id = ${spaceId}
+      `,
+  });
+
   const upsert: ProjectionThreadRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.upsert:query")),
@@ -211,11 +228,19 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
       Effect.mapError(toPersistenceSqlError("ProjectionThreadRepository.deleteById:query")),
     );
 
+  const clearSpaceReferences: ProjectionThreadRepositoryShape["clearSpaceReferences"] = (input) =>
+    clearThreadSpaceReferencesRow(input).pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionThreadRepository.clearSpaceReferences:query"),
+      ),
+    );
+
   return {
     upsert,
     getById,
     listByProjectId,
     deleteById,
+    clearSpaceReferences,
   } satisfies ProjectionThreadRepositoryShape;
 });
 

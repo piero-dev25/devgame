@@ -5,6 +5,7 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  SpaceId,
   ThreadId,
   TurnId,
   ProviderInstanceId,
@@ -2989,5 +2990,386 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
       const rows = yield* readTaskRefRow(sql, "thread-legacy");
       assert.deepEqual(rows, [{ taskRefJson: null, spaceId: null }]);
     }),
+  );
+
+  // Wave 1 step 2 (docs/workbench/spec-wave-1-step-2.md): the `space`
+  // aggregate itself. A space is a SCOPE, not a container — every assertion
+  // below exists to prove that framing: null is a permanent normal state,
+  // cross-project references are legal, deleting a space clears references
+  // instead of touching the threads that held them, and a dangling
+  // reference is refused up front rather than written and left dangling.
+  // Item 7 (old thread.created events with no space_id key at all still
+  // decode) is already covered by the "projects a pre-existing
+  // thread.created event with no task_ref field at all" test above —
+  // readTaskRefRow's spaceId column has always been part of that
+  // assertion, so it doubles as step 2 evidence with no new test needed.
+  const readSpaceRow = (sql: SqlClient.SqlClient, spaceId: string) =>
+    sql<{
+      readonly spaceId: string;
+      readonly projectId: string;
+      readonly title: string;
+      readonly deletedAt: string | null;
+    }>`
+      SELECT
+        space_id AS "spaceId",
+        project_id AS "projectId",
+        title,
+        deleted_at AS "deletedAt"
+      FROM projection_spaces
+      WHERE space_id = ${spaceId}
+    `;
+
+  const readThreadSpaceRow = (sql: SqlClient.SqlClient, threadId: string) =>
+    sql<{ readonly spaceId: string | null; readonly deletedAt: string | null }>`
+      SELECT
+        space_id AS "spaceId",
+        deleted_at AS "deletedAt"
+      FROM projection_threads
+      WHERE thread_id = ${threadId}
+    `;
+
+  it.effect("spaces: create, and the tri-state scope/unscope/rescope on thread.meta.update", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = "2026-01-01T00:00:00.000Z";
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-space-tri-project"),
+        projectId: ProjectId.make("project-space-tri"),
+        title: "Space Tri Project",
+        workspaceRoot: "/tmp/project-space-tri",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      });
+
+      // 1. A space exists: dispatch space.create, raw-SELECT the row out
+      // of projection_spaces.
+      yield* engine.dispatch({
+        type: "space.create",
+        commandId: CommandId.make("cmd-space-tri-1-create"),
+        spaceId: SpaceId.make("space-tri-1"),
+        projectId: ProjectId.make("project-space-tri"),
+        title: "Space One",
+        createdAt,
+      });
+
+      const spaceOneRow = yield* readSpaceRow(sql, "space-tri-1");
+      assert.deepEqual(spaceOneRow, [
+        {
+          spaceId: "space-tri-1",
+          projectId: "project-space-tri",
+          title: "Space One",
+          deletedAt: null,
+        },
+      ]);
+
+      yield* engine.dispatch({
+        type: "space.create",
+        commandId: CommandId.make("cmd-space-tri-2-create"),
+        spaceId: SpaceId.make("space-tri-2"),
+        projectId: ProjectId.make("project-space-tri"),
+        title: "Space Two",
+        createdAt,
+      });
+
+      // 2. A thread can be scoped, unscoped, and re-scoped — same
+      // tri-state discipline as task_ref.
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-space-tri-thread-create"),
+        threadId: ThreadId.make("thread-space-tri"),
+        projectId: ProjectId.make("project-space-tri"),
+        title: "Space Tri Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        spaceId: SpaceId.make("space-tri-1"),
+        createdAt,
+      });
+
+      const afterCreate = yield* readThreadSpaceRow(sql, "thread-space-tri");
+      assert.deepEqual(afterCreate, [{ spaceId: "space-tri-1", deletedAt: null }]);
+
+      // Omitting spaceId from an update must leave it untouched.
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-space-tri-update-untouched"),
+        threadId: ThreadId.make("thread-space-tri"),
+        title: "Space Tri Thread (renamed)",
+      });
+
+      const afterUndefinedUpdate = yield* readThreadSpaceRow(sql, "thread-space-tri");
+      assert.deepEqual(afterUndefinedUpdate, [{ spaceId: "space-tri-1", deletedAt: null }]);
+
+      // Explicit null must unscope it — project-wide, a normal permanent
+      // state, not "unassigned".
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-space-tri-update-clear"),
+        threadId: ThreadId.make("thread-space-tri"),
+        spaceId: null,
+      });
+
+      const afterNullUpdate = yield* readThreadSpaceRow(sql, "thread-space-tri");
+      assert.deepEqual(afterNullUpdate, [{ spaceId: null, deletedAt: null }]);
+
+      // Re-pointing at a different space is an ordinary edit, nothing
+      // moves or gets rewritten.
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-space-tri-update-reset"),
+        threadId: ThreadId.make("thread-space-tri"),
+        spaceId: SpaceId.make("space-tri-2"),
+      });
+
+      const afterResetUpdate = yield* readThreadSpaceRow(sql, "thread-space-tri");
+      assert.deepEqual(afterResetUpdate, [{ spaceId: "space-tri-2", deletedAt: null }]);
+    }),
+  );
+
+  it.effect("spaces: a thread may reference a space under a different project", () =>
+    Effect.gen(function* () {
+      const engine = yield* OrchestrationEngineService;
+      const sql = yield* SqlClient.SqlClient;
+      const createdAt = "2026-01-01T00:00:00.000Z";
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-space-cross-project-a"),
+        projectId: ProjectId.make("project-space-cross-a"),
+        title: "Cross Project A",
+        workspaceRoot: "/tmp/project-space-cross-a",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      });
+
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-space-cross-project-b"),
+        projectId: ProjectId.make("project-space-cross-b"),
+        title: "Cross Project B",
+        workspaceRoot: "/tmp/project-space-cross-b",
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        createdAt,
+      });
+
+      // Space lives under project A.
+      yield* engine.dispatch({
+        type: "space.create",
+        commandId: CommandId.make("cmd-space-cross-create"),
+        spaceId: SpaceId.make("space-cross"),
+        projectId: ProjectId.make("project-space-cross-a"),
+        title: "Cross Space",
+        createdAt,
+      });
+
+      // Thread lives under project B — a DIFFERENT project than the space.
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-space-cross-thread-create"),
+        threadId: ThreadId.make("thread-space-cross"),
+        projectId: ProjectId.make("project-space-cross-b"),
+        title: "Cross Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("codex"),
+          model: "gpt-5-codex",
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      });
+
+      // 3. Cross-project scoping works: scope the project-B thread to the
+      // project-A space and prove it holds — nothing checks project
+      // membership, by design (context is not owned by a directory).
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-space-cross-update"),
+        threadId: ThreadId.make("thread-space-cross"),
+        spaceId: SpaceId.make("space-cross"),
+      });
+
+      const afterCrossScope = yield* readThreadSpaceRow(sql, "thread-space-cross");
+      assert.deepEqual(afterCrossScope, [{ spaceId: "space-cross", deletedAt: null }]);
+    }),
+  );
+
+  it.effect(
+    "spaces: deleting a space never cascades — threads survive and fall back to project-wide, and it survives a bootstrap replay",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const projectionPipeline = yield* OrchestrationProjectionPipeline;
+        const sql = yield* SqlClient.SqlClient;
+        const createdAt = "2026-01-01T00:00:00.000Z";
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-space-delete-project"),
+          projectId: ProjectId.make("project-space-delete"),
+          title: "Space Delete Project",
+          workspaceRoot: "/tmp/project-space-delete",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        });
+
+        yield* engine.dispatch({
+          type: "space.create",
+          commandId: CommandId.make("cmd-space-delete-create"),
+          spaceId: SpaceId.make("space-to-delete"),
+          projectId: ProjectId.make("project-space-delete"),
+          title: "Doomed Space",
+          createdAt,
+        });
+
+        for (const threadId of ["thread-space-delete-1", "thread-space-delete-2"]) {
+          yield* engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make(`cmd-${threadId}-create`),
+            threadId: ThreadId.make(threadId),
+            projectId: ProjectId.make("project-space-delete"),
+            title: `Thread ${threadId}`,
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5-codex",
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: null,
+            spaceId: SpaceId.make("space-to-delete"),
+            createdAt,
+          });
+        }
+
+        // Sanity: both threads really are scoped before the delete.
+        const beforeDelete1 = yield* readThreadSpaceRow(sql, "thread-space-delete-1");
+        const beforeDelete2 = yield* readThreadSpaceRow(sql, "thread-space-delete-2");
+        assert.deepEqual(beforeDelete1, [{ spaceId: "space-to-delete", deletedAt: null }]);
+        assert.deepEqual(beforeDelete2, [{ spaceId: "space-to-delete", deletedAt: null }]);
+
+        // 4. Deleting a space does not delete threads — the single most
+        // important check in the step. A cascade here would silently
+        // destroy a person's work.
+        yield* engine.dispatch({
+          type: "space.delete",
+          commandId: CommandId.make("cmd-space-delete-delete"),
+          spaceId: SpaceId.make("space-to-delete"),
+        });
+
+        const afterDelete1 = yield* readThreadSpaceRow(sql, "thread-space-delete-1");
+        const afterDelete2 = yield* readThreadSpaceRow(sql, "thread-space-delete-2");
+        // Both still exist (deletedAt IS NULL — never soft-deleted, never
+        // removed) and are now project-wide (spaceId NULL).
+        assert.deepEqual(afterDelete1, [{ spaceId: null, deletedAt: null }]);
+        assert.deepEqual(afterDelete2, [{ spaceId: null, deletedAt: null }]);
+
+        const deletedSpaceRow = yield* readSpaceRow(sql, "space-to-delete");
+        assert.equal(deletedSpaceRow.length, 1);
+        assert.isNotNull(deletedSpaceRow[0]?.deletedAt);
+
+        // 6. It survives a replay: wipe both projectors' bookmarks AND the
+        // projection rows for everything touched, then prove bootstrap
+        // reconstructs the same state purely from the stored event
+        // stream — not carried over from the live upserts above.
+        yield* sql`
+          DELETE FROM projection_state
+          WHERE projector IN (
+            ${ORCHESTRATION_PROJECTOR_NAMES.spaces},
+            ${ORCHESTRATION_PROJECTOR_NAMES.threads}
+          )
+        `;
+        yield* sql`DELETE FROM projection_spaces WHERE space_id = 'space-to-delete'`;
+        yield* sql`
+          DELETE FROM projection_threads
+          WHERE thread_id IN ('thread-space-delete-1', 'thread-space-delete-2')
+        `;
+        yield* projectionPipeline.bootstrap;
+
+        const afterReplay1 = yield* readThreadSpaceRow(sql, "thread-space-delete-1");
+        const afterReplay2 = yield* readThreadSpaceRow(sql, "thread-space-delete-2");
+        assert.deepEqual(afterReplay1, [{ spaceId: null, deletedAt: null }]);
+        assert.deepEqual(afterReplay2, [{ spaceId: null, deletedAt: null }]);
+
+        const replayedSpaceRow = yield* readSpaceRow(sql, "space-to-delete");
+        assert.equal(replayedSpaceRow.length, 1);
+        assert.isNotNull(replayedSpaceRow[0]?.deletedAt);
+      }),
+  );
+
+  it.effect(
+    "spaces: scoping a thread to a space_id that does not exist is refused, not written as a dangling reference",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const sql = yield* SqlClient.SqlClient;
+        const createdAt = "2026-01-01T00:00:00.000Z";
+
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-space-dangling-project"),
+          projectId: ProjectId.make("project-space-dangling"),
+          title: "Dangling Project",
+          workspaceRoot: "/tmp/project-space-dangling",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        });
+
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("cmd-space-dangling-thread-create"),
+          threadId: ThreadId.make("thread-space-dangling"),
+          projectId: ProjectId.make("project-space-dangling"),
+          title: "Dangling Thread",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        });
+
+        // 5. A dangling reference is refused: the command must fail with
+        // the invariant error, not silently write a dangling space_id.
+        const error = yield* engine
+          .dispatch({
+            type: "thread.meta.update",
+            commandId: CommandId.make("cmd-space-dangling-update"),
+            threadId: ThreadId.make("thread-space-dangling"),
+            spaceId: SpaceId.make("space-does-not-exist"),
+          })
+          .pipe(Effect.flip);
+        assert.equal(error._tag, "OrchestrationCommandInvariantError");
+
+        const afterRejectedUpdate = yield* readThreadSpaceRow(sql, "thread-space-dangling");
+        assert.deepEqual(afterRejectedUpdate, [{ spaceId: null, deletedAt: null }]);
+      }),
   );
 });

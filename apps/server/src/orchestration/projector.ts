@@ -14,6 +14,8 @@ import {
   ProjectCreatedPayload,
   ProjectDeletedPayload,
   ProjectMetaUpdatedPayload,
+  SpaceCreatedPayload,
+  SpaceDeletedPayload,
   ThreadActivityAppendedPayload,
   ThreadArchivedPayload,
   ThreadCreatedPayload,
@@ -187,6 +189,7 @@ export function createEmptyReadModel(nowIso: string): OrchestrationReadModel {
     snapshotSequence: 0,
     projects: [],
     threads: [],
+    spaces: [],
     updatedAt: nowIso,
   };
 }
@@ -267,6 +270,50 @@ export function projectEvent(
         })),
       );
 
+    case "space.created":
+      return decodeForEvent(SpaceCreatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const existing = (nextBase.spaces ?? []).find((entry) => entry.id === payload.spaceId);
+          const nextSpace = {
+            id: payload.spaceId,
+            projectId: payload.projectId,
+            title: payload.title,
+            createdAt: payload.createdAt,
+            updatedAt: payload.updatedAt,
+            deletedAt: null,
+          };
+          return {
+            ...nextBase,
+            spaces: existing
+              ? (nextBase.spaces ?? []).map((entry) =>
+                  entry.id === payload.spaceId ? nextSpace : entry,
+                )
+              : [...(nextBase.spaces ?? []), nextSpace],
+          };
+        }),
+      );
+
+    case "space.deleted":
+      // Never a cascade: the space itself is soft-deleted, and any thread
+      // that referenced it is unscoped (space_id -> null) as a read-model
+      // side effect of THIS event — not by deleting/touching the thread's
+      // own event stream. This mirrors applySpacesProjection exactly.
+      return decodeForEvent(SpaceDeletedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          spaces: (nextBase.spaces ?? []).map((space) =>
+            space.id === payload.spaceId
+              ? { ...space, deletedAt: payload.deletedAt, updatedAt: payload.deletedAt }
+              : space,
+          ),
+          threads: nextBase.threads.map((thread) =>
+            thread.spaceId === payload.spaceId
+              ? { ...thread, spaceId: null, updatedAt: payload.deletedAt }
+              : thread,
+          ),
+        })),
+      );
+
     case "thread.created":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -286,6 +333,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            spaceId: payload.spaceId ?? null,
             taskRef: payload.taskRef ?? null,
             latestTurn: null,
             createdAt: payload.createdAt,
@@ -409,6 +457,7 @@ export function projectEvent(
               : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
+            ...(payload.spaceId !== undefined ? { spaceId: payload.spaceId } : {}),
             ...(payload.taskRef !== undefined ? { taskRef: payload.taskRef } : {}),
             updatedAt: payload.updatedAt,
           }),

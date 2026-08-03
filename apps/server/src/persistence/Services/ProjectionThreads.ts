@@ -14,6 +14,7 @@ import {
   ProjectId,
   ProviderInteractionMode,
   RuntimeMode,
+  SpaceId,
   TaskRef,
   ThreadId,
   TurnId,
@@ -34,9 +35,10 @@ export const ProjectionThread = Schema.Struct({
   interactionMode: ProviderInteractionMode,
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
-  // Opaque tracker pointer. Space_id is deliberately absent from this row:
-  // this step lands the column via migration only, wired to nothing — the
-  // space aggregate doesn't exist yet (see docs/workbench/spec-wave-1-step-1.md).
+  // Context scope; see docs/workbench/spec-wave-1-step-2.md. Landed as an
+  // unwired column in step 1, wired here in step 2.
+  spaceId: Schema.NullOr(SpaceId),
+  // Opaque tracker pointer.
   taskRef: Schema.NullOr(TaskRef),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
@@ -71,6 +73,12 @@ export const ListProjectionThreadsByProjectInput = Schema.Struct({
 });
 export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
+export const ClearThreadSpaceReferencesInput = Schema.Struct({
+  spaceId: SpaceId,
+  updatedAt: IsoDateTime,
+});
+export type ClearThreadSpaceReferencesInput = typeof ClearThreadSpaceReferencesInput.Type;
+
 /**
  * ProjectionThreadRepositoryShape - Service API for projected thread records.
  */
@@ -103,6 +111,16 @@ export interface ProjectionThreadRepositoryShape {
    */
   readonly deleteById: (
     input: DeleteProjectionThreadInput,
+  ) => Effect.Effect<void, ProjectionRepositoryError>;
+
+  /**
+   * Bulk-clears `spaceId` (to null, i.e. project-wide) on every thread row
+   * currently pointing at the given space. NOT a cascade: rows are updated,
+   * never deleted. This is the read-model side effect of a space.deleted
+   * event — every other column on the affected rows is left untouched.
+   */
+  readonly clearSpaceReferences: (
+    input: ClearThreadSpaceReferencesInput,
   ) => Effect.Effect<void, ProjectionRepositoryError>;
 }
 

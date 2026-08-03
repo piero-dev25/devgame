@@ -16,6 +16,7 @@ import {
   NonNegativeInt,
   ProjectId,
   ProviderItemId,
+  SpaceId,
   ThreadId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -223,6 +224,25 @@ export const OrchestrationProject = Schema.Struct({
 });
 export type OrchestrationProject = typeof OrchestrationProject.Type;
 
+/**
+ * `OrchestrationSpace` — a CONTEXT SCOPE with its own event stream, owned by
+ * (created under) a project. It is a scope, not a container: a thread's
+ * `space_id` may point at a space under a DIFFERENT project than the
+ * thread's own, and deleting a space never deletes the threads that
+ * referenced it (they fall back to project-wide, i.e. `space_id = null`).
+ * `workspaceRoot`-style filesystem semantics belong to `OrchestrationProject`
+ * only — a space has no filesystem presence of its own.
+ */
+export const OrchestrationSpace = Schema.Struct({
+  id: SpaceId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+  deletedAt: Schema.NullOr(IsoDateTime),
+});
+export type OrchestrationSpace = typeof OrchestrationSpace.Type;
+
 export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
@@ -373,6 +393,11 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Context scope. null = project-wide, a permanent normal state — not
+  // "unassigned". May reference a space under a DIFFERENT project; that is
+  // legal by design (see OrchestrationSpace). Optional for the same
+  // decode-compatibility reason as taskRef below.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   // Opaque pointer at an external tracker item (see TaskRef). Optional so
   // threads constructed before this field existed — older servers' stored
   // events, and any code literal-constructing a thread — still decode.
@@ -408,6 +433,9 @@ export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   threads: Schema.Array(OrchestrationThread),
+  // Optional so code constructing a read-model literal before this field
+  // existed (older servers, existing test fixtures) still decodes/compiles.
+  spaces: Schema.optional(Schema.Array(OrchestrationSpace)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationReadModel = typeof OrchestrationReadModel.Type;
@@ -435,7 +463,8 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
-  // See OrchestrationThread.taskRef.
+  // See OrchestrationThread.spaceId / .taskRef.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   taskRef: Schema.optional(Schema.NullOr(TaskRef)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
@@ -460,6 +489,8 @@ export const OrchestrationShellSnapshot = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProjectShell),
   threads: Schema.Array(OrchestrationThreadShell),
+  // See OrchestrationReadModel.spaces.
+  spaces: Schema.optional(Schema.Array(OrchestrationSpace)),
   updatedAt: IsoDateTime,
 });
 export type OrchestrationShellSnapshot = typeof OrchestrationShellSnapshot.Type;
@@ -570,6 +601,30 @@ const ProjectDeleteCommand = Schema.Struct({
   force: Schema.optional(Schema.Boolean),
 });
 
+// A space is created UNDER a project (that project owns it, e.g. for listing
+// purposes) but is a scope, not a container — see OrchestrationSpace. No
+// rename/meta-update command in this step: nothing in this step's acceptance
+// exercises one, and the title is set once at creation.
+const SpaceCreateCommand = Schema.Struct({
+  type: Schema.Literal("space.create"),
+  commandId: CommandId,
+  spaceId: SpaceId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+// Deletes the space aggregate only. Threads that reference it are NEVER
+// touched by the decider/command layer — the projector clears their
+// space_id back to null (project-wide) as a read-model side effect of
+// replaying this event, never as a cascaded command/event of its own. See
+// applySpacesProjection in ProjectionPipeline.ts.
+const SpaceDeleteCommand = Schema.Struct({
+  type: Schema.Literal("space.delete"),
+  commandId: CommandId,
+  spaceId: SpaceId,
+});
+
 const ThreadCreateCommand = Schema.Struct({
   type: Schema.Literal("thread.create"),
   commandId: CommandId,
@@ -583,6 +638,9 @@ const ThreadCreateCommand = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Same optionality rationale as taskRef: existing callers that never set a
+  // space at creation don't need to change.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   // Optional so existing callers that never set a task ref at creation time
   // don't need to change. Omitted or explicit null both mean "no task ref".
   taskRef: Schema.optional(Schema.NullOr(TaskRef)),
@@ -654,6 +712,10 @@ const ThreadMetaUpdateCommand = Schema.Struct({
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Tri-state, same discipline as taskRef below: absent leaves the space
+  // alone, null unscopes it (project-wide), a value re-points it — including
+  // at a space under a different project, which is legal.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   // Tri-state: absent leaves the task ref alone, null clears it, a value
   // sets it. This is the field this step exists to prove out end to end.
   taskRef: Schema.optional(Schema.NullOr(TaskRef)),
@@ -792,6 +854,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  SpaceCreateCommand,
+  SpaceDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -817,6 +881,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  SpaceCreateCommand,
+  SpaceDeleteCommand,
   ThreadCreateCommand,
   ThreadDeleteCommand,
   ThreadArchiveCommand,
@@ -932,6 +998,8 @@ export const OrchestrationEventType = Schema.Literals([
   "project.created",
   "project.meta-updated",
   "project.deleted",
+  "space.created",
+  "space.deleted",
   "thread.created",
   "thread.deleted",
   "thread.archived",
@@ -958,7 +1026,7 @@ export const OrchestrationEventType = Schema.Literals([
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
-export const OrchestrationAggregateKind = Schema.Literals(["project", "thread"]);
+export const OrchestrationAggregateKind = Schema.Literals(["project", "thread", "space"]);
 export type OrchestrationAggregateKind = typeof OrchestrationAggregateKind.Type;
 export const OrchestrationActorKind = Schema.Literals(["client", "server", "provider"]);
 
@@ -988,6 +1056,19 @@ export const ProjectDeletedPayload = Schema.Struct({
   deletedAt: IsoDateTime,
 });
 
+export const SpaceCreatedPayload = Schema.Struct({
+  spaceId: SpaceId,
+  projectId: ProjectId,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const SpaceDeletedPayload = Schema.Struct({
+  spaceId: SpaceId,
+  deletedAt: IsoDateTime,
+});
+
 export const ThreadCreatedPayload = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
@@ -999,6 +1080,8 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Same decode-compatibility reasoning as taskRef.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   // Optional: historical thread.created events are re-decoded on every
   // projector bootstrap and never had this field, so it must decode as
   // absent rather than fail. Absent and explicit null both mean "no task
@@ -1066,6 +1149,8 @@ export const ThreadMetaUpdatedPayload = Schema.Struct({
   modelSelection: Schema.optional(ModelSelection),
   branch: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   worktreePath: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+  // Tri-state, mirroring the command.
+  spaceId: Schema.optional(Schema.NullOr(SpaceId)),
   // Tri-state, mirroring the command: absent leaves it alone, null clears
   // it, a value sets it.
   taskRef: Schema.optional(Schema.NullOr(TaskRef)),
@@ -1186,7 +1271,7 @@ const EventBaseFields = {
   sequence: NonNegativeInt,
   eventId: EventId,
   aggregateKind: OrchestrationAggregateKind,
-  aggregateId: Schema.Union([ProjectId, ThreadId]),
+  aggregateId: Schema.Union([ProjectId, ThreadId, SpaceId]),
   occurredAt: IsoDateTime,
   commandId: Schema.NullOr(CommandId),
   causationEventId: Schema.NullOr(EventId),
@@ -1209,6 +1294,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("project.deleted"),
     payload: ProjectDeletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("space.created"),
+    payload: SpaceCreatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("space.deleted"),
+    payload: SpaceDeletedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

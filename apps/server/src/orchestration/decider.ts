@@ -13,8 +13,11 @@ import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   listThreadsByProjectId,
   requireActiveProjectWorkspaceRootAbsent,
+  requireActiveSpaceForReference,
   requireProject,
   requireProjectAbsent,
+  requireSpace,
+  requireSpaceAbsent,
   requireThread,
   requireThreadArchived,
   requireThreadAbsent,
@@ -344,6 +347,65 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "space.create": {
+      // The owning project is who can list/create the space; it does not
+      // constrain which threads may later reference it (cross-project
+      // references are legal by design — see spec-wave-1-step-2.md).
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      yield* requireSpaceAbsent({
+        readModel,
+        command,
+        spaceId: command.spaceId,
+      });
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "space",
+          aggregateId: command.spaceId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "space.created",
+        payload: {
+          spaceId: command.spaceId,
+          projectId: command.projectId,
+          title: command.title,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+    }
+
+    case "space.delete": {
+      // Deliberately does not look at, cascade to, or reject based on
+      // threads that reference this space. The threads are unscoped
+      // (space_id -> null) by the projector as a read-model side effect of
+      // replaying the space.deleted event below — never by a compensating
+      // thread command/event emitted from here. See applySpacesProjection.
+      yield* requireSpace({
+        readModel,
+        command,
+        spaceId: command.spaceId,
+      });
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "space",
+          aggregateId: command.spaceId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "space.deleted" as const,
+        payload: {
+          spaceId: command.spaceId,
+          deletedAt: occurredAt,
+        },
+      };
+    }
+
     case "thread.create": {
       yield* requireProject({
         readModel,
@@ -355,6 +417,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (command.spaceId != null) {
+        yield* requireActiveSpaceForReference({
+          readModel,
+          command,
+          spaceId: command.spaceId,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -372,6 +441,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          // Same reasoning as taskRef: no tri-state at creation.
+          spaceId: command.spaceId ?? null,
           // No tri-state at creation — there's nothing to "leave alone" yet.
           // Omitted and explicit null both collapse to "no task ref".
           taskRef: command.taskRef ?? null,
@@ -645,6 +716,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         thread.branch !== command.expectedBranch
           ? thread.branch
           : command.branch;
+      if (command.spaceId != null) {
+        yield* requireActiveSpaceForReference({
+          readModel,
+          command,
+          spaceId: command.spaceId,
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -675,6 +753,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
+          // Same tri-state discipline as taskRef.
+          ...(command.spaceId !== undefined ? { spaceId: command.spaceId } : {}),
           // Tri-state passthrough: undefined stays undefined (leave alone),
           // null and a value both pass through as-is (clear / set). This is
           // the exact spread the tri-state bug collapses if written wrong.
