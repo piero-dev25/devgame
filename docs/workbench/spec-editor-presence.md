@@ -265,3 +265,49 @@ Implementation note: because pinned items outlive the frames that introduced
 them, the store must retain each pinned item's full payload (`id`, `label`,
 `path`, `kind`, `detail`) rather than re-deriving it from the current frame —
 a pinned object is frequently no longer in the live selection at all.
+
+---
+
+## BLOCKER RESOLVED: how a token reaches Unity
+
+The review flagged, correctly, that step 1 had no proof path — nothing
+described how a Bearer token gets into the Unity plugin, and pairing UX was
+out of scope. That is now answered, and the answer needs **no new auth
+infrastructure at all**.
+
+**Unity is just another bearer-paired client, exactly like T3's mobile app.**
+
+The evidence, all pre-existing:
+
+- `EnvironmentAuthPolicy.ts:39` lists `sessionMethods:
+["browser-session-cookie", "bearer-access-token", "dpop-access-token"]`.
+  A bearer session is first-class, not a workaround.
+- `EnvironmentAuth.ts:821` and `:835` mint sessions with
+  `method: "bearer-access-token"`.
+- `t3 pair` mints a one-time token for an already-running server and prints it
+  (`apps/server/src/cli/pair.ts`), which redeems into a session token.
+- `packages/client-runtime/src/connection/onboarding.ts:133`
+  (`updateBearerConnection`) and its `BearerConnectionTarget` are how
+  **apps/mobile** already connects — a non-browser client holding a bearer
+  token is a shipped path with a working precedent.
+
+### The flow
+
+1. The user runs `t3 pair` (or we surface a token in settings later).
+2. They paste it into the Unity plugin's preferences field — one time.
+3. The plugin redeems it, stores the resulting session token in `EditorPrefs`,
+   and sets `Authorization: Bearer <token>` on the WebSocket handshake.
+   `ClientWebSocket.Options.SetRequestHeader` can do this; browser JS cannot,
+   which is precisely why the bearer path exists for non-browser clients.
+4. `authenticateWebSocketUpgrade` accepts it like any other session.
+
+### Why this is the right answer rather than a shortcut
+
+It reuses T3's own device-pairing model rather than inventing a parallel one.
+We are treating the Unity Editor as what it actually is — another device
+pairing with a local server — which is the case their auth was already built
+for. That keeps our footprint on their code at the two one-line edits already
+established, and it means the security properties are theirs, reviewed and
+shipped, not ours improvised.
+
+**Step 1 now has a proof path**: pair once, select a GameObject, see the chip.
