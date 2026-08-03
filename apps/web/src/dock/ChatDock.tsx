@@ -9,15 +9,20 @@
 //  - Part B makes `ChatDockProps` a discriminated union on `routeKind`
 //    (mirroring `ChatViewProps`/`ThreadRouteContextValue`), so the SAME
 //    `ChatDock` mounts on both the server-thread and draft routes.
+//
+// Extended again for spec-files-panel.md: the placeholder's slot in the
+// default preset is now the real Files panel (live git status). See
+// FilesPanel.tsx for what the real data can and cannot honestly represent.
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { LayoutDashboard, MessageCircle, PanelLeft } from "lucide-react";
+import { Files, LayoutDashboard, MessageCircle, PanelLeft } from "lucide-react";
 
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import { DockviewLayout } from "./DockviewLayout";
+import { FilesPanel } from "./FilesPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -32,9 +37,10 @@ import { SidebarPanel } from "./SidebarPanel";
 const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
 const PLACEHOLDER_PANEL_ID = "placeholder";
+const FILES_PANEL_ID = "files";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
-const PLACEHOLDER_GROUP_ID = "group-placeholder";
+const FILES_GROUP_ID = "group-files";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -45,19 +51,18 @@ const CHAT_DOCK_PRESET_ID = "chat-dock-default";
  * — the same "workspace" DockviewLayoutProps already models, just with
  * exactly one workspace for now.
  *
- * Bumped from step 1's `"chat-dock"` to `"chat-dock-v2"`: a layout saved
- * under the old id references only 2 panels (`chat`, `placeholder`) — the
- * newly-registered `sidebar` panel simply isn't in that saved grid, so
- * dockview would restore the old 2-panel arrangement verbatim and the
- * sidebar would silently not appear (recoverable via the tab context menu's
- * "Add tab", or a reset, but not automatic). This dev machine already has
- * exactly such a layout persisted — see
- * docs/workbench/dock-step-1-e2e-evidence.md's check 2 — so reusing the old
- * key would make step 2 land invisibly regressed on the very machine used to
- * verify it. No migration is asked for by this spec; a fresh workspace id
- * is the honest way to land the new default cleanly everywhere.
+ * Bumped from step 1's `"chat-dock"` to `"chat-dock-v2"` when the sidebar
+ * panel was added, and now to `"chat-dock-v3"` for the SAME reason again:
+ * this dev machine (and any other with a persisted step-2 layout) has a
+ * saved grid whose third slot references `placeholder` — dockview restores
+ * exactly what was saved, not the current default preset, so without a new
+ * key the Files panel would silently never appear for anyone who already
+ * has a layout on disk (recoverable via "Add tab", but not automatic, and
+ * indistinguishable from a bug to whoever hits it). No migration is asked
+ * for by this spec; bumping the key is the same honest reset step 2 already
+ * established the precedent for.
  */
-const CHAT_DOCK_WORKSPACE_ID = "chat-dock-v2";
+const CHAT_DOCK_WORKSPACE_ID = "chat-dock-v3";
 const CHAT_DOCK_WORKSPACE_NAME = "Chat";
 
 /**
@@ -122,6 +127,14 @@ chatDockPanelRegistry.register({
   singleton: true,
 });
 
+// step-1/step-2 scratch panel. Kept REGISTERED (still reachable via the tab
+// context menu's "Add tab", still a real catalog entry) but, as of
+// spec-files-panel.md, no longer in the default preset — Files took its
+// slot. Deliberately not deleted: nothing else in the catalog offers "an
+// empty tab to put something in later," which is a real, if minor, use case
+// for exercising the dock's own machinery independent of any real panel's
+// behaviour, and removing a registered catalog entry is a bigger, more
+// permanent decision than this spec asked for.
 chatDockPanelRegistry.register({
   id: PLACEHOLDER_PANEL_ID,
   title: "Panel",
@@ -131,30 +144,58 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * The default preset: sidebar on the left, chat next to it, the step-1
- * placeholder further right — "same pixels, today" per spec's Part A, with
- * the sidebar's initial width seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
- * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
- * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
- * number. No measured mock exists for the chat:placeholder split (unchanged
- * from step 1, just with the sidebar's width carved out of what was
- * previously chat's share); dockview stretches this initial tree to fit the
- * real container, so only the RATIOS matter, not the absolute pixels.
+ * The first panel reading this fork's REAL data (spec-files-panel.md) —
+ * everything else in this dock is fixture- or T3-component-fed. See
+ * FilesPanel.tsx's own module doc for what `VcsStatusResult.workingTree.files`
+ * can and cannot honestly represent, and this step's report for what was
+ * actually observed testing it against a real repo.
  *
- * All three panels get the no-close tab component, for the same reason step
- * 1 gave the first two: no "+"/catalog UI exists yet to reopen a closed
- * panel from, only the tab context menu's "Add tab" for panels not
- * currently open. For the sidebar specifically this is load-bearing, not
- * just convenient — see SidebarPanel.tsx/this file's registration comment
- * on why a panel that can never unmount is what keeps the sidebar's window
- * keydown listeners (thread prev/next, Cmd+1..9) alive.
+ * `singleton: true` per the spec's default ("prefer singleton unless you can
+ * argue two Files panels are useful") — a read-only status view of one
+ * thread's one project has no case for a second simultaneous instance the
+ * way multi-agent `session` panels do.
+ *
+ * Deliberately CLOSEABLE (no `tabComponent: TAB_COMPONENT_NO_CLOSE` on its
+ * preset entry, unlike sidebar/chat below) — nothing depends on this panel
+ * staying mounted the way the sidebar's window keydown listeners do, so
+ * there's no reason to take away the user's ability to close it.
+ */
+chatDockPanelRegistry.register({
+  id: FILES_PANEL_ID,
+  title: "Files",
+  icon: Files,
+  component: FilesPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Files further
+ * right in the slot step 1/2's placeholder used to occupy — "same pixels,
+ * today" per spec's Part A, with the sidebar's initial width seeded from
+ * `THREAD_SIDEBAR_DEFAULT_WIDTH` (`~/components/threadSidebarWidth.ts`,
+ * 256px), the SAME constant `AppSidebarLayout`'s fixed sidebar already
+ * defaults to — not a re-guessed number. No measured mock exists for the
+ * chat:files split (unchanged proportions from step 1/2's chat:placeholder
+ * split); dockview stretches this initial tree to fit the real container,
+ * so only the RATIOS matter, not the absolute pixels.
+ *
+ * Sidebar and chat get the no-close tab component, for the same reason step
+ * 1 gave them both: no "+"/catalog UI exists yet to reopen a closed panel
+ * from, only the tab context menu's "Add tab" for panels not currently
+ * open. For the sidebar specifically this is load-bearing, not just
+ * convenient — see SidebarPanel.tsx/this file's registration comment on why
+ * a panel that can never unmount is what keeps the sidebar's window keydown
+ * listeners (thread prev/next, Cmd+1..9) alive. Files is NOT no-close — see
+ * its own registration comment above for why that's a deliberate
+ * difference, not an oversight.
  */
 function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
   const CHAT_WIDTH = 544;
-  const PLACEHOLDER_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + PLACEHOLDER_WIDTH;
+  const FILES_WIDTH = 400;
+  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + FILES_WIDTH;
 
   return {
     grid: {
@@ -177,11 +218,11 @@ function buildChatDockPreset(): SerializedDockview {
           },
           {
             type: "leaf",
-            size: PLACEHOLDER_WIDTH,
+            size: FILES_WIDTH,
             data: {
-              id: PLACEHOLDER_GROUP_ID,
-              views: [PLACEHOLDER_PANEL_ID],
-              activeView: PLACEHOLDER_PANEL_ID,
+              id: FILES_GROUP_ID,
+              views: [FILES_PANEL_ID],
+              activeView: FILES_PANEL_ID,
             },
           },
         ],
@@ -200,11 +241,13 @@ function buildChatDockPreset(): SerializedDockview {
         title: "Chat",
         tabComponent: TAB_COMPONENT_NO_CLOSE,
       },
-      [PLACEHOLDER_PANEL_ID]: {
-        id: PLACEHOLDER_PANEL_ID,
-        contentComponent: PLACEHOLDER_PANEL_ID,
-        title: "Panel",
-        tabComponent: TAB_COMPONENT_NO_CLOSE,
+      [FILES_PANEL_ID]: {
+        id: FILES_PANEL_ID,
+        contentComponent: FILES_PANEL_ID,
+        title: "Files",
+        // Deliberately no `tabComponent: TAB_COMPONENT_NO_CLOSE` here — see
+        // this file's Files-panel registration comment for why it stays
+        // closeable, unlike sidebar/chat above.
       },
     },
     activeGroup: CHAT_GROUP_ID,
