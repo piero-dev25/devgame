@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   buildHostedChannelSelectionUrl,
   buildHostedPairingUrl,
+  configuredHostedAppUrl,
   hasHostedPairingRequest,
   isHostedStaticApp,
   readHostedPairingRequest,
@@ -27,13 +28,13 @@ describe("hostedPairing", () => {
   it("prefers hash tokens so generated hosted links do not put credentials in search params", () => {
     vi.stubEnv("VITE_HOSTED_APP_URL", "https://preview.t3.codes");
 
-    const url = new URL(
-      buildHostedPairingUrl({
-        host: "https://backend.example.com:3773",
-        token: "pairing-token",
-        label: "Workstation",
-      }),
-    );
+    const pairingUrl = buildHostedPairingUrl({
+      host: "https://backend.example.com:3773",
+      token: "pairing-token",
+      label: "Workstation",
+    });
+    expect(pairingUrl).not.toBeNull();
+    const url = new URL(pairingUrl!);
 
     expect(url.origin).toBe("https://preview.t3.codes");
     expect(url.pathname).toBe("/pair");
@@ -46,16 +47,26 @@ describe("hostedPairing", () => {
   it("builds hosted channel selection URLs through the configured router origin", () => {
     vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
 
-    const url = new URL(
-      buildHostedChannelSelectionUrl({
-        channel: "nightly",
-      }),
-    );
+    const channelUrl = buildHostedChannelSelectionUrl({ channel: "nightly" });
+    expect(channelUrl).not.toBeNull();
+    const url = new URL(channelUrl!);
 
     expect(url.origin).toBe("https://app.t3.codes");
     expect(url.pathname).toBe("/__t3code/channel");
     expect(url.searchParams.get("channel")).toBe("nightly");
     expect(url.searchParams.has("next")).toBe(false);
+  });
+
+  it("builds no hosted links when the build names no hosted deployment", () => {
+    vi.stubEnv("VITE_HOSTED_APP_URL", "");
+    vi.stubEnv("VITE_HTTP_URL", "");
+    vi.stubEnv("VITE_WS_URL", "");
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "");
+
+    expect(configuredHostedAppUrl()).toBeNull();
+    expect(buildHostedPairingUrl({ host: "https://backend.example.com", token: "t" })).toBeNull();
+    expect(buildHostedChannelSelectionUrl({ channel: "nightly" })).toBeNull();
+    expect(isHostedStaticApp(new URL("https://app.t3.codes/"))).toBe(false);
   });
 
   it("ignores incomplete hosted pairing requests", () => {

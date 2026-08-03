@@ -3,7 +3,15 @@ import { isWindowsPlatform } from "../lib/utils";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
-const DESKTOP_RELEASE_TAG_URL = "https://github.com/pingdotgg/t3code/releases/tag";
+/**
+ * Build-time configuration with no fallback: a build that does not name its own
+ * releases page shows no release-notes link, rather than sending our users to
+ * the upstream project's.
+ */
+function configuredDesktopReleaseTagUrl(): string | null {
+  const configured = import.meta.env.VITE_DESKTOP_RELEASE_TAG_URL?.trim();
+  return configured ? configured.replace(/\/+$/, "") : null;
+}
 
 /**
  * The main process fills `downloadedVersion` from the updater's `update-downloaded`
@@ -16,9 +24,11 @@ export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): st
 
 /** Release notes for an exact downloaded build; nightly suffixes are part of the tag. */
 export function getDesktopUpdateReleaseUrl(version: string | null): string | null {
+  const releaseTagUrl = configuredDesktopReleaseTagUrl();
+  if (!releaseTagUrl) return null;
   const normalizedVersion = version?.trim();
   if (!normalizedVersion) return null;
-  return `${DESKTOP_RELEASE_TAG_URL}/v${encodeURIComponent(normalizedVersion)}`;
+  return `${releaseTagUrl}/v${encodeURIComponent(normalizedVersion)}`;
 }
 
 export function resolveDesktopUpdateButtonAction(

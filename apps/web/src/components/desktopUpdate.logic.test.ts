@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 
 import {
@@ -159,21 +159,37 @@ describe("getDesktopUpdateActionError", () => {
 });
 
 describe("desktop update UI helpers", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("builds the stable release URL for a downloaded version", () => {
+    vi.stubEnv("VITE_DESKTOP_RELEASE_TAG_URL", "https://github.example.test/acme/app/releases/tag");
+
     expect(getDesktopUpdateReleaseUrl("0.0.30")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
+      "https://github.example.test/acme/app/releases/tag/v0.0.30",
     );
   });
 
   it("builds the nightly release URL without dropping its version suffix", () => {
+    vi.stubEnv("VITE_DESKTOP_RELEASE_TAG_URL", "https://github.example.test/acme/app/releases/tag");
+
     expect(getDesktopUpdateReleaseUrl("0.0.30-nightly.20260728.931")).toBe(
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30-nightly.20260728.931",
+      "https://github.example.test/acme/app/releases/tag/v0.0.30-nightly.20260728.931",
     );
   });
 
   it("omits the release URL when the updater does not report a version", () => {
+    vi.stubEnv("VITE_DESKTOP_RELEASE_TAG_URL", "https://github.example.test/acme/app/releases/tag");
+
     expect(getDesktopUpdateReleaseUrl(null)).toBeNull();
     expect(getDesktopUpdateReleaseUrl("  ")).toBeNull();
+  });
+
+  it("omits the release URL when the build names no releases page", () => {
+    vi.stubEnv("VITE_DESKTOP_RELEASE_TAG_URL", "");
+
+    expect(getDesktopUpdateReleaseUrl("0.0.30")).toBeNull();
   });
 
   it("toasts only for actionable updater errors", () => {

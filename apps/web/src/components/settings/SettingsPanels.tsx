@@ -62,7 +62,11 @@ import {
   useEnvironmentStageLabel,
 } from "../SidebarStageBackdrop";
 import { isElectron } from "../../env";
-import { buildHostedChannelSelectionUrl, type HostedAppChannel } from "../../hostedPairing";
+import {
+  buildHostedChannelSelectionUrl,
+  configuredHostedAppUrl,
+  type HostedAppChannel,
+} from "../../hostedPairing";
 import { useTheme } from "../../hooks/useTheme";
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
@@ -121,6 +125,7 @@ import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
   backgroundActivitySharedPolicySettings,
   buildProviderInstanceUpdatePatch,
+  canSwitchHostedAppChannel,
   formatDiagnosticsDescription,
   hasChangedBackgroundActivitySettings,
   isProjectGroupingEnabled,
@@ -353,6 +358,11 @@ function AboutVersionSection() {
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
+  const showHostedAppChannelRow = canSwitchHostedAppChannel({
+    hasDesktopBridge,
+    hostedAppChannel: HOSTED_APP_CHANNEL,
+    hostedAppUrl: configuredHostedAppUrl(),
+  });
 
   const handleUpdateChannelChange = useCallback(
     (channel: DesktopUpdateChannel) => {
@@ -523,7 +533,7 @@ function AboutVersionSection() {
             </Select>
           }
         />
-      ) : selectedHostedAppChannel ? (
+      ) : showHostedAppChannelRow && selectedHostedAppChannel ? (
         <SettingsRow
           title="Update track"
           description="Switches the hosted app release channel."
@@ -532,9 +542,12 @@ function AboutVersionSection() {
               value={selectedHostedAppChannel}
               onValueChange={(value) => {
                 if (value === selectedHostedAppChannel) return;
-                window.location.assign(
-                  buildHostedChannelSelectionUrl({ channel: value as HostedAppChannel }),
-                );
+                const channelUrl = buildHostedChannelSelectionUrl({
+                  channel: value as HostedAppChannel,
+                });
+                if (channelUrl) {
+                  window.location.assign(channelUrl);
+                }
               }}
             >
               <SelectTrigger className="w-full sm:w-40" aria-label="Update track">

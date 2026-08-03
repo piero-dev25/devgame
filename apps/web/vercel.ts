@@ -1,9 +1,24 @@
 import { matchers, routes, type Transform, type VercelConfig } from "@vercel/config/v1";
 
-const ROUTER_HOST = "app.t3.codes";
+// Channel routing needs three domains this deployment must own; the same
+// variables drive the release workflow's aliasing step. They are configuration
+// with no fallback: with any of them missing the host-matched router rules are
+// omitted entirely, so a deployment can never proxy onto domains belonging to
+// the project this was forked from.
+const ROUTER_HOST = hostFromEnv(process.env.T3CODE_WEB_ROUTER_URL);
+const LATEST_HOST = hostFromEnv(process.env.T3CODE_WEB_LATEST_DOMAIN);
+const NIGHTLY_HOST = hostFromEnv(process.env.T3CODE_WEB_NIGHTLY_DOMAIN);
 const HOSTED_WEB_CHANNEL_COOKIE = "t3code_web_channel";
-const LATEST_ORIGIN = "https://latest.app.t3.codes";
-const NIGHTLY_ORIGIN = "https://nightly.app.t3.codes";
+
+/** Accepts either a bare domain or a full origin and yields the bare host. */
+function hostFromEnv(value: string | undefined): string | null {
+  const trimmed = value
+    ?.trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  return trimmed ? trimmed : null;
+}
+
 const CLEAN_CHANNEL_QUERY_TRANSFORMS = [
   {
     type: "request.query",
@@ -51,16 +66,27 @@ export const config: VercelConfig = {
       },
       status: 302,
     },
-    {
-      src: "/(.*)",
-      has: [matchers.host(ROUTER_HOST), matchers.cookie(HOSTED_WEB_CHANNEL_COOKIE, "nightly")],
-      dest: `${NIGHTLY_ORIGIN}/$1`,
-    },
-    {
-      src: "/(.*)",
-      has: [matchers.host(ROUTER_HOST)],
-      dest: `${LATEST_ORIGIN}/$1`,
-    },
+    ...(ROUTER_HOST && NIGHTLY_HOST
+      ? [
+          {
+            src: "/(.*)",
+            has: [
+              matchers.host(ROUTER_HOST),
+              matchers.cookie(HOSTED_WEB_CHANNEL_COOKIE, "nightly"),
+            ],
+            dest: `https://${NIGHTLY_HOST}/$1`,
+          },
+        ]
+      : []),
+    ...(ROUTER_HOST && LATEST_HOST
+      ? [
+          {
+            src: "/(.*)",
+            has: [matchers.host(ROUTER_HOST)],
+            dest: `https://${LATEST_HOST}/$1`,
+          },
+        ]
+      : []),
   ],
   rewrites: [routes.rewrite("/(.*)", "/index.html")],
 };

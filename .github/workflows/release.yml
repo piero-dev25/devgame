@@ -930,9 +930,16 @@ jobs:
             exit 1
           fi
 
-          router_url="${T3CODE_WEB_ROUTER_URL:-https://app.t3.codes}"
-          latest_domain="${T3CODE_WEB_LATEST_DOMAIN:-latest.app.t3.codes}"
-          nightly_domain="${T3CODE_WEB_NIGHTLY_DOMAIN:-nightly.app.t3.codes}"
+          # No defaults: an unset domain must stop the release rather than alias
+          # this deployment onto the domains of the project this was forked from.
+          if [[ -z "${T3CODE_WEB_ROUTER_URL:-}" || -z "${T3CODE_WEB_LATEST_DOMAIN:-}" || -z "${T3CODE_WEB_NIGHTLY_DOMAIN:-}" ]]; then
+            echo "Missing one or more required hosted web domains: T3CODE_WEB_ROUTER_URL, T3CODE_WEB_LATEST_DOMAIN, T3CODE_WEB_NIGHTLY_DOMAIN." >&2
+            exit 1
+          fi
+
+          router_url="$T3CODE_WEB_ROUTER_URL"
+          latest_domain="$T3CODE_WEB_LATEST_DOMAIN"
+          nightly_domain="$T3CODE_WEB_NIGHTLY_DOMAIN"
           router_domain="${router_url#http://}"
           router_domain="${router_domain#https://}"
           router_domain="${router_domain%%/*}"

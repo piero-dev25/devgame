@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   backgroundActivitySharedPolicySettings,
   buildProviderInstanceUpdatePatch,
+  canSwitchHostedAppChannel,
   formatDiagnosticsDescription,
   hasChangedBackgroundActivitySettings,
   isProjectGroupingEnabled,
@@ -226,5 +227,44 @@ describe("buildProviderInstanceUpdatePatch", () => {
 
     expect(patch.providerInstances?.[instanceId]).toEqual(nextInstance);
     expect(patch.providers).toBeUndefined();
+  });
+});
+
+describe("hosted app channel switch availability", () => {
+  it("hides the row when the build names no hosted app, even with a channel declared", () => {
+    expect(
+      canSwitchHostedAppChannel({
+        hasDesktopBridge: false,
+        hostedAppChannel: "nightly",
+        hostedAppUrl: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("shows the row only for a hosted build with both a channel and a hosted app", () => {
+    expect(
+      canSwitchHostedAppChannel({
+        hasDesktopBridge: false,
+        hostedAppChannel: "nightly",
+        hostedAppUrl: "https://app.example.test",
+      }),
+    ).toBe(true);
+  });
+
+  it("stays hidden without a channel, and for the desktop build which has its own switch", () => {
+    expect(
+      canSwitchHostedAppChannel({
+        hasDesktopBridge: false,
+        hostedAppChannel: null,
+        hostedAppUrl: "https://app.example.test",
+      }),
+    ).toBe(false);
+    expect(
+      canSwitchHostedAppChannel({
+        hasDesktopBridge: true,
+        hostedAppChannel: "nightly",
+        hostedAppUrl: "https://app.example.test",
+      }),
+    ).toBe(false);
   });
 });

@@ -117,20 +117,21 @@ Required GitHub Actions secrets:
 Optional GitHub Actions variables:
 
 - `VERCEL_TEAM_SLUG`: overrides the Vercel CLI scope when the team slug is preferred over the `VERCEL_ORG_ID` secret.
-- `T3CODE_WEB_ROUTER_URL`: defaults to `https://app.t3.codes`.
-- `T3CODE_WEB_LATEST_DOMAIN`: defaults to `latest.app.t3.codes`.
-- `T3CODE_WEB_NIGHTLY_DOMAIN`: defaults to `nightly.app.t3.codes`.
 
-Required Vercel domains:
+Required GitHub Actions variables — the three domains this deployment owns, each
+also registered as a Vercel domain on the project. They have **no defaults**:
+the deploy step fails when any is unset rather than aliasing the deployment onto
+a domain we do not control.
 
-- `app.t3.codes`: the router domain users open, updated by stable releases.
-- `latest.app.t3.codes`: channel alias updated by stable releases.
-- `nightly.app.t3.codes`: channel alias updated by nightly releases.
+- `T3CODE_WEB_ROUTER_URL`: the router origin users open, updated by stable releases.
+- `T3CODE_WEB_LATEST_DOMAIN`: channel alias updated by stable releases.
+- `T3CODE_WEB_NIGHTLY_DOMAIN`: channel alias updated by nightly releases.
 
-The router domain uses `apps/web/vercel.ts` routes. Users opt into a channel by
-visiting `/__t3code/channel?channel=latest` or
-`/__t3code/channel?channel=nightly`; the router stores the
-`t3code_web_channel` cookie and rewrites future requests on `app.t3.codes` to
+The router domain uses `apps/web/vercel.ts` routes, which read the same three
+variables at build time and omit the host-matched routes entirely when any is
+unset. Users opt into a channel by visiting `/__t3code/channel?channel=latest`
+or `/__t3code/channel?channel=nightly`; the router stores the
+`t3code_web_channel` cookie and rewrites future requests on the router domain to
 the matching channel alias.
 
 The release deploy job rewrites release package versions before upload so the

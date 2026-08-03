@@ -50,6 +50,23 @@ const configuredHostedAppUrl = (() => {
   }
   return undefined;
 })();
+// Where the desktop update toast links its release notes. Explicit config wins;
+// otherwise it follows the repository this bundle is being built from, the same
+// way the updater's own feed does. A build with neither shows no link rather
+// than pointing users at whichever repository the source was forked from.
+const configuredDesktopReleaseTagUrl = (() => {
+  const explicitUrl = process.env.VITE_DESKTOP_RELEASE_TAG_URL?.trim();
+  if (explicitUrl) {
+    return explicitUrl;
+  }
+  const repository = process.env.GITHUB_REPOSITORY?.trim();
+  if (!repository) {
+    return "";
+  }
+  const serverUrl = process.env.GITHUB_SERVER_URL?.trim() || "https://github.com";
+  return `${serverUrl}/${repository}/releases/tag`;
+})();
+
 const sourcemapEnv = process.env.T3CODE_WEB_SOURCEMAP?.trim().toLowerCase();
 
 // Vite 8.1's experimental bundled dev mode: serves rolldown-bundled chunks in
@@ -173,6 +190,9 @@ export default defineConfig(() => {
       "import.meta.env.VITE_RELAY_OTLP_TRACES_TOKEN": JSON.stringify(configuredRelayTracingToken),
       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
       "import.meta.env.VITE_HOSTED_APP_CHANNEL": JSON.stringify(configuredHostedAppChannel),
+      "import.meta.env.VITE_DESKTOP_RELEASE_TAG_URL": JSON.stringify(
+        configuredDesktopReleaseTagUrl,
+      ),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
     },
     resolve: {

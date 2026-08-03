@@ -190,3 +190,17 @@ export function buildProviderInstanceUpdatePatch(input: {
       : {}),
   };
 }
+
+/**
+ * The hosted "Update track" switch works by navigating to the hosted app's
+ * channel endpoint. A build that declares a channel but names no hosted app has
+ * nowhere to send the user, so the row is hidden rather than rendered inert —
+ * an unconfigured fork should look deliberate, not broken.
+ */
+export function canSwitchHostedAppChannel(input: {
+  readonly hasDesktopBridge: boolean;
+  readonly hostedAppChannel: string | null;
+  readonly hostedAppUrl: string | null;
+}): boolean {
+  return !input.hasDesktopBridge && input.hostedAppChannel !== null && input.hostedAppUrl !== null;
+}

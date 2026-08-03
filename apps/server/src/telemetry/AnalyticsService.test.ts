@@ -119,4 +119,60 @@ it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
       );
     }),
   );
+
+  /**
+   * Fork safety: an install that configures no telemetry must transmit nothing.
+   * Each case points the (unused) host at the in-test server, so a regression
+   * that reinstates a baked-in key or a default-on switch shows up here as a
+   * captured request instead of silently reaching a real project.
+   */
+  const expectNoTelemetryDelivery = (
+    telemetryEnv: Readonly<Record<string, string | boolean | number>>,
+  ) =>
+    Effect.gen(function* () {
+      const capturedRequests: Array<RecordedBatchRequest> = [];
+      const serverConfigLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
+        prefix: "t3-telemetry-off-",
+      });
+      const telemetryLayer = AnalyticsService.layer.pipe(Layer.provideMerge(serverConfigLayer));
+      const configLayer = ConfigProvider.layer(
+        ConfigProvider.fromUnknown({ T3CODE_POSTHOG_HOST: "http://localhost", ...telemetryEnv }),
+      );
+      const batchServerLayer = HttpServer.serve(
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const payload = yield* request.json.pipe(
+            Effect.map((body) => body as RecordedBatchRequest["body"]),
+            Effect.orElseSucceed(() => null),
+          );
+          capturedRequests.push({ path: request.url, body: payload });
+          return HttpServerResponse.jsonUnsafe({});
+        }),
+      );
+      const runtimeLayer = telemetryLayer.pipe(
+        Layer.provide(configLayer),
+        Layer.provideMerge(NodeHttpServer.layerTest),
+      );
+
+      yield* Effect.gen(function* () {
+        yield* Layer.launch(batchServerLayer).pipe(Effect.forkScoped);
+        const analytics = yield* AnalyticsService.AnalyticsService;
+        yield* analytics.record("test.telemetry.should.not.send", { index: 0 });
+        yield* analytics.flush;
+      }).pipe(Effect.provide(runtimeLayer));
+
+      assert.deepEqual(capturedRequests, []);
+    });
+
+  it.effect("sends nothing when telemetry is left unconfigured", () =>
+    expectNoTelemetryDelivery({}),
+  );
+
+  it.effect("sends nothing when telemetry is enabled but no PostHog key is configured", () =>
+    expectNoTelemetryDelivery({ T3CODE_TELEMETRY_ENABLED: true }),
+  );
+
+  it.effect("sends nothing when a PostHog key exists but telemetry was never enabled", () =>
+    expectNoTelemetryDelivery({ T3CODE_POSTHOG_KEY: "phc_test_key" }),
+  );
 });
