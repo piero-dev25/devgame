@@ -20,6 +20,20 @@ sources read directly out of this repo:
      (`RedeemPairingCredential`), confirming the design in (1)/(2) was
      already built and reviewed for an EPP publisher, not just theorized.
 
+CORRECTION (found during the cross-engine contract audit): the credential
+that gets redeemed here is NOT the code the server prints at its own
+startup (`issueStartupPairingUrl` — that one is `purpose: "startup"` and
+cannot be redeemed by a headless client; see
+docs/workbench/engine-credential-flow.md, which reproduced the failure
+three times before pinning this down). It is a device pairing token minted
+from an ALREADY-PAIRED T3 app (Settings ▸ Connections ▸ Pairing links ▸
+Create link, which calls the authenticated `POST /api/auth/pairing-token`
+route — `EnvironmentAuth.issuePairingCredential`). See README.md's
+"Credential flow" section for the corrected user-facing instructions; the
+mechanism implemented below was already correct and needed no change for
+this — only the `scope` field below (also flagged by that doc) was
+actually missing.
+
 No `unreal` import — `urllib.request` is used for the HTTP call so this
 stays pure stdlib and directly unit-testable (unreal/tests/test_config.py
 injects a fake `http_post`, never touching the network).
@@ -48,6 +62,17 @@ TOKEN_FILE_RELATIVE_PARTS = ("Saved", "EditorPresence", "token.txt")
 GRANT_TYPE = "urn:ietf:params:oauth:grant-type:token-exchange"
 SUBJECT_TOKEN_TYPE = "urn:t3:params:oauth:token-type:environment-bootstrap"
 REQUESTED_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
+
+# The space-separated scope string a real T3 client sends (matches
+# `AuthStandardClientScopes` in packages/contracts/src/auth.ts —
+# orchestration:read, orchestration:operate, terminal:operate, review:write,
+# relay:read). `scope` is `Schema.optionalKey` server-side, so omitting it
+# does not fail the request outright — it silently falls back to whatever
+# scopes the minted pairing credential itself carries. Sending it explicitly
+# (per docs/workbench/engine-credential-flow.md's "the bit worth
+# remembering") is what makes the granted scope a stated fact of this
+# request rather than an inherited implicit default.
+CLIENT_SCOPE = "orchestration:read orchestration:operate terminal:operate review:write relay:read"
 
 
 class RedeemError(Exception):
@@ -96,11 +121,14 @@ def default_token_file_path(project_dir: str) -> str:
 
 
 def extract_pairing_credential(pasted_input: str) -> str:
-    """Mirrors Unity's `ExtractCredential`: `t3 pair`
-    (apps/server/src/cli/pair.ts) prints either a bare credential or a full
-    pairing URL with the credential in a `#token=` fragment
-    (`EnvironmentAuth.issueStartupPairingUrl`). Accept either — whichever
-    the user pastes into token.txt."""
+    """Mirrors Unity's `ExtractCredential`. A device pairing token minted
+    from an already-paired T3 app (Settings ▸ Connections ▸ Pairing links ▸
+    Create link — see README.md's "Credential flow" section and
+    docs/workbench/engine-credential-flow.md) may be presented as a bare
+    credential or as a full pairing URL with the credential in a `#token=`
+    fragment. Accept either — whichever the user pastes into token.txt.
+    NOT for the code the server prints at its own startup; that one cannot
+    be redeemed by this function's caller — see the README."""
     trimmed = (pasted_input or "").strip()
     if not trimmed:
         return ""
@@ -134,8 +162,10 @@ def redeem_pairing_credential(
     http_post: Callable[[str, dict, float], dict] = _default_http_post,
     timeout_s: float = 10.0,
 ) -> str:
-    """Exchanges a pasted `t3 pair` credential for a long-lived bearer
-    session token, POSTing `application/x-www-form-urlencoded` to
+    """Exchanges a pasted device pairing credential (minted from an
+    already-paired T3 app, NOT the server's own startup code — see
+    README.md) for a long-lived bearer session token, POSTing
+    `application/x-www-form-urlencoded` to
     `{base_http_url}/oauth/token` exactly as
     packages/client-runtime/src/authorization/remote.ts's
     `bootstrapRemoteBearerSession` does. Returns the `access_token` string,
@@ -150,6 +180,7 @@ def redeem_pairing_credential(
         "subject_token": credential,
         "subject_token_type": SUBJECT_TOKEN_TYPE,
         "requested_token_type": REQUESTED_TOKEN_TYPE,
+        "scope": CLIENT_SCOPE,
         "client_label": client_label,
     }
     try:
@@ -193,12 +224,13 @@ def redeem_and_store_from_token_file(
     base_http_url: str,
     http_post: Callable[[str, dict, float], dict] = _default_http_post,
 ) -> str:
-    """The "Pair" menu action's implementation (spec step 6 / README
-    install step 6). Semantics mirror the Unity flow exactly, just via a
-    file instead of a text field: `token.txt` initially holds whatever the
-    user pasted fresh from `t3 pair` (a pairing credential, or a pairing
-    URL); this treats that content AS a pairing credential, redeems it, and
-    OVERWRITES the file with the resulting long-lived bearer session token.
+    """The "Pair" menu action's implementation (README's "Credential flow"
+    section). Semantics mirror the Unity flow exactly, just via a file
+    instead of a text field: `token.txt` initially holds whatever the user
+    pasted fresh from their already-paired T3 app's "Create link" action (a
+    pairing credential, or a pairing URL); this treats that content AS a
+    pairing credential, redeems it, and OVERWRITES the file with the
+    resulting long-lived bearer session token.
     From then on `token.txt` holds a bearer token directly, and
     `resolve_token` reads it as such — no ambiguity between the two roles
     at any single point in time, and no heuristic guessing about which kind
@@ -209,7 +241,10 @@ def redeem_and_store_from_token_file(
     pasted and try again."""
     raw = read_token_file_raw(project_dir)
     if not raw:
-        raise RedeemError("token.txt is empty. Run `t3 pair` and paste the printed token or URL into it.")
+        raise RedeemError(
+            "token.txt is empty. From an already-paired T3 app: Settings > Connections > "
+            "Pairing links > Create link, then paste that token or URL into token.txt."
+        )
     access_token = redeem_pairing_credential(raw, base_http_url=base_http_url, http_post=http_post)
     write_token_file(project_dir, access_token)
     return access_token

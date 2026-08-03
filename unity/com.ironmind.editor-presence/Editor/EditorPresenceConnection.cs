@@ -16,6 +16,28 @@
 // AssemblyReloadEvents hook below exists only to close the *old* socket
 // before that happens, so the server sees a clean disconnect instead of a
 // silently-abandoned TCP connection lingering until it times out.
+//
+// SESSION.ID PERSISTENCE (added during the cross-engine contract audit):
+// `SessionId` is backed by UnityEditor.SessionState, not a plain
+// `static readonly` field initializer. The protocol's design (see
+// docs/workbench/spec-editor-presence.md) explicitly wants session.id
+// "stable per editor-process launch," so a reconnect after a domain reload
+// replaces the stale server-side entry (last-writer-wins on session.id)
+// instead of appearing as a second, briefly-duplicate publisher. A plain
+// static field regenerates a fresh GUID on every domain reload — which
+// fires on every script compile AND every Play press in a project with
+// domain reload enabled — so the OLD behavior minted a brand-new
+// session.id after every single reload, producing a transient duplicate
+// chip until the old TCP connection's abort was detected server-side.
+// SessionState persists for the life of the Editor PROCESS (survives
+// domain reload, resets on Editor restart), which is exactly the semantic
+// wanted here. See EditorPresenceSelectionWatcher.cs for the paired
+// `_sequence` persistence fix — session.id and seq must both survive
+// reload together, or persisting one without the other trades this bug for
+// a different one (a stale seq compared against the SAME still-registered
+// session.id can make the registry's `seq <= existing.seq` guard silently
+// drop every post-reload selection update until the counter catches up).
+// UNVERIFIED against a real Unity project — see UNVERIFIED.md.
 using System;
 using System.Net.WebSockets;
 using System.Text;
@@ -34,18 +56,51 @@ namespace Ironmind.EditorPresence
         // storm") in the frozen spec, not step 1.
         private const double ReconnectIntervalSeconds = 3.0;
         private const int ReceiveBufferSize = 4096;
+        private const string SessionIdSessionStateKey = "Ironmind.EditorPresence.SessionId";
 
-        private static readonly string SessionId = Guid.NewGuid().ToString("N");
+        // A close code >= 4000 means the server told us why (the ruling
+        // measured in docs/workbench/godot-probe-findings.md and restated
+        // in the audit brief): the presence route accepts the WebSocket
+        // upgrade FIRST, then authenticates, and rejects by closing with an
+        // application close code plus a human-readable reason — it never
+        // refuses with an HTTP-level error. Below this threshold (including
+        // no close code at all, i.e. the connection never completed) means
+        // "we never got far enough to be told anything."
+        private const int AuthRejectionCloseCodeThreshold = 4000;
+
+        private static readonly string SessionId = ResolveSessionId();
 
         private static ClientWebSocket _socket;
         private static CancellationTokenSource _cts;
         private static double _nextConnectAttemptAt;
         private static bool _connectInFlight;
 
+        // Set when the server rejected our credential with a close code
+        // >= 4000. HandleEditorUpdate refuses to auto-retry while this is
+        // set — retrying with the SAME rejected token cannot fix a
+        // credential problem, it can only hammer the server and spam the
+        // Output Log every ReconnectIntervalSeconds. Cleared by Retry()
+        // (wired to a "Retry now" button — see
+        // EditorPresenceSettingsProvider.cs) or by a successful re-pair
+        // (EditorPresenceSettings.RedeemPairingCredential's caller clears
+        // it — see that file).
+        private static bool _credentialRejected;
+
         public static event Action<EditorPresenceConnectionState> StateChanged;
 
         public static EditorPresenceConnectionState State { get; private set; } =
             EditorPresenceConnectionState.Disconnected;
+
+        // The human-readable reason for the current Disconnected state —
+        // "" while Connected/Connecting, or after a clean shutdown with
+        // nothing to report. Read alongside a StateChanged(Disconnected)
+        // event (set BEFORE that event fires, so subscribers always see the
+        // fresh value), or directly for the settings/overlay UI's own
+        // polling redraw. Mirrors epp/indicator.py's `last_error` field on
+        // the Unreal side.
+        public static string LastErrorMessage { get; private set; } = "";
+
+        public static bool CredentialRejected => _credentialRejected;
 
         static EditorPresenceConnection()
         {
@@ -54,10 +109,40 @@ namespace Ironmind.EditorPresence
             EditorApplication.update += HandleEditorUpdate;
         }
 
+        // Plain method (not a pattern-matching expression) deliberately —
+        // this file cannot be compiled here to check the project's
+        // effective C# language version, and a field-initializer ternary
+        // over a C# 9 property pattern is exactly the kind of thing that
+        // silently fails to compile on an older LangVersion. This reads
+        // the same either way.
+        private static string ResolveSessionId()
+        {
+            var existing = SessionState.GetString(SessionIdSessionStateKey, "");
+            if (!string.IsNullOrEmpty(existing)) return existing;
+            var id = Guid.NewGuid().ToString("N");
+            SessionState.SetString(SessionIdSessionStateKey, id);
+            return id;
+        }
+
+        /// Clears a credential-rejection halt and forces an immediate
+        /// reconnect attempt, bypassing both the halt and the normal
+        /// ReconnectIntervalSeconds wait. Called from a "Retry now" button
+        /// (EditorPresenceSettingsProvider.cs) and automatically after a
+        /// successful re-pair (EditorPresenceSettings.cs) — a fresh token
+        /// makes a prior rejection stale, so re-pairing should not require
+        /// a second, separate "now click retry" step.
+        public static void Retry()
+        {
+            _credentialRejected = false;
+            LastErrorMessage = "";
+            _nextConnectAttemptAt = EditorApplication.timeSinceStartup;
+        }
+
         private static void HandleEditorUpdate()
         {
             if (_connectInFlight) return;
             if (State != EditorPresenceConnectionState.Disconnected) return;
+            if (_credentialRejected) return;
             if (!EditorPresenceSettings.HasBearerToken) return;
             if (EditorApplication.timeSinceStartup < _nextConnectAttemptAt) return;
 
@@ -79,6 +164,19 @@ namespace Ironmind.EditorPresence
             }
             catch (Exception e)
             {
+                // ConnectAsync itself throwing (refused, DNS failure, no
+                // response) means no WebSocket session was ever
+                // established — the "cannot reach Workbench" case, not an
+                // auth rejection (which, per the measured server behavior,
+                // can only happen AFTER the upgrade succeeds — see
+                // ReceiveUntilClosedAsync). Only set LastErrorMessage here
+                // if ReceiveUntilClosedAsync hasn't already set a more
+                // specific one for this attempt.
+                if (string.IsNullOrEmpty(LastErrorMessage))
+                {
+                    var url = EditorPresenceSettings.BuildPublisherWebSocketUrl();
+                    LastErrorMessage = $"cannot reach Workbench at {url}";
+                }
                 Debug.LogWarning($"[T3 Editor Presence] connection attempt failed: {e.Message}");
             }
             finally
@@ -93,6 +191,7 @@ namespace Ironmind.EditorPresence
             var token = EditorPresenceSettings.BearerToken;
             if (string.IsNullOrEmpty(token)) return;
 
+            LastErrorMessage = "";
             SetState(EditorPresenceConnectionState.Connecting);
 
             _cts = new CancellationTokenSource();
@@ -153,6 +252,20 @@ namespace Ironmind.EditorPresence
         // We never need to act on inbound frame content (Unity is a
         // publisher only — it doesn't render the `presence` fan-out), so
         // this just drains frames to detect a server-initiated close.
+        //
+        // CLOSE-CODE DIAGNOSIS (added during the cross-engine contract
+        // audit — this loop previously always closed with
+        // WebSocketCloseStatus.NormalClosure regardless of what the server
+        // actually sent, discarding the close code and reason entirely).
+        // `ClientWebSocket.CloseStatus` / `CloseStatusDescription` are
+        // populated once a Close message has been received, before the
+        // handshake finishes — read them here, BEFORE calling CloseAsync.
+        // `WebSocketCloseStatus` only has named members for the standard
+        // 1000–1015 codes; a server-sent 4401 has no matching name but
+        // casting `(int)closeStatus.Value` still recovers the raw code —
+        // .NET enums are plain typed integers and are not validated
+        // against their declared members at runtime. UNVERIFIED against a
+        // real ClientWebSocket instance — see UNVERIFIED.md.
         private static async Task ReceiveUntilClosedAsync(CancellationToken cancellationToken)
         {
             var buffer = new byte[ReceiveBufferSize];
@@ -161,12 +274,41 @@ namespace Ironmind.EditorPresence
                 var result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
+                    var closeCode = _socket.CloseStatus.HasValue ? (int)_socket.CloseStatus.Value : -1;
+                    var closeDescription = _socket.CloseStatusDescription ?? "";
+
                     await _socket.CloseAsync(
                         WebSocketCloseStatus.NormalClosure,
                         "",
                         CancellationToken.None);
+
+                    HandleServerClose(closeCode, closeDescription);
                     break;
                 }
+            }
+        }
+
+        private static void HandleServerClose(int closeCode, string closeDescription)
+        {
+            if (closeCode >= AuthRejectionCloseCodeThreshold)
+            {
+                // The server told us why — surface it VERBATIM, and stop
+                // auto-retrying with the same rejected token (see
+                // HandleEditorUpdate's _credentialRejected check).
+                LastErrorMessage = string.IsNullOrEmpty(closeDescription)
+                    ? $"rejected (close code {closeCode})"
+                    : closeDescription;
+                _credentialRejected = true;
+                Debug.LogWarning(
+                    $"[T3 Editor Presence] credential rejected (close code {closeCode}): {LastErrorMessage}. " +
+                    "Not retrying automatically — fix the token, then click Retry now.");
+            }
+            else
+            {
+                var url = EditorPresenceSettings.BuildPublisherWebSocketUrl();
+                LastErrorMessage = closeCode == -1
+                    ? $"cannot reach Workbench at {url}"
+                    : $"connection closed (code {closeCode})";
             }
         }
 

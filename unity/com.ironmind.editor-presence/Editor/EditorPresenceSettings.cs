@@ -1,12 +1,10 @@
 // EditorPrefs-backed settings + the one-time pairing flow.
 //
 // Per the frozen spec's resolved auth blocker: Unity is just another
-// bearer-paired client, exactly like T3's mobile app. The user runs
-// `t3 pair` on the machine running the T3 server, pastes the printed
-// pairing token (or the full pairing URL — either is accepted, see
-// ExtractCredential) into this window once, and this class redeems it via
-// the server's existing OAuth token-exchange endpoint
-// (POST {serverUrl}/oauth/token, grant_type=token-exchange — see
+// bearer-paired client, exactly like T3's mobile app. This class redeems a
+// pasted credential (or the full pairing URL — either is accepted, see
+// ExtractCredential) via the server's existing OAuth token-exchange
+// endpoint (POST {serverUrl}/oauth/token, grant_type=token-exchange — see
 // packages/contracts/src/auth.ts AuthTokenExchangeRequest /
 // packages/client-runtime/src/authorization/remote.ts
 // bootstrapRemoteBearerSession, which this mirrors) for a long-lived bearer
@@ -14,6 +12,18 @@
 // `Authorization: Bearer` header on the EPP WebSocket handshake —
 // ClientWebSocket can set that header where browser JS cannot, which is
 // exactly why this bearer path exists for non-browser clients.
+//
+// CORRECTION (found during the cross-engine contract audit, per
+// docs/workbench/engine-credential-flow.md): the credential pasted here is
+// NOT the code the server prints at its own startup (`issueStartupPairingUrl`
+// — that one is `purpose: "startup"` and, established by trying it
+// repeatedly, cannot be redeemed by a headless client). It is a device
+// pairing token minted from an ALREADY-PAIRED T3 app (Settings ▸
+// Connections ▸ Pairing links ▸ Create link, i.e. `POST
+// /api/auth/pairing-token`, an authenticated request). The mechanism below
+// was already correct and needed no change for this — only the missing
+// `scope` field did (see RedeemPairingCredential) — see
+// EditorPresenceSettingsProvider.cs for the corrected user-facing copy.
 //
 // EditorPrefs is per-machine, not per-project (Unity's own storage, shared
 // across every project open with this Editor install) — acceptable here
@@ -70,10 +80,12 @@ namespace Ironmind.EditorPresence
         }
 
         /// Accepts either a bare pairing credential or a full pairing URL
-        /// (`t3 pair` prints a URL with the credential in the `#token=`
-        /// fragment — see apps/server/src/auth/EnvironmentAuth.ts
-        /// issueStartupPairingUrl). Whichever the user pastes, extract just
-        /// the credential.
+        /// with the credential in a `#token=` fragment (a device pairing
+        /// token minted from an already-paired T3 app — see this file's
+        /// header comment; NOT the server's own startup pairing URL, which
+        /// is a different, non-redeemable-here credential despite having
+        /// the same `#token=` shape). Whichever form the user pastes,
+        /// extract just the credential.
         internal static string ExtractCredential(string pastedInput)
         {
             if (string.IsNullOrEmpty(pastedInput)) return "";
@@ -101,6 +113,16 @@ namespace Ironmind.EditorPresence
             form.AddField("subject_token", credential);
             form.AddField("subject_token_type", "urn:t3:params:oauth:token-type:environment-bootstrap");
             form.AddField("requested_token_type", "urn:ietf:params:oauth:token-type:access_token");
+            // Added during the cross-engine contract audit: this field was
+            // missing. docs/workbench/engine-credential-flow.md — "the body
+            // must also carry scope and client_label; the real client sends
+            // both." Matches AuthStandardClientScopes in
+            // packages/contracts/src/auth.ts. `scope` is optional
+            // server-side (an omitted scope silently falls back to the
+            // pairing credential's own granted scopes), so this was not a
+            // hard failure — but it left the actually-granted scope set
+            // implicit rather than a stated fact of this specific request.
+            form.AddField("scope", "orchestration:read orchestration:operate terminal:operate review:write relay:read");
             form.AddField("client_label", "Unity Editor");
 
             var url = ServerUrl.TrimEnd('/') + "/oauth/token";
@@ -134,6 +156,11 @@ namespace Ironmind.EditorPresence
                     }
 
                     BearerToken = response.access_token;
+                    // A fresh token makes any prior credential-rejection
+                    // halt stale — clear it and kick an immediate reconnect
+                    // attempt rather than requiring a separate manual
+                    // "Retry now" click right after pairing succeeds.
+                    EditorPresenceConnection.Retry();
                     onComplete(true, null);
                 }
                 finally

@@ -29,8 +29,8 @@ class SamplerTests(unittest.TestCase):
         self.assertTrue(emitted)
         self.assertEqual(len(self.frames), 1)
         parsed = json.loads(self.frames[0])
-        self.assertEqual(parsed["selection"]["items"], [])
-        self.assertEqual(parsed["selection"]["seq"], 1)
+        self.assertEqual(parsed["items"], [])
+        self.assertEqual(parsed["seq"], 1)
 
     def test_no_emit_when_selection_unchanged(self):
         self.source.items = [make_item(id="a1", label="A")]
@@ -96,7 +96,7 @@ class SamplerTests(unittest.TestCase):
         emitted = sampler.tick()
         self.assertTrue(emitted)
         parsed = json.loads(self.frames[-1])
-        self.assertEqual(parsed["selection"]["items"], [])
+        self.assertEqual(parsed["items"], [])
 
     def test_truncation_reports_status(self):
         self.source.items = [make_item(id=str(i), label=f"A{i}") for i in range(70)]

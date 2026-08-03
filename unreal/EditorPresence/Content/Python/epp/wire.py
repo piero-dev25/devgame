@@ -65,6 +65,7 @@ import random
 import socket
 import ssl
 import struct
+import threading
 import time
 from typing import Callable, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -501,6 +502,17 @@ PONG_TIMEOUT_S = 60.0
 POLL_TIMEOUT_S = 0.5
 
 
+def is_auth_rejection(close_code: Optional[int]) -> bool:
+    """A close code >= 4000 means the server told us why it closed the
+    connection (docs/workbench/godot-probe-findings.md's ruling) — for EPP
+    specifically, that is always a credential problem, never a transient
+    network blip. Retrying with backoff cannot fix a bad or missing token,
+    so this is the single predicate both `Wire`'s halt-on-rejection branch
+    and any status-consuming UI should use to decide "don't hammer this,
+    wait for the user to fix the token and ask again." """
+    return close_code is not None and close_code >= 4000
+
+
 class Wire:
     """`connect_fn()` -> `PublisherConnection` (or raises `HandshakeFailed`
     / `OSError`). `hello_frame_fn()` -> the current `hello` frame JSON,
@@ -510,6 +522,17 @@ class Wire:
     `replace_latest`. `on_status(event, **fields)` is called from THIS
     THREAD — the caller must not touch `unreal` inside it; see the module
     docstring's absolute rule.
+
+    AUTH-REJECTION HALT: a close code >= 4000 stops the automatic
+    reconnect loop entirely (a `"halted"` status event fires instead of the
+    normal `"connecting"`/backoff cycle) rather than retrying with the same
+    rejected credential every few seconds — retrying cannot fix a bad
+    token, only hammer the server and spam the Output Log. The loop then
+    blocks until `request_reconnect()` is called (wired to the "Reconnect
+    now" / "Pair" UI actions in publisher.py) or `stop_event` fires. This
+    was added during the cross-engine contract audit alongside the
+    equivalent fix in the Unity plugin (`EditorPresenceConnection.cs`),
+    per the same ruling: "do not hammer-reconnect on a >= 4000 rejection."
     """
 
     def __init__(
@@ -538,35 +561,73 @@ class Wire:
         self._ping_interval_s = ping_interval_s
         self._pong_timeout_s = pong_timeout_s
         self._poll_timeout_s = poll_timeout_s
+        self._resume_event = threading.Event()
+
+    def request_reconnect(self) -> None:
+        """Wakes a halted (auth-rejected) wire loop immediately. Safe to
+        call from any thread — this is the only method on `Wire` that is.
+        A no-op while the loop is in its normal backoff cycle rather than
+        halted (that path is not currently interruptible; see the module
+        docstring's scope note if that changes)."""
+        self._resume_event.set()
 
     def run_forever(self, stop_event) -> None:
         """`stop_event` is a `threading.Event`-shaped object (`.is_set()`);
         checked between connection attempts and inside the per-connection
-        loop so a clean shutdown doesn't wait out a full backoff sleep."""
+        loop so a clean shutdown doesn't wait out a full backoff sleep or
+        an auth-rejection halt."""
         while not stop_event.is_set():
-            self._run_one_connection(stop_event)
+            close_code, close_reason = self._run_one_connection(stop_event)
             if stop_event.is_set():
                 return
+
+            if is_auth_rejection(close_code):
+                # Surface the server's own reason VERBATIM (describe_close
+                # already extracted it) rather than a generic message — a
+                # generic "credential rejected" is exactly the kind of
+                # local guess the close-code ruling exists to avoid.
+                described = describe_close(close_code, close_reason)
+                self._on_status(
+                    "halted",
+                    reason=described or "credential rejected — fix the token, then Reconnect now",
+                    close_code=close_code,
+                )
+                self._resume_event.clear()
+                while not stop_event.is_set() and not self._resume_event.is_set():
+                    stop_event.wait(0.2)
+                if stop_event.is_set():
+                    return
+                self._backoff.reset()
+                continue
+
             delay = self._backoff.next_delay()
             self._on_status("connecting", detail=f"retrying in {delay:.1f}s")
             self._sleep(delay)
 
-    def _run_one_connection(self, stop_event) -> None:
+    def _run_one_connection(self, stop_event) -> "Tuple[Optional[int], str]":
+        """Returns `(close_code, reason)` observed for this connection
+        attempt — `close_code` is `None` for anything that isn't a definite
+        server-issued close code (a pre-connect failure, a pong timeout, a
+        clean local stop). The caller (`run_forever`) uses this to decide
+        whether to halt instead of backing off, and to surface the reason
+        verbatim if so."""
         self._on_status("connecting")
         try:
             conn = self._connect_fn()
         except HandshakeFailed as e:
-            code = e.status_code if (e.status_code is not None and e.status_code >= 4000) else None
+            code = e.status_code if is_auth_rejection(e.status_code) else None
             described = describe_close(code, e.reason)
             self._on_status(
                 "disconnected",
                 reason=described or f"cannot reach Workbench: HTTP {e.status_code} {e.reason}".strip(),
                 close_code=e.status_code,
             )
-            return
+            if is_auth_rejection(e.status_code):
+                return e.status_code, e.reason
+            return None, ""
         except OSError as e:
             self._on_status("disconnected", reason=f"cannot reach Workbench: {e}", close_code=None)
-            return
+            return None, ""
 
         self._backoff.reset()
         self._on_status("connected")
@@ -588,7 +649,7 @@ class Wire:
                     self._on_status(
                         "disconnected", reason="no pong within timeout; forcing reconnect", close_code=None
                     )
-                    return
+                    return None, ""
 
                 try:
                     frame = self._outbound.get_nowait()
@@ -608,6 +669,7 @@ class Wire:
                             reason=described or "cannot reach Workbench (connection closed)",
                             close_code=code,
                         )
-                        return
+                        return code, reason
+            return None, ""
         finally:
             conn.close()

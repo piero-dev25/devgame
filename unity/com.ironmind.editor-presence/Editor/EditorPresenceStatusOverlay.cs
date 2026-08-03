@@ -71,8 +71,26 @@ namespace Ironmind.EditorPresence
         private void ApplyState(EditorPresenceConnectionState state)
         {
             if (_dot == null || _label == null) return;
+            // Credential-rejected is visually distinct from an ordinary
+            // disconnect (same red dot, different label + tooltip) — see
+            // EditorPresenceConnection.cs's module comment: retrying
+            // automatically cannot fix a rejected credential, so this
+            // state deliberately does not look like "still trying."
+            if (EditorPresenceConnection.CredentialRejected)
+            {
+                _dot.style.backgroundColor = new StyleColor(ColorForState(EditorPresenceConnectionState.Disconnected));
+                _label.text = "T3 presence: rejected";
+                _label.tooltip = string.IsNullOrEmpty(EditorPresenceConnection.LastErrorMessage)
+                    ? "Credential rejected. Not retrying automatically — see Preferences > T3 Editor Presence."
+                    : $"Credential rejected: {EditorPresenceConnection.LastErrorMessage}";
+                return;
+            }
+
             _dot.style.backgroundColor = new StyleColor(ColorForState(state));
             _label.text = LabelForState(state);
+            _label.tooltip = state == EditorPresenceConnectionState.Disconnected
+                ? EditorPresenceConnection.LastErrorMessage
+                : "";
         }
 
         private static Color ColorForState(EditorPresenceConnectionState state)

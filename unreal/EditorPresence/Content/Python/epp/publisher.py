@@ -133,20 +133,25 @@ class Publisher:
         # latency one.
 
     def request_reconnect(self) -> None:
-        # The wire thread reconnects on its own backoff schedule; there is
-        # no direct "kick now" hook in this v1 (mirrors the Unity
-        # publisher's own step-1 scope — reconnect-on-demand is a UX
-        # nicety, not a correctness requirement, since backoff starts at
-        # 0.5s). Logged so a click has visible feedback even though nothing
-        # else changes.
+        # Wakes an auth-rejection halt immediately (see wire.Wire's module
+        # docstring). While the wire is in its normal backoff cycle rather
+        # than halted, this is a no-op — the next attempt still lands on
+        # the existing backoff schedule, same as before this method did
+        # anything real.
+        if self._wire is not None:
+            self._wire.request_reconnect()
         if unreal is not None:
-            unreal.log("[T3 Editor Presence] reconnect requested (next attempt is on the existing backoff schedule)")
+            unreal.log("[T3 Editor Presence] reconnect requested")
 
     def _pair(self, http_base: str) -> None:
         try:
             config.redeem_and_store_from_token_file(self._project_dir, base_http_url=http_base)
             if unreal is not None:
                 unreal.log("[T3 Editor Presence] paired — token.txt now holds a redeemed session token")
+            # A fresh token makes a prior credential-rejection halt stale —
+            # kick the wire immediately rather than making the user click
+            # "Reconnect now" as a second, separate step after pairing.
+            self.request_reconnect()
         except config.RedeemError as e:
             if unreal is not None:
                 unreal.log_warning(f"[T3 Editor Presence] pairing failed: {e}")
@@ -173,7 +178,13 @@ class Publisher:
                     state = indicator.STATE_CONNECTING
                 elif event == "connected":
                     state = indicator.STATE_CONNECTED
-                elif event == "disconnected":
+                elif event in ("disconnected", "halted"):
+                    # "halted" (auth rejection — see wire.Wire) has no
+                    # distinct indicator state of its own; it renders as
+                    # disconnected with the rejection reason in the
+                    # tooltip, same as any other disconnect, but critically
+                    # does NOT keep flashing "connecting" every backoff
+                    # cycle the way a transient drop does.
                     state = indicator.STATE_DISCONNECTED
                     last_error = fields.get("reason", "") or last_error
             elif source == "sampler" and event == "truncated":

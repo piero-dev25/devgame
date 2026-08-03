@@ -2,16 +2,43 @@
 Frame construction for the Editor Presence Protocol (EPP) v1, publisher
 side.
 
-THE AUTHORITATIVE SOURCE IS apps/server/src/editorPresence/protocol.ts, NOT
-docs/workbench/spec-editor-presence.md. The two disagree on one point: the
-design doc's JSON example puts `seq`/`at`/`items` at the top level of a
-`selection` frame, but protocol.ts's `parseSelection` requires them nested
-inside a `selection` object —
-    { v: 1, type: "selection", selection: { seq, at, items } }
-protocol.ts wins (it is what the server actually parses); every frame this
-module builds matches its `parseHello` / `parseSelection` / ping handling
-field-for-field. This was confirmed by reading protocol.ts directly, not
-inferred from the design doc.
+THE AUTHORITATIVE SOURCE IS apps/server/src/editorPresence/protocol.ts.
+
+CORRECTION (found during the cross-engine contract audit, not during the
+original build): an earlier version of this module nested `seq`/`at`/`items`
+inside a `selection` object on the wire. That was a real bug, not a
+protocol.ts-vs-design-doc disagreement — protocol.ts's `parseSelection`
+function receives the RAW TOP-LEVEL parsed JSON (`parseEditorPresenceInboundFrame`
+calls `parseSelection(parsed)` where `parsed = JSON.parse(raw)`), and reads
+`value.seq` / `value.at` / `value.items` directly off THAT top-level object:
+
+    function parseSelection(value: Record<string, unknown>): ... {
+      if (typeof value.seq !== "number" ...) return null;
+      ...
+      return { type: "selection", selection: { seq: value.seq, at: value.at, items } };
+    }
+
+The nested `{ selection: { seq, at, items } }` shape only exists in the
+RETURNED, in-memory `EditorPresenceInboundFrame` TypeScript type — that is
+how the rest of the server's code (e.g. `EditorPresenceRoute.ts`'s
+`registry.updatePublisherSelection(sessionId, connectionToken,
+frame.selection)`) conveniently accesses the parsed fields. It is NOT the
+wire shape. The wire shape is flat, exactly as
+docs/workbench/spec-editor-presence.md's JSON example already showed:
+
+    { "v": 1, "type": "selection", "seq": 42, "at": "...", "items": [...] }
+
+A frame built with the old nested shape would have `value.seq` read as
+`undefined` server-side (`typeof undefined !== "number"`), so
+`parseSelection` would return `null` and the ENTIRE selection frame would be
+silently dropped — every single selection this plugin ever sent would have
+vanished, while `hello` and `ping` (which don't have this field) kept working
+normally, which is exactly the kind of failure that looks like "it's
+connected, nothing's wrong" right up until nothing ever shows up as a chip.
+Caught by a fresh re-read of protocol.ts while auditing the Unity
+implementation against it, not by any test — see
+unreal/tests/test_protocol.py's now-corrected assertions and the divergence
+audit report for how this was found.
 
 No `unreal` import. Pure functions, plain data in, JSON text out — exercised
 directly by unreal/tests/test_protocol.py with no engine process involved.
@@ -84,11 +111,16 @@ def build_selection_frame(
     item_list = list(items)
     truncated = len(item_list) > max_items
     wire_items = [_item_to_wire(i) for i in item_list[:max_items]]
+    # FLAT on the wire — see this module's docstring for why this is not
+    # nested under a `selection` key despite the TypeScript-side parsed
+    # result type looking like it should be.
     frame = json.dumps(
         {
             "v": PROTOCOL_VERSION,
             "type": "selection",
-            "selection": {"seq": seq, "at": at, "items": wire_items},
+            "seq": seq,
+            "at": at,
+            "items": wire_items,
         }
     )
     return frame, truncated

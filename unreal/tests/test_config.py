@@ -104,6 +104,7 @@ class RedeemPairingCredentialTests(unittest.TestCase):
                 "subject_token": "pairing-cred-123",
                 "subject_token_type": "urn:t3:params:oauth:token-type:environment-bootstrap",
                 "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "scope": "orchestration:read orchestration:operate terminal:operate review:write relay:read",
                 "client_label": "Unreal Editor",
             },
         )

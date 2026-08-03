@@ -1,10 +1,20 @@
 // Preferences UI: "Preferences > T3 Editor Presence".
 //
-// One-time pairing per the resolved auth blocker: paste what `t3 pair`
-// printed, click Pair, done. IMGUI (EditorGUILayout) rather than UI Toolkit
-// for this window specifically, since a Preferences page is exactly the kind
-// of infrequently-open, form-shaped UI IMGUI was built for, and it keeps
-// this file simple to review without a UXML/USS side-file.
+// One-time pairing per the resolved auth blocker: paste a device pairing
+// token minted from an already-paired T3 app, click Pair, done. IMGUI
+// (EditorGUILayout) rather than UI Toolkit for this window specifically,
+// since a Preferences page is exactly the kind of infrequently-open,
+// form-shaped UI IMGUI was built for, and it keeps this file simple to
+// review without a UXML/USS side-file.
+//
+// CORRECTION (cross-engine contract audit, per
+// docs/workbench/engine-credential-flow.md): the help text below used to
+// say "run `t3 pair`... paste the printed token" — that pointed at the
+// server's own startup pairing code, which cannot be redeemed by this
+// plugin (established by trying it repeatedly, not theorized). The
+// corrected copy below points at minting a device pairing token from an
+// already-paired app instead. See EditorPresenceSettings.cs's header
+// comment for the mechanism, which needed no change.
 using UnityEditor;
 using UnityEngine;
 
@@ -53,17 +63,18 @@ namespace Ironmind.EditorPresence
                 if (GUILayout.Button("Forget token", GUILayout.Width(140)))
                 {
                     EditorPresenceSettings.ForgetToken();
-                    _statusMessage = "Token forgotten. Run `t3 pair` again to reconnect.";
+                    _statusMessage = "Token forgotten. Mint a new device pairing token to reconnect (see below).";
                     _statusMessageType = MessageType.None;
                 }
             }
             else
             {
                 EditorGUILayout.HelpBox(
-                    "Not paired. On the machine running the T3 server, run `t3 pair`, then paste "
-                        + "the printed token or pairing URL below.",
+                    "Not paired. This is NOT the code the server prints at its own startup — that one "
+                        + "cannot be redeemed here. From an already-paired T3 app: Settings > Connections > "
+                        + "Pairing links > Create link. Paste what that gives you below.",
                     MessageType.Warning);
-                _pastedInput = EditorGUILayout.TextField("Pairing token or URL", _pastedInput);
+                _pastedInput = EditorGUILayout.TextField("Device pairing token or URL", _pastedInput);
                 using (new EditorGUI.DisabledScope(_isPairing || string.IsNullOrEmpty(_pastedInput)))
                 {
                     if (GUILayout.Button(_isPairing ? "Pairing…" : "Pair", GUILayout.Width(140)))
@@ -99,13 +110,36 @@ namespace Ironmind.EditorPresence
         private static void DrawConnectionStatusRow()
         {
             var state = EditorPresenceConnection.State;
+            var lastError = EditorPresenceConnection.LastErrorMessage;
+
+            // Auth rejection gets its own message + a Retry button instead
+            // of the normal "Disconnected" row, so it's visually distinct
+            // from "still trying, backing off" — retrying automatically
+            // cannot fix a bad credential (see EditorPresenceConnection.cs).
+            if (EditorPresenceConnection.CredentialRejected)
+            {
+                EditorGUILayout.HelpBox(
+                    string.IsNullOrEmpty(lastError)
+                        ? "Status: credential rejected. Not retrying automatically."
+                        : $"Status: credential rejected — {lastError}",
+                    MessageType.Error);
+                if (GUILayout.Button("Retry now", GUILayout.Width(140)))
+                {
+                    EditorPresenceConnection.Retry();
+                }
+                return;
+            }
+
             var (label, messageType) = state switch
             {
                 EditorPresenceConnectionState.Connected => ("Connected", MessageType.Info),
                 EditorPresenceConnectionState.Connecting => ("Connecting…", MessageType.None),
                 _ => ("Disconnected", MessageType.None),
             };
-            EditorGUILayout.HelpBox($"Status: {label}", messageType);
+            var statusText = state == EditorPresenceConnectionState.Disconnected && !string.IsNullOrEmpty(lastError)
+                ? $"Status: {label} — {lastError}"
+                : $"Status: {label}";
+            EditorGUILayout.HelpBox(statusText, messageType);
         }
     }
 }

@@ -31,26 +31,75 @@ clone`, or `git submodule` of just this folder are all equivalent.
    "Presence" → **T3 Editor Presence** should be checked. If either was off,
    the editor will ask to restart — restart. If Python was already enabled
    on this project, no restart should be needed for this step.
-5. In a terminal, on the machine running your T3 server, run `t3 pair` and
-   copy what it prints (a token, or a full pairing URL — either works).
-6. Back in the editor: open the **EPP** entry in the level-editor toolbar
+5. If you have not already paired a T3 app (web/desktop/mobile) with this
+   server, do that first — the normal first-run flow, via the pairing URL
+   the server prints at its own startup. **That startup code is for pairing
+   the app itself, and cannot be redeemed directly by this plugin — see
+   "Credential flow" below before assuming otherwise.**
+6. From the ALREADY-PAIRED app: **Settings ▸ Connections ▸ Pairing links ▸
+   Create link**. This mints a one-time device pairing token — a
+   different, plugin-usable credential from the startup code in step 5.
+   Copy it.
+7. Back in the editor: open the **EPP** entry in the level-editor toolbar
    (or **Tools ▸ EPP** if your engine version put it there instead — see
    "Where did the toolbar entry go?" below) and choose **Open token
-   folder**. Paste what `t3 pair` printed into `token.txt` in the folder
-   that opens, and save.
+   folder**. Paste what you copied in step 6 into `token.txt` in the
+   folder that opens, and save.
    (Equivalent, e.g. for a CI machine: set the environment variable
    `T3_EDITOR_PRESENCE_TOKEN` to an **already-redeemed** bearer token
    before launching the editor — see "Two ways to provide a token" below.)
-7. Back in the editor's EPP menu, choose **Pair**. This redeems what you
+8. Back in the editor's EPP menu, choose **Pair**. This redeems what you
    pasted into `token.txt` for a long-lived session token and overwrites
    `token.txt` with it — from this point on the file holds a bearer token
    directly, not the one-time pairing credential you started with.
-8. Choose **Reconnect now**. The indicator goes ◌ connecting → ● connected.
-9. Click an actor in the World Outliner, or an asset in the Content
-   Browser. A chip appears in the T3 composer.
+9. Choose **Reconnect now**. The indicator goes ◌ connecting → ● connected.
+10. Click an actor in the World Outliner, or an asset in the Content
+    Browser. A chip appears in the T3 composer.
 
 No compiler. No Visual Studio or Xcode. No engine-version-specific binary.
 Works on a project with zero C++ in it.
+
+## Credential flow
+
+**The server's own startup pairing code cannot be redeemed by this plugin.**
+At boot the server prints something like:
+
+```
+Authentication required. Open T3 Code using the pairing URL.
+  pairingUrl: http://localhost:13790/pair#token=XXXXXXXXXXXX
+```
+
+That code is for pairing an actual T3 app (web/desktop/mobile) — the normal
+first-run flow a person does once. Handing that specific code to this
+plugin fails every time with an `invalid_credential` error, including on a
+freshly-issued code redeemed a second after printing, so it does not look
+like an expiry problem and it is not one. See
+`docs/workbench/engine-credential-flow.md` for the full investigation; the
+exact mechanism of the failure is not established there (three explanations
+were checked and eliminated, one remains a plausible-but-unconfirmed
+suspect) — what matters here is only that the flow below is the one that
+works.
+
+**The flow that works:** this plugin is a bearer-paired device, like T3's
+mobile app, and its credential comes from an app you have already paired,
+not from the server's own startup screen:
+
+1. Pair a T3 app with the server once, the normal way (the startup URL
+   above).
+2. From that already-paired app: **Settings ▸ Connections ▸ Pairing links
+   ▸ Create link** — a different action from the startup screen, mints a
+   device pairing token via an authenticated request
+   (`POST /api/auth/pairing-token`).
+3. Paste THAT token into `token.txt` (step 7 above) and click **EPP ▸
+   Pair**. The plugin redeems it at `/oauth/token`
+   (`epp/config.py`'s `redeem_pairing_credential` — the mechanism itself
+   was already correct; only this documentation previously pointed at the
+   wrong source for the credential) and overwrites `token.txt` with the
+   resulting long-lived bearer token.
+
+`client_label` is sent as `"Unreal Editor"` on that redeem request — this
+is what shows up in the paired app's device list if you ever need to find
+and revoke this specific editor's access.
 
 ## Two ways to provide a token
 
@@ -58,12 +107,13 @@ Works on a project with zero C++ in it.
 session token** (`resolve_token` in `epp/config.py` — env var wins over the
 file if both are set, via `T3_EDITOR_PRESENCE_TOKEN`).
 
-- **The normal path (steps 5–7 above):** paste the raw pairing credential
-  from `t3 pair` into `token.txt`, then click **EPP ▸ Pair**. The plugin
-  POSTs it to your server's `/oauth/token` endpoint (the same
-  token-exchange flow the rest of T3 already uses — see `epp/config.py`'s
-  module docstring for the three primary sources this was confirmed
-  against) and overwrites `token.txt` with the resulting bearer token.
+- **The normal path (steps 6–8 above):** paste the device pairing token
+  minted from your already-paired app into `token.txt`, then click **EPP ▸
+  Pair**. The plugin POSTs it to your server's `/oauth/token` endpoint (the
+  same token-exchange flow the rest of T3 already uses — see
+  `epp/config.py`'s module docstring for the primary sources this was
+  confirmed against) and overwrites `token.txt` with the resulting bearer
+  token.
 - **The power-user / CI path:** set `T3_EDITOR_PRESENCE_TOKEN` to an
   already-redeemed bearer token yourself. No pairing/redeem step happens
   for this path — the env var is used exactly as given.
@@ -190,16 +240,28 @@ in-code where they matter most:
    See `UNVERIFIED.md`'s final entry for the caveat on this correction.
 
 One thing the spec left as an **open, unresolved dependency** — how a
-pairing token issued by `t3 pair` gets redeemed for a usable session
-token — is **resolved, not re-guessed**, in this build: see
-`epp/config.py`'s module docstring for the three primary sources (read
-directly from this repo, including the sibling Unity plugin, which already
-implements the identical flow) that pin down the exact `/oauth/token`
-request shape.
+device pairing token gets redeemed for a usable session token — is
+**resolved, not re-guessed**, in this build: see `epp/config.py`'s module
+docstring for the primary sources (read directly from this repo, including
+the sibling Unity plugin, which already implements the identical flow)
+that pin down the exact `/oauth/token` request shape. A later
+cross-engine audit additionally pinned down WHERE that pairing token
+actually comes from (`docs/workbench/engine-credential-flow.md`) — not
+the code the server prints at its own startup, which cannot be redeemed
+this way; see this README's "Credential flow" section above. It also
+found the redeem request was missing a required `scope` field (now
+added — see `epp/config.py`'s `CLIENT_SCOPE`).
 
-No other part of the spec was found to be wrong; where
-`apps/server/src/editorPresence/protocol.ts` and
-`docs/workbench/spec-editor-presence.md`'s JSON examples disagreed (the
-`selection` frame's field nesting), protocol.ts was treated as
-authoritative per the build brief, and `epp/protocol.py`'s module
-docstring documents exactly where and why.
+**Correction (found during a later cross-engine contract audit):** an
+earlier version of this plugin nested `seq`/`at`/`items` inside a
+`selection` object on the wire, believing that to be a real disagreement
+between `protocol.ts` and the design doc. It was not a disagreement — it
+was a misreading of `protocol.ts`'s `parseSelection`, which reads those
+fields off the raw top-level parsed JSON, not off a nested object; the
+nested shape only exists in the function's _returned_, in-memory
+TypeScript type. The wire shape is flat, exactly as
+`docs/workbench/spec-editor-presence.md`'s JSON example always showed. This
+bug would have made the server silently drop every selection frame this
+plugin ever sent. See `epp/protocol.py`'s module docstring for the full
+correction and `unreal/tests/test_protocol.py` for the now-corrected
+assertion.

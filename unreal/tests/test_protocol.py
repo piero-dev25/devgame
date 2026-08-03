@@ -32,24 +32,28 @@ class BuildHelloFrameTests(unittest.TestCase):
 
 
 class BuildSelectionFrameTests(unittest.TestCase):
-    def test_nests_seq_at_items_under_selection_key(self):
-        # This is the one place the design doc (spec-editor-presence.md)
-        # and the authoritative protocol.ts disagree — protocol.ts nests
-        # seq/at/items inside a `selection` object; the design doc's JSON
-        # example does not. protocol.ts wins; this test pins that down.
+    def test_seq_at_items_are_flat_top_level_fields_not_nested(self):
+        # CORRECTED during the cross-engine contract audit: protocol.ts's
+        # parseSelection(value) is called with the RAW top-level parsed JSON
+        # (parseEditorPresenceInboundFrame does `parseSelection(parsed)`
+        # where `parsed = JSON.parse(raw)`) and reads `value.seq` / `.at` /
+        # `.items` directly off it. The nested `{ selection: {...} }` shape
+        # only exists in the PARSED RESULT's TypeScript type, for the rest
+        # of the server's code to consume conveniently — it is not the wire
+        # shape. An earlier version of this test asserted the wire frame
+        # must nest under `selection`, which was wrong and would have made
+        # the server silently drop every selection frame this plugin sent.
         item = SelectionItem(id="id-1", kind="actor", label="PlayerRoot", path="Content/Maps/Arena.umap", detail="Arena")
         raw, truncated = protocol.build_selection_frame(seq=42, at="2026-08-03T11:04:07.221Z", items=[item])
         parsed = json.loads(raw)
         self.assertFalse(truncated)
         self.assertEqual(parsed["v"], 1)
         self.assertEqual(parsed["type"], "selection")
-        self.assertIn("selection", parsed)
-        self.assertNotIn("seq", parsed)  # must NOT be top-level
-        self.assertNotIn("items", parsed)  # must NOT be top-level
-        self.assertEqual(parsed["selection"]["seq"], 42)
-        self.assertEqual(parsed["selection"]["at"], "2026-08-03T11:04:07.221Z")
+        self.assertNotIn("selection", parsed)  # must NOT be nested
+        self.assertEqual(parsed["seq"], 42)
+        self.assertEqual(parsed["at"], "2026-08-03T11:04:07.221Z")
         self.assertEqual(
-            parsed["selection"]["items"],
+            parsed["items"],
             [
                 {
                     "id": "id-1",
@@ -64,13 +68,13 @@ class BuildSelectionFrameTests(unittest.TestCase):
     def test_empty_selection_is_items_empty_list_not_absence(self):
         raw, truncated = protocol.build_selection_frame(seq=1, at="2026-01-01T00:00:00Z", items=[])
         parsed = json.loads(raw)
-        self.assertEqual(parsed["selection"]["items"], [])
+        self.assertEqual(parsed["items"], [])
         self.assertFalse(truncated)
 
     def test_none_fields_become_json_null(self):
         item = SelectionItem(id=None, kind="actor", label="X", path=None, detail=None)
         raw, _truncated = protocol.build_selection_frame(seq=1, at="t", items=[item])
-        wire_item = json.loads(raw)["selection"]["items"][0]
+        wire_item = json.loads(raw)["items"][0]
         self.assertIsNone(wire_item["id"])
         self.assertIsNone(wire_item["path"])
         self.assertIsNone(wire_item["detail"])
@@ -82,7 +86,7 @@ class BuildSelectionFrameTests(unittest.TestCase):
         # mapping bug from silently vanishing an item off the wire.
         item = SelectionItem(id="x", kind="actor", label="   ", path=None, detail=None)
         raw, _truncated = protocol.build_selection_frame(seq=1, at="t", items=[item])
-        wire_item = json.loads(raw)["selection"]["items"][0]
+        wire_item = json.loads(raw)["items"][0]
         self.assertTrue(wire_item["label"].strip())
 
     def test_truncates_at_max_items_and_reports_it(self):
@@ -90,9 +94,9 @@ class BuildSelectionFrameTests(unittest.TestCase):
         raw, truncated = protocol.build_selection_frame(seq=1, at="t", items=items, max_items=64)
         parsed = json.loads(raw)
         self.assertTrue(truncated)
-        self.assertEqual(len(parsed["selection"]["items"]), 64)
-        self.assertEqual(parsed["selection"]["items"][0]["id"], "0")
-        self.assertEqual(parsed["selection"]["items"][-1]["id"], "63")
+        self.assertEqual(len(parsed["items"]), 64)
+        self.assertEqual(parsed["items"][0]["id"], "0")
+        self.assertEqual(parsed["items"][-1]["id"], "63")
 
     def test_default_max_items_matches_protocol_ts_constant(self):
         self.assertEqual(protocol.MAX_ITEMS, 64)

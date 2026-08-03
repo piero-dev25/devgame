@@ -16,11 +16,24 @@ namespace Ironmind.EditorPresence
 {
     internal static class EditorPresenceItemBuilder
     {
+        // Placeholder used when an object's name is empty. `label` is the
+        // ONLY field apps/server/src/editorPresence/protocol.ts's parseItem
+        // requires to be non-empty — an item with a blank label is dropped
+        // from the wire frame entirely. Unity permits an empty-string
+        // GameObject/Object name (unlike Unreal's Outliner, which always
+        // shows *something*), so without this fallback an unnamed object
+        // silently vanishes from the chip set with no error anywhere. Found
+        // during the cross-engine contract audit, not at original build
+        // time — UNVERIFIED against a real Unity project; the C# side of
+        // this repo cannot be compiled here (see UNVERIFIED.md).
+        private const string UnnamedLabelFallback = "(unnamed)";
+
         public static SelectionItemDto Build(Object obj)
         {
+            var rawName = obj != null ? obj.name : "";
             var dto = new SelectionItemDto
             {
-                label = obj != null ? obj.name : "",
+                label = string.IsNullOrEmpty(rawName) ? UnnamedLabelFallback : rawName,
                 kind = ResolveKind(obj),
                 id = ResolveId(obj),
                 path = ResolvePath(obj),
