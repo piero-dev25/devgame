@@ -35,7 +35,7 @@ from the original build (`EditorPresenceItemBuilder.cs`'s
   not a `ConnectAsync` exception handler) — if `ClientWebSocket` behaves
   differently under the hood, this placement could be wrong.
 
-## Auth-rejection halt (`EditorPresenceConnection.cs`, `EditorPresenceSettingsProvider.cs`, `EditorPresenceStatusOverlay.cs`)
+## Credential-rejection halt (`EditorPresenceConnection.cs`, `EditorPresenceSettingsProvider.cs`, `EditorPresenceStatusOverlay.cs`)
 
 - The `_credentialRejected` flag, `HandleEditorUpdate`'s early-return while
   it is set, and `Retry()` clearing it are new control flow untested
@@ -55,6 +55,22 @@ from the original build (`EditorPresenceItemBuilder.cs`'s
 - `VisualElement.tooltip` (used on the overlay's `Label`) is a real,
   documented UI Toolkit property; not re-confirmed against this project's
   Unity version specifically.
+- **CORRECTED same day** (`docs/workbench/godot-probe-findings.md`'s
+  "Correction: '>= 4000 means stop retrying' was too coarse"): the halt
+  condition first shipped as `closeCode >= 4000` (a plain threshold, via a
+  now-removed `AuthRejectionCloseCodeThreshold` constant), then was
+  narrowed to `IsCredentialRejection(closeCode)` — a named membership
+  check against exactly `{4400, 4401}`. An unrecognized code >= 4000 (e.g.
+  4500, server internal error) now falls into `HandleServerClose`'s middle
+  branch: shown verbatim, `_credentialRejected` left `false`, so
+  `HandleEditorUpdate`'s normal fixed-interval retry keeps running. This
+  three-way branch (`IsCredentialRejection` / `>= 4000` unrecognized /
+  everything else) is new control flow on top of the already-unverified
+  close-code-reading claims above and has the same "reasoned, not
+  observed" status — the DISTINCTION being drawn (retry-worthy vs.
+  not) is what the Python side's `unreal/tests/test_wire_auth_halt.py`
+  mutation-proves; there is no equivalent proof available here since this
+  C# cannot run.
 
 ## session.id / seq persistence across domain reload (`EditorPresenceConnection.cs`, `EditorPresenceSelectionWatcher.cs`)
 

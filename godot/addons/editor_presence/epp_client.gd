@@ -26,22 +26,35 @@ class_name EppClient
 ## indistinguishable at this layer on a plain HTTP 401 refusal) — the
 ## presence route is designed to always accept the upgrade and reject with
 ## an application close instead, specifically so engine clients get a real
-## reason here.
+## reason here. This message rule is unchanged and applies to every
+## code >= 4000, not just the credential-class ones below.
 ##
-## RECONNECT POLICY, tied to that same code: an application close (>= 4000)
-## does NOT auto-reconnect. The server told us definitively why (e.g. an
-## expired token) and retrying with the same credential fails the same way
-## every time — auto-retrying just produces an infinite amber dot. Recovery
-## is the toolbar indicator's click-to-retry (force_reconnect_now), once the
-## user has actually fixed the problem. Any OTHER close (including -1,
-## "never connected") keeps retrying with backoff, since that class of
-## failure — network blip, server mid-restart — is plausibly transient.
+## RECONNECT POLICY — CREDENTIAL-CLASS vs EVERYTHING ELSE, not a numeric
+## threshold. The first version of this rule stopped retrying on ANY
+## close >= 4000, which conflated two different situations: a bad/missing
+## token (retrying cannot help, so stop) and a server-side fault like
+## internal_error (transient by definition — a momentary server hiccup
+## should not permanently disconnect every editor on every machine until
+## someone notices and clicks retry). See is_credential_close() below:
+## only THOSE specific codes stop auto-reconnecting. Every other close —
+## including other >= 4000 codes this client doesn't recognise, and
+## anything below 4000 or -1 — keeps retrying with normal backoff, because
+## the server said "my fault, not yours" (or said nothing at all).
+## Recovery from a stopped state is the toolbar indicator's click-to-retry
+## (force_reconnect_now), once the user has actually fixed the problem.
+## Do NOT re-flatten this back into a numeric threshold — that is the
+## exact bug this replaced.
 
 signal state_changed(state: int, message: String)
 
 enum State { DISCONNECTED, CONNECTING, CONNECTED, UNSUPPORTED }
 
 const APPLICATION_CLOSE_THRESHOLD := 4000
+## The named, closed set — see the RECONNECT POLICY doc above. 4400
+## missing_credential and 4401 invalid_credential are the only codes that
+## stop auto-reconnecting; everything else (including other >= 4000 codes
+## like 4500 internal_error) keeps retrying.
+const CREDENTIAL_CLOSE_CODES: Array[int] = [4400, 4401]
 const RECONNECT_BASE_SEC := 0.5
 const RECONNECT_MAX_SEC := 30.0
 const RECONNECT_JITTER_FRACTION := 0.2
@@ -77,6 +90,15 @@ static func mint_session_id(rng: RandomNumberGenerator) -> String:
 	for i in 8:
 		suffix += chars[rng.randi() % chars.length()]
 	return "godot-%d-%s" % [OS.get_process_id(), suffix]
+
+## Pure: whether this close code is credential-class (retrying cannot
+## help — stop) as opposed to everything else, including other
+## application-level codes like 4500 internal_error (the server's fault,
+## transient by definition — keep retrying). A named, closed set on
+## purpose, not `code >= 4000` — see the RECONNECT POLICY doc above for
+## why that flattening was wrong.
+static func is_credential_close(code: int) -> bool:
+	return CREDENTIAL_CLOSE_CODES.has(code)
 
 ## Pure: given a close code/reason, returns the message to surface. code
 ## >= 4000 -> the server's own reason, verbatim; -1 (or any non-application
@@ -187,7 +209,7 @@ func poll(now_sec: float) -> bool:
 		var code := _peer.get_close_code()
 		var reason := _peer.get_close_reason()
 		_peer = null
-		if code >= APPLICATION_CLOSE_THRESHOLD:
+		if is_credential_close(code):
 			_stop_retrying()
 		else:
 			_schedule_retry(now_sec)

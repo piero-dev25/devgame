@@ -133,11 +133,14 @@ class Publisher:
         # latency one.
 
     def request_reconnect(self) -> None:
-        # Wakes an auth-rejection halt immediately (see wire.Wire's module
-        # docstring). While the wire is in its normal backoff cycle rather
-        # than halted, this is a no-op — the next attempt still lands on
-        # the existing backoff schedule, same as before this method did
-        # anything real.
+        # Wakes a credential-rejection halt immediately (see
+        # wire.Wire's module docstring and wire.is_credential_rejection —
+        # only 4400/missing and 4401/invalid halt; an unrecognized >= 4000
+        # code like 4500 keeps retrying on its own and never reaches this
+        # halted state at all). While the wire is in its normal backoff
+        # cycle rather than halted, this is a no-op — the next attempt
+        # still lands on the existing backoff schedule, same as before this
+        # method did anything real.
         if self._wire is not None:
             self._wire.request_reconnect()
         if unreal is not None:

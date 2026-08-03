@@ -286,7 +286,7 @@ describe("openEditorPresenceConnection", () => {
     connection.dispose();
   });
 
-  it("an application-level close (code >= 4000) shows the server's reason verbatim and does not reconnect", async () => {
+  it("a credential-rejection close (4401 invalid_credential) shows the server's reason verbatim and does not reconnect", async () => {
     const { factory, sockets } = makeSocketFactory();
     const states: EditorPresenceConnectionState[] = [];
 
@@ -298,17 +298,69 @@ describe("openEditorPresenceConnection", () => {
     });
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
 
-    sockets[0]!.onclose?.({ code: 4003, reason: "Session revoked" });
+    sockets[0]!.onclose?.({ code: 4401, reason: "invalid or expired token" });
     expect(states[states.length - 1]!).toEqual({
       phase: "disconnected",
       editors: [],
-      disconnectReason: "Session revoked",
+      disconnectReason: "invalid or expired token",
     });
 
-    // A credential problem cannot be fixed by retrying — no reconnect,
+    // Retrying would open the exact same rejected token — no reconnect,
     // ever, no matter how long we wait.
     await vi.advanceTimersByTimeAsync(5 * 60_000);
     expect(sockets).toHaveLength(1);
+
+    connection.dispose();
+  });
+
+  it("a credential-rejection close (4400 missing_credential) also does not reconnect", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const states: EditorPresenceConnectionState[] = [];
+
+    const connection = openEditorPresenceConnection({
+      ...BASE_CONFIG,
+      httpAuthorization: null,
+      createSocket: factory,
+      onStateChange: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0]!.onclose?.({ code: 4400, reason: "missing credential" });
+    expect(states[states.length - 1]!.disconnectReason).toBe("missing credential");
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect(sockets).toHaveLength(1);
+
+    connection.dispose();
+  });
+
+  it("a non-credential application close (4500 internal_error) shows the reason verbatim but keeps retrying, on the ordinary backoff", async () => {
+    const { factory, sockets } = makeSocketFactory();
+    const states: EditorPresenceConnectionState[] = [];
+
+    const connection = openEditorPresenceConnection({
+      ...BASE_CONFIG,
+      httpAuthorization: null,
+      createSocket: factory,
+      onStateChange: (state) => states.push(state),
+    });
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0]!.onclose?.({ code: 4500, reason: "internal server error" });
+    expect(states[states.length - 1]!).toEqual({
+      phase: "disconnected",
+      editors: [],
+      disconnectReason: "internal server error",
+    });
+
+    // Transient by definition (it's the server's own fault, not a
+    // credential problem) — a momentary fault must not permanently
+    // disconnect every client. Same base delay a transport-level close
+    // gets: no special escalated curve, just the ordinary one.
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    sockets[1]!.onopen?.();
+    expect(states[states.length - 1]!.disconnectReason).toBeNull();
 
     connection.dispose();
   });

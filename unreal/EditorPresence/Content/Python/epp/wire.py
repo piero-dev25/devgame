@@ -419,12 +419,12 @@ def connect(url: str, bearer_token: str, *, timeout_s: float = 5.0) -> Publisher
 
 
 def describe_close(code: Optional[int], reason: str) -> Optional[str]:
-    """Implements the ruling from docs/workbench/godot-probe-findings.md,
-    measured against a real server and generalized to every engine client
-    (Unreal's close-code exposure was not independently re-verified here,
-    but the ruling explicitly says it should hold for every WebSocket client
-    that exposes a close code, which the hand-rolled parser above does by
-    construction):
+    """Implements the MESSAGING half of the ruling from
+    docs/workbench/godot-probe-findings.md, measured against a real server
+    and generalized to every engine client (Unreal's close-code exposure was
+    not independently re-verified here, but the ruling explicitly says it
+    should hold for every WebSocket client that exposes a close code, which
+    the hand-rolled parser above does by construction):
 
       - close code >= 4000 -> the server told us why; show the reason
         verbatim.
@@ -439,6 +439,13 @@ def describe_close(code: Optional[int], reason: str) -> Optional[str]:
     knows the URL. Deliberately does NOT use the connection-state sequence
     (CONNECTING vs CLOSED) to guess — the Godot probe proved that is a
     localhost timing artifact, wrong on a remote or firewalled port.
+
+    This `>= 4000` threshold is correct for WHETHER TO SHOW A MESSAGE and
+    stays a threshold — the finding's own corrected ruling ("Correction:
+    '>= 4000 means stop retrying' was too coarse") is about a DIFFERENT
+    question, whether to keep retrying, which this function has no opinion
+    on. Do not read retry policy off this function's return value — use
+    `is_credential_rejection` for that.
     """
     if code is not None and code >= 4000:
         return reason or f"rejected (close code {code})"
@@ -502,15 +509,37 @@ PONG_TIMEOUT_S = 60.0
 POLL_TIMEOUT_S = 0.5
 
 
-def is_auth_rejection(close_code: Optional[int]) -> bool:
-    """A close code >= 4000 means the server told us why it closed the
-    connection (docs/workbench/godot-probe-findings.md's ruling) — for EPP
-    specifically, that is always a credential problem, never a transient
-    network blip. Retrying with backoff cannot fix a bad or missing token,
-    so this is the single predicate both `Wire`'s halt-on-rejection branch
-    and any status-consuming UI should use to decide "don't hammer this,
-    wait for the user to fix the token and ask again." """
-    return close_code is not None and close_code >= 4000
+# CORRECTION (docs/workbench/godot-probe-findings.md, "Correction: '>= 4000
+# means stop retrying' was too coarse"): the first version of this rule
+# halted reconnection for ANY close code >= 4000. That is wrong — a 4500
+# ("server internal error") is the server saying "my fault," which is
+# transient by definition; halting on it would let one momentary server
+# fault permanently disconnect every editor on every machine until each
+# user notices and clicks retry. Only two codes currently mean "your
+# credential is the problem, and retrying with the SAME one cannot fix
+# it": 4400 (missing) and 4401 (invalid). Named explicitly and checked by
+# membership, NOT by a numeric threshold — a threshold is exactly what this
+# collapsed back into the first time, and the fix is to make it structurally
+# impossible to re-flatten by accident.
+CLOSE_CODE_MISSING_CREDENTIAL = 4400
+CLOSE_CODE_INVALID_CREDENTIAL = 4401
+CREDENTIAL_REJECTION_CLOSE_CODES = frozenset({CLOSE_CODE_MISSING_CREDENTIAL, CLOSE_CODE_INVALID_CREDENTIAL})
+
+
+def is_credential_rejection(close_code: Optional[int]) -> bool:
+    """True only for a close code that specifically means "your credential
+    is the problem" (4400 missing, 4401 invalid) — the one case where
+    retrying with the SAME token cannot possibly succeed. False for
+    everything else, INCLUDING an unrecognized code >= 4000 such as 4500:
+    per the corrected ruling, "an unrecognised >= 4000 code should keep
+    retrying — an unknown failure is more likely to be transient than to be
+    the user's fault." This is the single predicate both `Wire`'s
+    halt-on-rejection branch and any status-consuming UI should use to
+    decide "don't hammer this, wait for the user to fix the token and ask
+    again" — `describe_close`'s `>= 4000` check answers a different
+    question (whether to show a message at all) and must not be reused for
+    this one."""
+    return close_code in CREDENTIAL_REJECTION_CLOSE_CODES
 
 
 class Wire:
@@ -523,16 +552,21 @@ class Wire:
     THREAD — the caller must not touch `unreal` inside it; see the module
     docstring's absolute rule.
 
-    AUTH-REJECTION HALT: a close code >= 4000 stops the automatic
+    CREDENTIAL-REJECTION HALT: a close code in `CREDENTIAL_REJECTION_CLOSE_CODES`
+    (4400/4401 — see `is_credential_rejection`) stops the automatic
     reconnect loop entirely (a `"halted"` status event fires instead of the
     normal `"connecting"`/backoff cycle) rather than retrying with the same
-    rejected credential every few seconds — retrying cannot fix a bad
-    token, only hammer the server and spam the Output Log. The loop then
-    blocks until `request_reconnect()` is called (wired to the "Reconnect
-    now" / "Pair" UI actions in publisher.py) or `stop_event` fires. This
-    was added during the cross-engine contract audit alongside the
-    equivalent fix in the Unity plugin (`EditorPresenceConnection.cs`),
-    per the same ruling: "do not hammer-reconnect on a >= 4000 rejection."
+    rejected credential every few seconds — retrying cannot fix a bad or
+    missing token, only hammer the server and spam the Output Log. Any
+    OTHER close code, including an unrecognized one >= 4000 like 4500
+    (server internal error, transient by definition), keeps retrying with
+    normal backoff — this distinction is exactly what the corrected ruling
+    in docs/workbench/godot-probe-findings.md exists to enforce; do not
+    widen the halt condition back to a `>= 4000` threshold. The loop blocks
+    until `request_reconnect()` is called (wired to the "Reconnect now" /
+    "Pair" UI actions in publisher.py) or `stop_event` fires. This was
+    added during the cross-engine contract audit alongside the equivalent
+    fix in the Unity plugin (`EditorPresenceConnection.cs`).
     """
 
     def __init__(
@@ -581,7 +615,7 @@ class Wire:
             if stop_event.is_set():
                 return
 
-            if is_auth_rejection(close_code):
+            if is_credential_rejection(close_code):
                 # Surface the server's own reason VERBATIM (describe_close
                 # already extracted it) rather than a generic message — a
                 # generic "credential rejected" is exactly the kind of
@@ -615,16 +649,19 @@ class Wire:
         try:
             conn = self._connect_fn()
         except HandshakeFailed as e:
-            code = e.status_code if is_auth_rejection(e.status_code) else None
-            described = describe_close(code, e.reason)
+            # Pass the REAL status code to describe_close (not pre-filtered
+            # by a retry-policy check) — messaging ("did the server tell us
+            # why?") and retry policy ("should we halt?") are two separate
+            # questions since the correction; see is_credential_rejection's
+            # docstring. The caller decides whether to halt purely from the
+            # (close_code, reason) this returns.
+            described = describe_close(e.status_code, e.reason)
             self._on_status(
                 "disconnected",
                 reason=described or f"cannot reach Workbench: HTTP {e.status_code} {e.reason}".strip(),
                 close_code=e.status_code,
             )
-            if is_auth_rejection(e.status_code):
-                return e.status_code, e.reason
-            return None, ""
+            return e.status_code, e.reason
         except OSError as e:
             self._on_status("disconnected", reason=f"cannot reach Workbench: {e}", close_code=None)
             return None, ""

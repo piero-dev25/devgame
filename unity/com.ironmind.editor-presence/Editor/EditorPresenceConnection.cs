@@ -59,14 +59,29 @@ namespace Ironmind.EditorPresence
         private const string SessionIdSessionStateKey = "Ironmind.EditorPresence.SessionId";
 
         // A close code >= 4000 means the server told us why (the ruling
-        // measured in docs/workbench/godot-probe-findings.md and restated
-        // in the audit brief): the presence route accepts the WebSocket
-        // upgrade FIRST, then authenticates, and rejects by closing with an
-        // application close code plus a human-readable reason — it never
-        // refuses with an HTTP-level error. Below this threshold (including
-        // no close code at all, i.e. the connection never completed) means
-        // "we never got far enough to be told anything."
-        private const int AuthRejectionCloseCodeThreshold = 4000;
+        // measured in docs/workbench/godot-probe-findings.md): the presence
+        // route accepts the WebSocket upgrade FIRST, then authenticates,
+        // and rejects by closing with an application close code plus a
+        // human-readable reason — it never refuses with an HTTP-level
+        // error. No close code at all (the connection never completed)
+        // means "we never got far enough to be told anything."
+        //
+        // CORRECTION (docs/workbench/godot-probe-findings.md, "Correction:
+        // '>= 4000 means stop retrying' was too coarse"): the first version
+        // of this file halted auto-reconnect for ANY code >= 4000. Wrong —
+        // 4500 (server internal error) is the server saying "my fault,"
+        // transient by definition; halting on it would let one momentary
+        // server fault permanently disconnect every editor on every
+        // machine. Only 4400 (missing credential) and 4401 (invalid
+        // credential) mean "retrying with the SAME token cannot help" —
+        // named explicitly and checked by IsCredentialRejection's
+        // membership test below, NOT a numeric threshold, so this cannot
+        // silently re-flatten back into one.
+        private const int CloseCodeMissingCredential = 4400;
+        private const int CloseCodeInvalidCredential = 4401;
+
+        private static bool IsCredentialRejection(int closeCode) =>
+            closeCode == CloseCodeMissingCredential || closeCode == CloseCodeInvalidCredential;
 
         private static readonly string SessionId = ResolveSessionId();
 
@@ -75,13 +90,16 @@ namespace Ironmind.EditorPresence
         private static double _nextConnectAttemptAt;
         private static bool _connectInFlight;
 
-        // Set when the server rejected our credential with a close code
-        // >= 4000. HandleEditorUpdate refuses to auto-retry while this is
-        // set — retrying with the SAME rejected token cannot fix a
-        // credential problem, it can only hammer the server and spam the
-        // Output Log every ReconnectIntervalSeconds. Cleared by Retry()
-        // (wired to a "Retry now" button — see
-        // EditorPresenceSettingsProvider.cs) or by a successful re-pair
+        // Set when the server rejected our credential specifically — close
+        // code 4400 (missing) or 4401 (invalid), per IsCredentialRejection.
+        // NOT set for any other close code, including an unrecognized one
+        // >= 4000 (e.g. 4500) — those keep retrying normally. HandleEditorUpdate
+        // refuses to auto-retry while this is set — retrying with the SAME
+        // rejected token cannot fix a credential problem, it can only
+        // hammer the server and spam the Output Log every
+        // ReconnectIntervalSeconds. Cleared by Retry() (wired to a "Retry
+        // now" button — see EditorPresenceSettingsProvider.cs) or by a
+        // successful re-pair
         // (EditorPresenceSettings.RedeemPairingCredential's caller clears
         // it — see that file).
         private static bool _credentialRejected;
@@ -290,11 +308,13 @@ namespace Ironmind.EditorPresence
 
         private static void HandleServerClose(int closeCode, string closeDescription)
         {
-            if (closeCode >= AuthRejectionCloseCodeThreshold)
+            if (IsCredentialRejection(closeCode))
             {
-                // The server told us why — surface it VERBATIM, and stop
-                // auto-retrying with the same rejected token (see
-                // HandleEditorUpdate's _credentialRejected check).
+                // 4400/4401 only — the server told us our credential
+                // specifically is the problem. Surface it VERBATIM, and
+                // stop auto-retrying with the same rejected token (see
+                // HandleEditorUpdate's _credentialRejected check). Retrying
+                // sends the identical token again; it cannot succeed.
                 LastErrorMessage = string.IsNullOrEmpty(closeDescription)
                     ? $"rejected (close code {closeCode})"
                     : closeDescription;
@@ -302,6 +322,24 @@ namespace Ironmind.EditorPresence
                 Debug.LogWarning(
                     $"[T3 Editor Presence] credential rejected (close code {closeCode}): {LastErrorMessage}. " +
                     "Not retrying automatically — fix the token, then click Retry now.");
+            }
+            else if (closeCode >= 4000)
+            {
+                // The server told us why, but it is NOT a credential
+                // problem (e.g. 4500 server internal error) — show the
+                // reason verbatim same as above, but do NOT set
+                // _credentialRejected: HandleEditorUpdate's normal fixed
+                // interval keeps retrying, because an unrecognized server
+                // fault is more likely to be transient than to be the
+                // user's fault (docs/workbench/godot-probe-findings.md's
+                // correction). Deliberately does not stop retrying just
+                // because the code happens to be >= 4000.
+                LastErrorMessage = string.IsNullOrEmpty(closeDescription)
+                    ? $"rejected (close code {closeCode})"
+                    : closeDescription;
+                Debug.LogWarning(
+                    $"[T3 Editor Presence] server closed with code {closeCode}: {LastErrorMessage}. " +
+                    "Retrying automatically — this is not a credential problem.");
             }
             else
             {

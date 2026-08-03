@@ -19,15 +19,48 @@ const RECONNECT_MAX_MS = 30_000;
  * HTTP-layer refusal and "nothing listening" are indistinguishable to a
  * WebSocket client, so the server deliberately always completes the
  * handshake before it can say why it's rejecting the connection).
- *
- * Ratified rule for every client (web included): code >= 4000 means the
- * server told us why — show that reason verbatim, and do NOT reconnect (a
- * credential problem cannot be fixed by retrying). Anything else means no
- * WebSocket session was ever established — a plain reachability problem,
- * not a credential one — so show a fixed "cannot reach" message and keep
- * backing off.
  */
 const APPLICATION_CLOSE_CODE_THRESHOLD = 4000;
+/**
+ * Close codes the server uses for a *definitive credential rejection* —
+ * retrying opens the exact same rejected (or still-missing) token, so it
+ * cannot self-heal. Named explicitly, not expressed as a numeric range: a
+ * threshold ("code >= 4000 means stop") is exactly what this collapsed back
+ * into the first time it was tried, and it was wrong — 4500 (the server's
+ * own internal fault) is also >= 4000 but is transient by definition, and
+ * belongs with "keep retrying," not with these two. See
+ * docs/workbench/godot-probe-findings.md's "Correction: '>= 4000 means stop
+ * retrying' was too coarse".
+ */
+const CREDENTIAL_REJECTION_CLOSE_CODE = {
+  missingCredential: 4400,
+  invalidCredential: 4401,
+} as const;
+const CREDENTIAL_REJECTION_CLOSE_CODES: ReadonlySet<number> = new Set(
+  Object.values(CREDENTIAL_REJECTION_CLOSE_CODE),
+);
+/**
+ * Ratified rule for every client (web included), credential-class versus
+ * everything else:
+ * - a credential-rejection code (4400/4401) -> the server told us why; show
+ *   that reason verbatim, and do NOT reconnect.
+ * - any other application close (4500, or a future code this build doesn't
+ *   recognize yet) -> also show the reason verbatim, but an unrecognized or
+ *   server-side failure is presumed transient, not the user's fault, so
+ *   keep retrying — on the ordinary backoff curve, not an escalated one;
+ *   this is still one of exactly two retry behaviors, not three.
+ * - anything below the application range (an opaque close, a dead port, a
+ *   ticket-mint failure) -> no WebSocket session was ever established, so
+ *   show a fixed "cannot reach" message instead of the (nonexistent or
+ *   meaningless) close reason, and keep retrying.
+ */
+type EditorPresenceCloseClassification = "credential-rejected" | "application-other" | "no-session";
+
+function classifyEditorPresenceClose(code: number): EditorPresenceCloseClassification {
+  if (CREDENTIAL_REJECTION_CLOSE_CODES.has(code)) return "credential-rejected";
+  if (code >= APPLICATION_CLOSE_CODE_THRESHOLD) return "application-other";
+  return "no-session";
+}
 const WS_TICKET_QUERY_PARAM = "wsTicket";
 const WS_ROLE_QUERY_PARAM = "role";
 const EDITOR_PRESENCE_PATH = "/editor-presence";
@@ -39,10 +72,12 @@ export interface EditorPresenceConnectionState {
   readonly editors: ReadonlyArray<EditorPresenceEntry>;
   /**
    * What to tell the user instead of a generic "disconnected": the
-   * server's own verbatim reason for an application-level close (code
-   * >= 4000, and retrying has stopped), or a fixed "cannot reach Workbench"
-   * message when no session was ever established (still retrying). Cleared
-   * on a successful open and on a message; only meaningful while
+   * server's own verbatim reason for any application-level close (a
+   * credential rejection, retrying has stopped; anything else, still
+   * retrying), or a fixed "cannot reach Workbench" message when no session
+   * was ever established (still retrying). See
+   * `classifyEditorPresenceClose` for the exact classification. Cleared on
+   * a successful open and on a message; only meaningful while
    * disconnected/reconnecting.
    */
   readonly disconnectReason: string | null;
@@ -107,14 +142,13 @@ function cannotReachMessage(httpBaseUrl: string): string {
 
 /**
  * Opens one subscriber connection, and — unless the server rejected it with
- * an application-level close (code >= 4000, not retried; see
- * `APPLICATION_CLOSE_CODE_THRESHOLD` above) — reopens it with backoff on
- * every close. Every state transition — connecting, connected, a new
- * `presence` frame, disconnected — is reported to `onStateChange`. Returns
- * a `dispose()` that tears the connection down and suppresses any further
- * callbacks, safe to call unconditionally from a React effect cleanup
- * (including before the in-flight ticket mint or the socket has even
- * opened).
+ * a credential-class close (see `classifyEditorPresenceClose` above, not
+ * retried) — reopens it with backoff on every close. Every state
+ * transition — connecting, connected, a new `presence` frame,
+ * disconnected — is reported to `onStateChange`. Returns a `dispose()`
+ * that tears the connection down and suppresses any further callbacks,
+ * safe to call unconditionally from a React effect cleanup (including
+ * before the in-flight ticket mint or the socket has even opened).
  */
 export function openEditorPresenceConnection(config: EditorPresenceConnectionConfig): {
   readonly dispose: () => void;
@@ -170,11 +204,22 @@ export function openEditorPresenceConnection(config: EditorPresenceConnectionCon
 
         ws.onclose = (event) => {
           if (disposed) return;
-          if (event.code >= APPLICATION_CLOSE_CODE_THRESHOLD) {
-            // The server told us why, and a credential problem cannot be
-            // fixed by retrying — stop, rather than hammering a reconnect
-            // that will fail the same way again.
+          const classification = classifyEditorPresenceClose(event.code);
+          if (classification === "credential-rejected") {
+            // Retrying opens the exact same rejected (or still-missing)
+            // token — stop, rather than hammering a reconnect that will
+            // fail the same way again.
             emit({ phase: "disconnected", editors: [], disconnectReason: event.reason });
+            return;
+          }
+          if (classification === "application-other") {
+            // The server told us why, but it's an application close that
+            // isn't a credential rejection — its own internal fault, or a
+            // future code this build doesn't recognize — presumed
+            // transient rather than the user's fault, so it keeps
+            // retrying, on the ordinary backoff curve.
+            emit({ phase: "disconnected", editors: [], disconnectReason: event.reason });
+            scheduleReconnect();
             return;
           }
           // No WebSocket session was ever meaningfully established — a

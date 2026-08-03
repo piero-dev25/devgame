@@ -124,23 +124,35 @@ plugin's Output Log lines.
 
 ## Credential-rejection handling
 
-If the server rejects your credential (an expired or revoked token, or a
-pairing token that was never valid to begin with), this package:
+The server always reads the close code and reason it sent and shows that
+reason **verbatim** in both the overlay tooltip and the Preferences page,
+rather than a generic "disconnected" message. What happens next depends on
+_which_ close code:
 
-- reads the close code and reason the server sent and shows that reason
-  **verbatim** in both the overlay tooltip and the Preferences page,
-  rather than a generic "disconnected" message;
-- **stops trying to reconnect automatically.** A rejected credential
-  cannot be fixed by retrying with the same rejected credential every few
-  seconds — that only hammers the server and spams the Console. Fix the
-  token (re-pair, per "Credential flow" above), or click **Retry now**
-  once you believe the problem is resolved.
+- **4400 (no credential presented) or 4401 (invalid/expired credential):**
+  this package **stops trying to reconnect automatically.** Retrying with
+  the same rejected credential every few seconds cannot succeed — it only
+  hammers the server and spams the Console. Fix the token (re-pair, per
+  "Credential flow" above), or click **Retry now** once you believe the
+  problem is resolved.
+- **Any other close code the server sends, including one this package
+  does not specifically recognize (e.g. 4500, server internal error):**
+  the reason is still shown verbatim, but this package **keeps retrying
+  automatically** on the existing fixed interval. A momentary server fault
+  is transient by definition, and an unrecognized failure is more likely
+  to be transient than to be a problem with your specific credential — see
+  `docs/workbench/godot-probe-findings.md`'s "Correction: '>= 4000 means
+  stop retrying' was too coarse" for the reasoning (an earlier version of
+  this package got this wrong: it halted for ANY close code ≥ 4000, which
+  meant a single momentary server fault would have permanently
+  disconnected every editor on every machine until each user noticed and
+  clicked Retry).
 
 A connection that merely can't be reached at all (server not running,
-wrong URL, network down) behaves differently: it keeps retrying
-automatically on the existing fixed interval, and reads as "cannot reach
-Workbench at `<url>`" rather than a credential rejection — a firewalled or
-otherwise-unreachable server never gets far enough to reject anything.
+wrong URL, network down) behaves the same as the second case above: it
+keeps retrying automatically, and reads as "cannot reach Workbench at
+`<url>`" — a firewalled or otherwise-unreachable server never gets far
+enough to reject anything.
 
 ## What "presence" means here
 
@@ -231,11 +243,17 @@ Found and fixed against the authoritative `protocol.ts` and
 4. **Close codes were read and discarded.** The receive loop always closed
    with `WebSocketCloseStatus.NormalClosure` regardless of what the server
    actually sent. Now reads `CloseStatus`/`CloseStatusDescription` and
-   surfaces the reason verbatim for a rejection (close code ≥ 4000, per
-   the ruling in `docs/workbench/godot-probe-findings.md`), and stops
-   auto-reconnecting on one rather than hammering the server with the same
-   rejected credential — `EditorPresenceConnection.cs`,
-   `EditorPresenceSettingsProvider.cs`, `EditorPresenceStatusOverlay.cs`.
+   surfaces the reason verbatim, and stops auto-reconnecting specifically
+   for a credential rejection (close code 4400 or 4401) rather than
+   hammering the server with the same rejected credential —
+   `EditorPresenceConnection.cs`, `EditorPresenceSettingsProvider.cs`,
+   `EditorPresenceStatusOverlay.cs`. First landed with a too-coarse "any
+   code ≥ 4000 halts" rule, corrected the same day per
+   `docs/workbench/godot-probe-findings.md`'s "Correction: '>= 4000 means
+   stop retrying' was too coarse" — an unrecognized code like 4500 (server
+   internal error) now correctly keeps retrying instead of permanently
+   disconnecting every editor on a momentary server fault. See
+   "Credential-rejection handling" above.
 5. **The redeem request was missing a required `scope` field.** Present in
    the real client's request (`packages/client-runtime/src/authorization/remote.ts`)
    and called out explicitly in `docs/workbench/engine-credential-flow.md`;

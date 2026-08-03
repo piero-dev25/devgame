@@ -14,14 +14,26 @@ extends SceneTree
 # Runs over real wall-clock ticks (this exercises actual backoff timing,
 # not simulated time), so it takes several real seconds — that is the
 # point for the reconnect-policy assertions.
+#
+# Three independent close-code scenarios, each with its own client/server
+# pair so one scenario's reconnect can never pollute another's connection
+# count: credential-class (4401, must STOP), internal-error-class (4500,
+# must KEEP RETRYING — this is the distinction the owner corrected after
+# the first version of this test only covered the credential case), and
+# a plain transient close (1000, must KEEP RETRYING) to cover the
+# below-4000 path too.
 
 const EppClient = preload("res://addons/editor_presence/epp_client.gd")
 const EppSelection = preload("res://addons/editor_presence/epp_selection.gd")
 const FakeEppServer = preload("res://addons/editor_presence/tests/fake_epp_server.gd")
 
-const TEST_PORT_A := 39812
-const TEST_PORT_B := 39813
+const PORT_HAPPY_PATH := 39812
+const PORT_CREDENTIAL := 39813
+const PORT_INTERNAL_ERROR := 39814
+const PORT_TRANSIENT := 39815
 const STAGE_TIMEOUT_SEC := 12.0
+const NO_RECONNECT_WINDOW_SEC := 4.0
+const RECONNECT_EXPECT_WINDOW_SEC := 8.0
 
 var _pass_count := 0
 var _fail_count := 0
@@ -36,33 +48,60 @@ func _check(name: String, condition: bool, detail: String = "") -> void:
 
 enum Stage {
 	CONNECT_AND_SEND,
-	TRIGGER_APPLICATION_CLOSE,
-	CONFIRM_NO_RECONNECT,
-	CONNECT_SECOND_CLIENT,
-	TRIGGER_TRANSIENT_CLOSE,
-	CONFIRM_RECONNECT,
+	SCENARIO_CREDENTIAL,
+	SCENARIO_INTERNAL_ERROR,
+	SCENARIO_TRANSIENT,
 	DONE,
 }
+
+# A "close scenario" bundles everything one reconnect-policy check needs:
+# its own server+client pair (so its connection_count can't be polluted by
+# another scenario), the code/reason to close with, whether a reconnect is
+# EXPECTED, and a latch so the "just closed" assertion runs exactly once
+# while the final wait/assert runs on a wall-clock deadline, not on
+# re-reading current state every tick. Re-reading state was the first
+# version's bug: once a client legitimately reconnects, its state stops
+# being DISCONNECTED, which made a top-of-function state check abort
+# before the real assertion ever ran — surfacing as an uninformative stage
+# timeout instead of a named FAIL. Fixed per the owner's correction on
+# mutation 1.
+class CloseScenario:
+	var scenario_name: String
+	var port: int
+	var close_code: int
+	var close_reason: String
+	## What EppClient.describe_close() should surface for this code — the
+	## reason verbatim for >= 4000 (per describe_close's own, unchanged
+	## rule), but the generic "cannot reach Workbench" message below 4000,
+	## since a plain closure code carries no server-authored explanation.
+	## Set per-scenario below rather than assumed equal to close_reason —
+	## that wrong assumption was caught by actually running this test
+	## against the transient (1000) scenario.
+	var expected_message: String
+	var expect_reconnect: bool
+	var server: FakeEppServer
+	var client: EppClient
+	var latched_at: float = -1.0
+	var close_triggered := false
+
+var _scenarios: Array[CloseScenario] = []
 
 var _stage: int = Stage.CONNECT_AND_SEND
 var _stage_started_at := 0.0
 
-var _server_a: FakeEppServer
-var _client_a: EppClient
+var _server_happy: FakeEppServer
+var _client_happy: EppClient
 var _scene_root: Node
 var _node_a: Node
 var _node_b: Node
-
-var _server_b: FakeEppServer
-var _client_b: EppClient
 
 func _now() -> float:
 	return Time.get_ticks_msec() / 1000.0
 
 func _initialize() -> void:
-	_server_a = FakeEppServer.new()
-	if not _server_a.start(TEST_PORT_A):
-		print("FAIL setup — could not bind test server to port ", TEST_PORT_A)
+	_server_happy = FakeEppServer.new()
+	if not _server_happy.start(PORT_HAPPY_PATH):
+		print("FAIL setup — could not bind test server to port ", PORT_HAPPY_PATH)
 		quit(1)
 		return
 
@@ -76,9 +115,41 @@ func _initialize() -> void:
 	_node_b.name = "Beta"
 	_scene_root.add_child(_node_b)
 
-	_client_a = EppClient.new()
-	_client_a.configure("ws://127.0.0.1:%d/editor-presence" % TEST_PORT_A, "dummy-token", "4.7.1-test")
-	_client_a.connect_now()
+	_client_happy = EppClient.new()
+	_client_happy.configure("ws://127.0.0.1:%d/editor-presence" % PORT_HAPPY_PATH, "dummy-token", "4.7.1-test")
+	_client_happy.connect_now()
+
+	var credential := CloseScenario.new()
+	credential.scenario_name = "credential-class (4401)"
+	credential.port = PORT_CREDENTIAL
+	credential.close_code = 4401
+	credential.close_reason = "invalid or expired token"
+	credential.expect_reconnect = false
+	_scenarios.append(credential)
+
+	var internal_error := CloseScenario.new()
+	internal_error.scenario_name = "internal-error-class (4500)"
+	internal_error.port = PORT_INTERNAL_ERROR
+	internal_error.close_code = 4500
+	internal_error.close_reason = "internal_error"
+	internal_error.expect_reconnect = true
+	_scenarios.append(internal_error)
+
+	var transient := CloseScenario.new()
+	transient.scenario_name = "transient (1000, < 4000)"
+	transient.port = PORT_TRANSIENT
+	transient.close_code = 1000
+	transient.close_reason = "normal closure"
+	transient.expect_reconnect = true
+	_scenarios.append(transient)
+
+	# expected_message is derived from the SAME pure describe_close()
+	# already unit-tested in epp_client_test.gd — this test's job is
+	# proving that value actually reaches get_last_message() through a
+	# real close, not re-testing describe_close's own formatting.
+	for scenario in _scenarios:
+		var url := "ws://127.0.0.1:%d/editor-presence" % scenario.port
+		scenario.expected_message = EppClient.describe_close(scenario.close_code, scenario.close_reason, url)
 
 	_stage_started_at = _now()
 
@@ -89,10 +160,16 @@ func _fail_stage_timeout(stage_name: String) -> void:
 func _finish() -> void:
 	print("---")
 	print("RESULT pass=", _pass_count, " fail=", _fail_count)
-	if _server_a != null:
-		_server_a.stop()
-	if _server_b != null:
-		_server_b.stop()
+	if _server_happy != null:
+		_server_happy.stop()
+	for scenario in _scenarios:
+		if scenario.server != null:
+			scenario.server.stop()
+	# Node is not reference-counted like the RefCounted client/server
+	# objects above — free the tree explicitly or it leaks at exit
+	# (previous run: "3 ObjectDB instances were leaked", exactly this tree).
+	if _scene_root != null:
+		_scene_root.free()
 	quit(1 if _fail_count > 0 else 0)
 
 func _process(_delta: float) -> bool:
@@ -101,25 +178,22 @@ func _process(_delta: float) -> bool:
 		_fail_stage_timeout("stage %d timeout" % _stage)
 		return true
 
-	_server_a.poll()
-	_pump_client(_client_a, now)
-	if _server_b != null:
-		_server_b.poll()
-	_pump_client(_client_b, now)
+	_server_happy.poll()
+	_pump_client(_client_happy, now)
+	for scenario in _scenarios:
+		if scenario.server != null:
+			scenario.server.poll()
+		_pump_client(scenario.client, now)
 
 	match _stage:
 		Stage.CONNECT_AND_SEND:
 			_tick_connect_and_send(now)
-		Stage.TRIGGER_APPLICATION_CLOSE:
-			_tick_trigger_application_close()
-		Stage.CONFIRM_NO_RECONNECT:
-			_tick_confirm_no_reconnect(now)
-		Stage.CONNECT_SECOND_CLIENT:
-			_tick_connect_second_client(now)
-		Stage.TRIGGER_TRANSIENT_CLOSE:
-			_tick_trigger_transient_close()
-		Stage.CONFIRM_RECONNECT:
-			_tick_confirm_reconnect(now)
+		Stage.SCENARIO_CREDENTIAL:
+			_tick_scenario(now, _scenarios[0], Stage.SCENARIO_INTERNAL_ERROR)
+		Stage.SCENARIO_INTERNAL_ERROR:
+			_tick_scenario(now, _scenarios[1], Stage.SCENARIO_TRANSIENT)
+		Stage.SCENARIO_TRANSIENT:
+			_tick_scenario(now, _scenarios[2], Stage.DONE)
 		Stage.DONE:
 			_finish()
 			return true
@@ -145,35 +219,29 @@ func _pump_client(client, now: float) -> void:
 	client.poll(now)
 
 func _tick_connect_and_send(now: float) -> void:
-	if _client_a.get_state() != EppClient.State.CONNECTED:
+	if _client_happy.get_state() != EppClient.State.CONNECTED:
 		return
-	# Connected — send hello was automatic on open; now send a selection
-	# built through the SAME EppSelection the real plugin uses.
-	if _server_a.received_frames.is_empty() or _server_a.received_frames.size() < 2:
+	if _server_happy.received_frames.size() < 2:
 		var items: Array[Dictionary] = EppSelection.build_items([_node_a, _node_b], _scene_root, PackedStringArray())
-		_client_a.send_selection(items)
-
-	# Wait for the server to have validated BOTH the hello and the
-	# selection before asserting on them.
-	if _server_a.received_frames.size() < 2:
+		_client_happy.send_selection(items)
 		return
 
-	_check("no frames were rejected by wire-contract validation", _server_a.rejected_frames.is_empty(),
-		str(_server_a.rejected_frames))
+	_check("no frames were rejected by wire-contract validation", _server_happy.rejected_frames.is_empty(),
+		str(_server_happy.rejected_frames))
 
 	var hello_frame: Dictionary = {}
 	var selection_frame: Dictionary = {}
-	for frame in _server_a.received_frames:
+	for frame in _server_happy.received_frames:
 		if frame["type"] == "hello":
 			hello_frame = frame
 		elif frame["type"] == "selection":
 			selection_frame = frame
 
-	_check("server validated a hello frame", hello_frame.has("type"), str(_server_a.received_frames))
+	_check("server validated a hello frame", hello_frame.has("type"), str(_server_happy.received_frames))
 	if hello_frame.has("editor"):
 		_check("hello.editor.id is 'godot'", hello_frame["editor"].get("id") == "godot", str(hello_frame))
 
-	_check("server validated a selection frame (flat, not nested)", selection_frame.has("type"), str(_server_a.received_frames))
+	_check("server validated a selection frame (flat, not nested)", selection_frame.has("type"), str(_server_happy.received_frames))
 	if selection_frame.has("items"):
 		var items: Array = selection_frame["items"]
 		_check("selection carries both selected nodes", items.size() == 2, str(items))
@@ -182,79 +250,77 @@ func _tick_connect_and_send(now: float) -> void:
 				items[0]["label"] == "Alpha" and items[1]["label"] == "Beta",
 				"%s, %s" % [items[0].get("label"), items[1].get("label")])
 
-	_advance(Stage.TRIGGER_APPLICATION_CLOSE)
+	_advance(Stage.SCENARIO_CREDENTIAL)
 
-func _tick_trigger_application_close() -> void:
-	_server_a.close_current_connection(4401, "invalid or expired token")
-	_advance(Stage.CONFIRM_NO_RECONNECT)
-
-var _reason_checked := false
-
-func _tick_confirm_no_reconnect(now: float) -> void:
-	# First wait for the client to actually observe the close.
-	if _client_a.get_state() != EppClient.State.DISCONNECTED:
-		return
-	if now - _stage_started_at < 0.2:
-		return  # let the close land before asserting on it
-
-	if not _reason_checked:
-		_reason_checked = true
-		_check(
-			"close 4401 surfaces the server's reason verbatim",
-			_client_a.get_last_message() == "invalid or expired token",
-			_client_a.get_last_message(),
-		)
-
-	# Give it a window comfortably longer than the normal backoff's first
-	# retry (RECONNECT_BASE_SEC=0.5s -> first retry ~1s) before asserting
-	# no reconnect happened — this is the actual behavior under test, not
-	# just the state right after the close.
-	if now - _stage_started_at < 4.0:
-		return
-
-	_check(
-		"application close (>= 4000) does NOT auto-reconnect: still exactly 1 connection after 4s",
-		_server_a.connection_count == 1,
-		"connection_count=%d" % _server_a.connection_count,
-	)
-	_check(
-		"should_attempt_connect() stays false after an application close",
-		not _client_a.should_attempt_connect(now),
-	)
-
-	_advance(Stage.CONNECT_SECOND_CLIENT)
-
-func _tick_connect_second_client(now: float) -> void:
-	if _server_b == null:
-		_server_b = FakeEppServer.new()
-		if not _server_b.start(TEST_PORT_B):
-			_check("setup: second test server binds", false, "port %d" % TEST_PORT_B)
+func _tick_scenario(now: float, scenario: CloseScenario, next_stage: int) -> void:
+	# Step 1: bring up this scenario's own server+client pair.
+	if scenario.server == null:
+		scenario.server = FakeEppServer.new()
+		if not scenario.server.start(scenario.port):
+			_check("setup: %s test server binds" % scenario.scenario_name, false, "port %d" % scenario.port)
 			_advance(Stage.DONE)
 			return
-		_client_b = EppClient.new()
-		_client_b.configure("ws://127.0.0.1:%d/editor-presence" % TEST_PORT_B, "dummy-token", "4.7.1-test")
-		_client_b.connect_now()
+		scenario.client = EppClient.new()
+		scenario.client.configure("ws://127.0.0.1:%d/editor-presence" % scenario.port, "dummy-token", "4.7.1-test")
+		scenario.client.connect_now()
 		return
 
-	if _client_b.get_state() == EppClient.State.CONNECTED:
-		_advance(Stage.TRIGGER_TRANSIENT_CLOSE)
-
-func _tick_trigger_transient_close() -> void:
-	# A NON-application close code — the ordinary "connection dropped"
-	# case, e.g. a normal closure or a network blip. This must keep
-	# retrying, unlike the 4401 case above.
-	_server_b.close_current_connection(1000, "normal closure")
-	_advance(Stage.CONFIRM_RECONNECT)
-
-func _tick_confirm_reconnect(now: float) -> void:
-	# Wait up to the stage timeout for a second connection to land at the
-	# fake server — that IS the reconnect, observed from the outside
-	# rather than by inspecting the client's private state.
-	if _server_b.connection_count < 2:
+	# Step 2: wait for it to connect, then trigger the close under test.
+	if not scenario.close_triggered:
+		if scenario.client.get_state() != EppClient.State.CONNECTED:
+			return
+		scenario.server.close_current_connection(scenario.close_code, scenario.close_reason)
+		scenario.close_triggered = true
 		return
-	_check(
-		"non-application close (< 4000) DOES auto-reconnect: a second connection arrived",
-		_server_b.connection_count >= 2,
-		"connection_count=%d" % _server_b.connection_count,
-	)
-	_advance(Stage.DONE)
+
+	# Step 3: latch the moment the client observes the close, exactly
+	# once, and check the surfaced message then — but do the final
+	# reconnect-or-not assertion on a wall-clock deadline regardless of
+	# what the client's state has done since, so a later reconnect (or a
+	# later failure to reconnect) cannot make this exit early without
+	# ever running the named assertion.
+	if scenario.latched_at < 0.0:
+		if scenario.client.get_state() != EppClient.State.DISCONNECTED:
+			return
+		scenario.latched_at = now
+		_check(
+			"%s: surfaced message matches describe_close()" % scenario.scenario_name,
+			scenario.client.get_last_message() == scenario.expected_message,
+			"got %s, expected %s" % [scenario.client.get_last_message(), scenario.expected_message],
+		)
+		return
+
+	if scenario.expect_reconnect:
+		# Same reasoning as the no-reconnect branch above, applied in the
+		# other direction: don't just silently wait forever for
+		# connection_count to reach 2 and let a broken run fall through to
+		# the generic stage timeout (weak evidence — proves SOMETHING
+		# broke, not that THIS guard caught THIS regression). Give it a
+		# bounded window and assert by name either way.
+		if scenario.server.connection_count >= 2:
+			_check(
+				"%s: DOES auto-reconnect (a second connection arrived)" % scenario.scenario_name,
+				true,
+			)
+		elif now - scenario.latched_at < RECONNECT_EXPECT_WINDOW_SEC:
+			return  # keep waiting, bounded by this window
+		else:
+			_check(
+				"%s: DOES auto-reconnect (a second connection arrived)" % scenario.scenario_name,
+				false,
+				"connection_count=%d after %.0fs" % [scenario.server.connection_count, RECONNECT_EXPECT_WINDOW_SEC],
+			)
+	else:
+		if now - scenario.latched_at < NO_RECONNECT_WINDOW_SEC:
+			return  # keep waiting out the window, bounded by the stage timeout
+		_check(
+			"%s: does NOT auto-reconnect (still exactly 1 connection after %.0fs)" % [scenario.scenario_name, NO_RECONNECT_WINDOW_SEC],
+			scenario.server.connection_count == 1,
+			"connection_count=%d" % scenario.server.connection_count,
+		)
+		_check(
+			"%s: should_attempt_connect() stays false" % scenario.scenario_name,
+			not scenario.client.should_attempt_connect(now),
+		)
+
+	_advance(next_stage)
