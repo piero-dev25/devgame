@@ -109,3 +109,66 @@ state — no consumer was found outside its own publish site.
 
 Bench scripts remain at
 `/Users/pieroherrera/.claude/jobs/d1eda764/tmp/checkpoint-bench/`.
+
+---
+
+## VERDICT (2026-08-03): we are NOT changing T3's code
+
+Two real projects measured, read-only, on the same machine and the same T3
+build:
+
+|              | tracked at HEAD           | on disk | LFS                         | capture      |
+| ------------ | ------------------------- | ------- | --------------------------- | ------------ |
+| Deepmind     | **227 MB** (49,650 files) | 71 GB   | 100% pointers, zero leakage | **0.3–0.4s** |
+| Rising Tides | **1.2 GB** (11,709 files) | 15 GB   | configured but drifted      | **1.5–1.9s** |
+
+Deepmind ignores 46GB (`Library/` 16G, `AssetLibrary/` 30G) and pointer-izes
+every tracked binary extension present. **0.3% of the project reaches the hash
+pass.** Rising Tides reaches 8%.
+
+Same code. A 4–5× difference in capture cost, entirely from repository
+hygiene.
+
+### What this settles
+
+The cost is real but it is **ours, not theirs**. A fully-disciplined
+`.gitignore` + LFS setup already reduces it to a non-issue, and the owner has
+a working example of that in his own home directory. Patching T3's checkpoint
+path would make a symptom cheaper while the actual cause — assets falling out
+of LFS coverage — kept getting worse.
+
+Owner's ruling, stated three times: _"t3 features are working fine. we dont
+need to change them."_ The measurement supports it.
+
+**No change to `GitVcsDriver.ts` or `CheckpointStore.test.ts`. Tree confirmed
+stock.**
+
+### The real finding: LFS drift on Rising Tides
+
+`.gitattributes` routes png/mp3/jpg/tga/hdr/tif/exr through LFS, but:
+
+- **479 of 579 PNGs are still full blobs** (426 MB) — never backfilled
+- **TGA and HDR have rules and zero migrated files** — the rule has never
+  applied to anything
+- 2 large MP3s leaked through (141 MB)
+- WAV (174 MB) and FBX (134 MB) are not in the rule at all
+
+This is not static. Assets keep landing as full blobs while the config claims
+otherwise, and the project has already grown to 15GB.
+
+### Options, with honest costs — owner's call, his project
+
+1. **`git lfs migrate import`** — converts existing files properly. **Rewrites
+   history**: new commit SHAs, force-push required, every existing clone
+   breaks and must be re-cloned. Disruptive if anyone has work in flight.
+2. **`git lfs migrate import --no-rewrite`** — converts files in a NEW commit
+   without touching history. No force-push, no broken clones. This is the safe
+   middle option and it _does_ reduce tracked bytes at HEAD, which is what
+   capture cost actually depends on.
+3. **Forward-only tracking** — new files get pointers, existing blobs stay in
+   HEAD's tree. Worth knowing: this does **not** reduce capture cost for
+   existing assets, because they are still real blobs in the current tree.
+4. **Nothing.** 1.5–1.9s per capture, twice per turn, on a background worker.
+   Noticeable but not blocking, and it will slowly worsen.
+
+Option 2 is the one worth looking at first.
