@@ -3,207 +3,1260 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DevGame — an agent workbench for game developers</title>
+    <title>DevGame — the agent workbench that can see your engine</title>
     <meta
       name="description"
-      content="DevGame runs coding agents against your game project, and knows what you have selected in Unity, Unreal or Godot. Local-first, open source, your own subscriptions."
+      content="DevGame runs Claude Code, Codex, Cursor, Grok and OpenCode against your game project — and whatever you have selected in Unity, Unreal or Godot is already in the prompt. Local-first, open source, your own subscriptions."
     />
-    <meta property="og:title" content="DevGame" />
+    <link rel="canonical" href="https://devgame.fun/" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="DevGame — the agent workbench that can see your engine" />
     <meta
       property="og:description"
-      content="An agent workbench for game developers. Local-first, open source."
+      content="Select a prefab in Unity. It is already in the prompt. Local-first, open source, bring your own agent subscriptions."
     />
+    <meta property="og:url" content="https://devgame.fun/" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="theme-color" content="#07090C" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+
     <style>
+      /* ---------------------------------------------------------------
+         DevGame — landing page.
+
+         Aesthetic: engine viewport. Near-black editor chrome, a dot-matrix
+         field, and one hot accent used the way an engine uses a selection
+         highlight — sparingly, and only on the thing you have picked.
+         The accent is the app mark's blue, so the site and the icon in the
+         Dock read as obviously the same product.
+      --------------------------------------------------------------- */
+
       :root {
         color-scheme: dark;
-        --bg: #0b0d10;
-        --panel: #14171c;
-        --line: #23272e;
-        --text: #e8eaed;
-        --muted: #9aa3ad;
-        --accent: #7cc4ff;
+
+        --bg: #07090c;
+        --bg-raise: #0d1116;
+        --panel: #10151b;
+        --panel-2: #141a21;
+        --line: #1e252e;
+        --line-bright: #2b343f;
+
+        --text: #eef2f6;
+        --muted: #8d99a6;
+        --dim: #616d7a;
+
+        --accent: #6fb8ff;
+        --accent-hot: #9bd3ff;
+        --live: #5fd39a;
+
+        --max: 1080px;
+        --r: 14px;
+        --ease: cubic-bezier(0.22, 1, 0.36, 1);
       }
-      * {
+
+      *,
+      *::before,
+      *::after {
         box-sizing: border-box;
       }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
       body {
         margin: 0;
         background: var(--bg);
         color: var(--text);
-        font:
-          16px/1.65 ui-sans-serif,
+        font-family:
+          Archivo,
+          ui-sans-serif,
           -apple-system,
-          BlinkMacSystemFont,
-          "Segoe UI",
-          Inter,
           sans-serif;
+        font-size: 16px;
+        line-height: 1.6;
         -webkit-font-smoothing: antialiased;
+        text-rendering: optimizeLegibility;
+        overflow-x: hidden;
       }
+
+      /* The dot matrix. Fixed, so it reads as a field the content moves over,
+         and radially masked so it never competes with type. */
+      body::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background-image: radial-gradient(circle at 1px 1px, #232c36 1px, transparent 0);
+        background-size: 24px 24px;
+        mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 20%, transparent 78%);
+        -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 20%, transparent 78%);
+        opacity: 0.55;
+      }
+
+      /* One cool bloom behind the hero. */
+      body::after {
+        content: "";
+        position: fixed;
+        top: -30vh;
+        left: 50%;
+        width: 120vw;
+        height: 80vh;
+        transform: translateX(-50%);
+        z-index: 0;
+        pointer-events: none;
+        background: radial-gradient(ellipse at center, rgba(43, 127, 212, 0.16), transparent 62%);
+        filter: blur(20px);
+      }
+
       .wrap {
-        max-width: 720px;
+        position: relative;
+        z-index: 1;
+        max-width: var(--max);
         margin: 0 auto;
         padding: 0 24px;
       }
-      header {
-        padding: 88px 0 40px;
-      }
-      h1 {
-        font-size: clamp(2.2rem, 6vw, 3.2rem);
-        line-height: 1.1;
-        margin: 0 0 16px;
-        letter-spacing: -0.02em;
-      }
-      .lede {
-        font-size: 1.15rem;
-        color: var(--muted);
-        margin: 0 0 32px;
-        max-width: 34em;
-      }
-      h2 {
-        font-size: 1.05rem;
-        letter-spacing: 0.02em;
-        text-transform: uppercase;
-        color: var(--muted);
-        margin: 48px 0 12px;
-        font-weight: 600;
-      }
-      p {
-        margin: 0 0 16px;
-      }
+
       a {
         color: var(--accent);
+        text-decoration: none;
       }
-      .row {
+      a:hover {
+        color: var(--accent-hot);
+      }
+
+      code,
+      .mono {
+        font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      /* ---------- entrance ---------- */
+      .rise {
+        opacity: 0;
+        transform: translateY(14px);
+        animation: rise 0.9s var(--ease) forwards;
+      }
+      @keyframes rise {
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+
+      /* ---------- nav ---------- */
+      .nav-shell {
+        position: sticky;
+        top: 16px;
+        z-index: 50;
+        padding: 16px 24px 0;
+      }
+      nav {
+        max-width: var(--max);
+        margin: 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 9px 9px 9px 18px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(13, 17, 22, 0.82);
+        backdrop-filter: blur(14px) saturate(1.4);
+        -webkit-backdrop-filter: blur(14px) saturate(1.4);
+        box-shadow: 0 12px 40px -18px #000;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--text);
+        font-size: 1rem;
+      }
+      .brand svg {
+        display: block;
+      }
+      .nav-links {
+        display: flex;
+        gap: 26px;
+        margin-left: auto;
+        font-size: 0.9rem;
+      }
+      .nav-links a {
+        color: var(--muted);
+        transition: color 0.18s;
+      }
+      .nav-links a:hover {
+        color: var(--text);
+      }
+      .nav-cta {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 9px 17px;
+        border-radius: 999px;
+        background: var(--text);
+        color: #06131f;
+        font-weight: 600;
+        font-size: 0.88rem;
+        white-space: nowrap;
+        transition:
+          transform 0.18s var(--ease),
+          background 0.18s;
+      }
+      .nav-cta:hover {
+        background: #fff;
+        color: #06131f;
+        transform: translateY(-1px);
+      }
+      @media (max-width: 820px) {
+        .nav-links {
+          display: none;
+        }
+        .nav-cta {
+          margin-left: auto;
+        }
+      }
+
+      /* ---------- hero ---------- */
+      header {
+        text-align: center;
+        padding: 84px 0 0;
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        padding: 6px 15px 6px 11px;
+        border: 1px solid var(--line-bright);
+        border-radius: 999px;
+        background: rgba(20, 26, 33, 0.7);
+        font-size: 0.82rem;
+        color: var(--muted);
+        margin-bottom: 30px;
+      }
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--live);
+        box-shadow: 0 0 0 0 rgba(95, 211, 154, 0.55);
+        animation: pulse 2.4s ease-out infinite;
+        flex: none;
+      }
+      @keyframes pulse {
+        70% {
+          box-shadow: 0 0 0 7px rgba(95, 211, 154, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(95, 211, 154, 0);
+        }
+      }
+
+      h1 {
+        margin: 0 auto 22px;
+        max-width: 17ch;
+        font-size: clamp(2.6rem, 6.4vw, 4.6rem);
+        font-weight: 800;
+        line-height: 1.02;
+        letter-spacing: -0.045em;
+        text-wrap: balance;
+      }
+      h1 .hl {
+        color: var(--accent-hot);
+      }
+
+      .lede {
+        margin: 0 auto 34px;
+        max-width: 54ch;
+        font-size: clamp(1rem, 1.5vw, 1.16rem);
+        color: var(--muted);
+      }
+
+      .cta-row {
         display: flex;
         flex-wrap: wrap;
         gap: 12px;
+        justify-content: center;
         align-items: center;
-        margin: 0 0 12px;
       }
       .btn {
-        display: inline-block;
-        padding: 12px 20px;
-        border-radius: 8px;
-        background: var(--accent);
-        color: #06243c;
-        font-weight: 650;
-        text-decoration: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        padding: 14px 24px;
+        border-radius: 11px;
+        font-weight: 600;
+        font-size: 0.97rem;
+        border: 1px solid transparent;
+        transition:
+          transform 0.18s var(--ease),
+          box-shadow 0.18s,
+          background 0.18s,
+          border-color 0.18s;
       }
-      .btn.secondary {
+      .btn-primary {
+        background: var(--text);
+        color: #06131f;
+        box-shadow: 0 14px 34px -16px rgba(155, 211, 255, 0.7);
+      }
+      .btn-primary:hover {
+        background: #fff;
+        color: #06131f;
+        transform: translateY(-2px);
+        box-shadow: 0 18px 42px -14px rgba(155, 211, 255, 0.85);
+      }
+      .btn-ghost {
         background: transparent;
         color: var(--text);
-        border: 1px solid var(--line);
-        font-weight: 500;
+        border-color: var(--line-bright);
       }
-      .note {
-        font-size: 0.92rem;
+      .btn-ghost:hover {
+        color: var(--text);
+        border-color: #3a4653;
+        background: rgba(255, 255, 255, 0.03);
+        transform: translateY(-2px);
+      }
+      .sub-note {
+        margin: 18px 0 0;
+        font-size: 0.85rem;
+        color: var(--dim);
+      }
+      .sub-note a {
+        color: var(--muted);
+        border-bottom: 1px solid var(--line-bright);
+      }
+      .sub-note a:hover {
+        color: var(--text);
+      }
+
+      /* ---------- the demo stage ---------- */
+      .stage-wrap {
+        margin: 62px 0 0;
+      }
+      .stage {
+        --cycle: 10s;
+        display: grid;
+        grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+        gap: 1px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        overflow: hidden;
+        box-shadow: 0 50px 90px -50px #000;
+      }
+      @media (max-width: 720px) {
+        .stage {
+          grid-template-columns: 1fr;
+        }
+      }
+      .pane {
+        background: var(--panel);
+        min-width: 0;
+      }
+      .pane-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 11px 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--bg-raise);
+        font-size: 0.72rem;
+        color: var(--dim);
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        font-weight: 600;
+      }
+      .pane-body {
+        padding: 12px;
+      }
+
+      /* hierarchy rows */
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 7px 10px;
+        border-radius: 7px;
+        font-size: 0.86rem;
+        color: var(--muted);
+        border-left: 2px solid transparent;
+      }
+      .row .glyph {
+        width: 13px;
+        height: 13px;
+        border-radius: 3px;
+        border: 1.5px solid currentColor;
+        opacity: 0.55;
+        flex: none;
+      }
+      .row.indent {
+        margin-left: 16px;
+      }
+      .row.sel-a,
+      .row.sel-b {
+        animation-duration: var(--cycle);
+        animation-iteration-count: infinite;
+        animation-timing-function: steps(1, end);
+      }
+      .row.sel-a {
+        animation-name: selA;
+      }
+      .row.sel-b {
+        animation-name: selB;
+      }
+      @keyframes selA {
+        0%,
+        5% {
+          background: transparent;
+          color: var(--muted);
+          border-left-color: transparent;
+        }
+        6%,
+        45% {
+          background: rgba(43, 127, 212, 0.16);
+          color: var(--accent-hot);
+          border-left-color: var(--accent);
+        }
+        46%,
+        100% {
+          background: transparent;
+          color: var(--muted);
+          border-left-color: transparent;
+        }
+      }
+      @keyframes selB {
+        0%,
+        49% {
+          background: transparent;
+          color: var(--muted);
+          border-left-color: transparent;
+        }
+        50%,
+        90% {
+          background: rgba(43, 127, 212, 0.16);
+          color: var(--accent-hot);
+          border-left-color: var(--accent);
+        }
+        91%,
+        100% {
+          background: transparent;
+          color: var(--muted);
+          border-left-color: transparent;
+        }
+      }
+
+      /* composer */
+      .composer {
+        display: flex;
+        flex-direction: column;
+        min-height: 250px;
+      }
+      .composer-fill {
+        flex: 1;
+        padding: 14px;
+        display: flex;
+        flex-direction: column;
+        justify-content: flex-end;
+        gap: 10px;
+      }
+
+      /* A settled exchange above the live composer, so the panel shows the
+         whole loop: a chip that already travelled, and one about to. */
+      .thread {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        margin-bottom: 4px;
+      }
+      .msg {
+        font-size: 0.82rem;
+        line-height: 1.5;
+        max-width: 92%;
+      }
+      .msg-user {
+        align-self: flex-end;
+        text-align: right;
         color: var(--muted);
       }
-      .card {
-        background: var(--panel);
-        border: 1px solid var(--line);
+      .chip-static {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 9px 3px 7px;
+        margin-bottom: 5px;
+        border-radius: 7px;
+        border: 1px solid rgba(111, 184, 255, 0.22);
+        background: rgba(43, 127, 212, 0.1);
+        color: rgba(155, 211, 255, 0.75);
+        font-size: 0.72rem;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+      .chip-static .glyph {
+        width: 9px;
+        height: 9px;
+        border-radius: 2px;
+        border: 1.5px solid currentColor;
+        flex: none;
+      }
+      .msg-agent {
+        align-self: flex-start;
+        color: var(--dim);
+      }
+      .msg-agent .path {
+        color: var(--accent);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.76rem;
+      }
+      .presence-line {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.7rem;
+        color: var(--dim);
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        font-weight: 600;
+      }
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 7px;
+        min-height: 30px;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 11px 5px 8px;
+        border-radius: 8px;
+        border: 1px solid rgba(111, 184, 255, 0.32);
+        background: rgba(43, 127, 212, 0.14);
+        color: var(--accent-hot);
+        font-size: 0.78rem;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        white-space: nowrap;
+        opacity: 0;
+        transform: translateY(6px) scale(0.96);
+        animation-duration: var(--cycle);
+        animation-iteration-count: infinite;
+        animation-timing-function: var(--ease);
+      }
+      .chip .glyph {
+        width: 11px;
+        height: 11px;
+        border-radius: 2px;
+        border: 1.5px solid currentColor;
+        flex: none;
+      }
+      .chip.a {
+        animation-name: chipA;
+      }
+      .chip.b {
+        animation-name: chipB;
+      }
+      @keyframes chipA {
+        0%,
+        9% {
+          opacity: 0;
+          transform: translateY(6px) scale(0.96);
+        }
+        13%,
+        44% {
+          opacity: 1;
+          transform: none;
+        }
+        48%,
+        100% {
+          opacity: 0;
+          transform: translateY(-4px) scale(0.98);
+        }
+      }
+      @keyframes chipB {
+        0%,
+        52% {
+          opacity: 0;
+          transform: translateY(6px) scale(0.96);
+        }
+        56%,
+        89% {
+          opacity: 1;
+          transform: none;
+        }
+        93%,
+        100% {
+          opacity: 0;
+          transform: translateY(-4px) scale(0.98);
+        }
+      }
+      .input-box {
+        border: 1px solid var(--line-bright);
         border-radius: 10px;
-        padding: 20px 22px;
-        margin: 0 0 16px;
+        background: var(--panel-2);
+        padding: 12px 13px;
+        font-size: 0.88rem;
+        color: var(--dim);
+        display: flex;
+        align-items: center;
       }
-      ul {
-        padding-left: 20px;
-        margin: 0 0 16px;
+      .caret {
+        display: inline-block;
+        width: 1.5px;
+        height: 1.05em;
+        background: var(--accent);
+        margin-left: 3px;
+        animation: blink 1.1s steps(1, end) infinite;
       }
-      li {
-        margin: 0 0 8px;
+      @keyframes blink {
+        50% {
+          opacity: 0;
+        }
       }
-      code {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 5px;
-        padding: 2px 6px;
-        font-size: 0.9em;
-      }
-      footer {
-        margin: 72px 0 64px;
-        padding-top: 28px;
+      .composer-foot {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 9px 14px;
         border-top: 1px solid var(--line);
+        background: var(--bg-raise);
+        font-size: 0.74rem;
+        color: var(--dim);
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+      }
+      .badge-live {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--live);
+      }
+      .push {
+        margin-left: auto;
+      }
+
+      .stage-caption {
+        margin: 16px 0 0;
+        text-align: center;
+        font-size: 0.85rem;
+        color: var(--dim);
+      }
+
+      /* ---------- sections ---------- */
+      section {
+        padding: 96px 0 0;
+      }
+      .sec-label {
+        display: block;
+        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-size: 0.73rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--accent);
+        margin-bottom: 14px;
+      }
+      h2 {
+        margin: 0 0 14px;
+        font-size: clamp(1.75rem, 3.4vw, 2.5rem);
+        font-weight: 700;
+        letter-spacing: -0.035em;
+        line-height: 1.08;
+      }
+      .sec-lede {
+        margin: 0 0 34px;
+        max-width: 58ch;
         color: var(--muted);
-        font-size: 0.92rem;
+      }
+
+      .grid {
+        display: grid;
+        gap: 1px;
+        background: var(--line);
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        overflow: hidden;
+      }
+      .grid-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .grid-5 {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+      }
+      @media (max-width: 880px) {
+        .grid-5 {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 660px) {
+        .grid-3,
+        .grid-5 {
+          grid-template-columns: 1fr;
+        }
+      }
+      .cell {
+        background: var(--panel);
+        padding: 22px 20px;
+        transition: background 0.22s;
+      }
+      .cell:hover {
+        background: var(--panel-2);
+      }
+      .cell h3 {
+        margin: 0 0 8px;
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: -0.01em;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+      }
+      .cell p {
+        margin: 0;
+        font-size: 0.89rem;
+        color: var(--muted);
+      }
+      .cell .cmd {
+        display: block;
+        margin-top: 10px;
+        font-size: 0.76rem;
+        color: var(--dim);
+      }
+      .mark {
+        width: 24px;
+        height: 24px;
+        border-radius: 7px;
+        border: 1px solid var(--line-bright);
+        background: var(--bg-raise);
+        display: grid;
+        place-items: center;
+        flex: none;
+        color: var(--accent);
+      }
+
+      .checks {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px 28px;
+        margin: 24px 0 0;
+        padding: 0;
+        list-style: none;
+        font-size: 0.88rem;
+        color: var(--muted);
+      }
+      .checks li {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .checks svg {
+        color: var(--live);
+        flex: none;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 48px;
+        align-items: center;
+      }
+      @media (max-width: 820px) {
+        .split {
+          grid-template-columns: 1fr;
+          gap: 28px;
+        }
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: var(--r);
+        background: var(--panel);
+        padding: 26px;
+      }
+      .panel p {
+        color: var(--muted);
+      }
+      .panel p:last-child {
+        margin-bottom: 0;
+      }
+
+      /* ---------- attribution ---------- */
+      .attrib {
+        border: 1px solid var(--line-bright);
+        border-radius: var(--r);
+        background: linear-gradient(180deg, rgba(43, 127, 212, 0.09), rgba(43, 127, 212, 0.02));
+        padding: 34px 32px;
+      }
+      .attrib h2 {
+        font-size: clamp(1.4rem, 2.6vw, 1.9rem);
+        max-width: 34ch;
+        text-wrap: balance;
+      }
+      .nb {
+        white-space: nowrap;
+      }
+      .attrib p {
+        color: #c3ccd6;
+        max-width: 66ch;
+      }
+      .attrib strong {
+        color: var(--text);
+      }
+
+      footer {
+        margin: 96px 0 0;
+        border-top: 1px solid var(--line);
+        padding: 30px 0 70px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 14px 30px;
+        align-items: center;
+        font-size: 0.86rem;
+        color: var(--dim);
       }
       footer a {
         color: var(--muted);
       }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 0.001ms !important;
+          animation-iteration-count: 1 !important;
+          transition-duration: 0.001ms !important;
+        }
+        .rise {
+          opacity: 1;
+          transform: none;
+        }
+        /* Hold the demo on its first selection rather than blanking it. */
+        .chip.a {
+          opacity: 1;
+          transform: none;
+        }
+        .row.sel-a {
+          background: rgba(43, 127, 212, 0.16);
+          color: var(--accent-hot);
+          border-left-color: var(--accent);
+        }
+      }
     </style>
   </head>
+
   <body>
+    <div class="nav-shell">
+      <nav class="rise" style="animation-delay: 0.05s">
+        <a class="brand" href="/">
+          <svg width="24" height="24" viewBox="0 0 1024 1024" aria-hidden="true">
+            <defs>
+              <linearGradient id="nm" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#9BD3FF" />
+                <stop offset="100%" stop-color="#4FA6EE" />
+              </linearGradient>
+            </defs>
+            <rect width="1024" height="1024" rx="228" fill="#12171E" />
+            <path
+              d="M 372 286 L 654 512 L 372 738"
+              fill="none"
+              stroke="url(#nm)"
+              stroke-width="118"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+          </svg>
+          DevGame
+        </a>
+        <div class="nav-links">
+          <a href="#presence">Editor presence</a>
+          <a href="#agents">Your agents</a>
+          <a href="#local">Local-first</a>
+          <a href="https://github.com/piero-dev25/devgame">GitHub</a>
+        </div>
+        <a class="nav-cta" href="https://github.com/piero-dev25/devgame/releases/latest">
+          Download for macOS
+        </a>
+      </nav>
+    </div>
+
     <div class="wrap">
       <header>
-        <h1>DevGame</h1>
-        <p class="lede">
-          An agent workbench for game developers. Run coding agents against your project, with the
-          objects you have selected in Unity, Unreal or Godot already in the chat box before you
-          type.
+        <span class="eyebrow rise" style="animation-delay: 0.12s">
+          <span class="dot"></span> Unity · Unreal · Godot
+        </span>
+
+        <h1 class="rise" style="animation-delay: 0.18s">
+          Your engine selection is <span class="hl">already in the prompt</span>.
+        </h1>
+
+        <p class="lede rise" style="animation-delay: 0.26s">
+          DevGame runs coding agents against your game project. Click a prefab in Unity, an actor in
+          Unreal, a node in Godot — it is in the chat box before you finish the sentence. No copying
+          paths, no describing what you mean.
         </p>
 
-        <div class="row">
-          <a class="btn" href="https://github.com/piero-dev25/devgame" id="download">Get DevGame</a>
-          <a class="btn secondary" href="https://github.com/piero-dev25/devgame"
-            >Source on GitHub</a
-          >
+        <div class="cta-row rise" style="animation-delay: 0.34s">
+          <a class="btn btn-primary" href="https://github.com/piero-dev25/devgame/releases/latest">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M10.9 8.5c0-1.6 1.3-2.4 1.4-2.4-.8-1.1-2-1.3-2.4-1.3-1-.1-2 .6-2.5.6s-1.3-.6-2.1-.6c-1.1 0-2.1.6-2.7 1.6-1.1 2-.3 4.9.8 6.5.5.8 1.2 1.7 2 1.6.8 0 1.1-.5 2.1-.5s1.2.5 2.1.5c.9 0 1.4-.8 1.9-1.6.6-.9.9-1.8.9-1.8s-1.6-.6-1.6-2.6zM9.3 3.6c.4-.5.7-1.3.6-2-.6 0-1.4.4-1.9 1-.4.5-.7 1.3-.6 2 .7.1 1.4-.4 1.9-1z"
+              />
+            </svg>
+            Download for macOS
+          </a>
+          <a class="btn btn-ghost" href="https://github.com/piero-dev25/devgame">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path
+                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
+              />
+            </svg>
+            Read the source
+          </a>
         </div>
-        <p class="note" id="download-note">
-          macOS builds are being prepared. The source is available now and builds from a clone.
+
+        <p class="sub-note rise" style="animation-delay: 0.42s">
+          Free and MIT-licensed. There are iOS and Android clients too — they pair to the machine
+          your project is on.
         </p>
       </header>
 
-      <h2>Editor presence</h2>
-      <p>
-        Select a prefab in Unity, a node in Godot, an actor in Unreal — it turns up as a chip in the
-        composer straight away, and travels with the message you send. No copying paths, no
-        describing what you mean.
-      </p>
-      <p class="note">
-        Plugins are included for Unity, Unreal and Godot. Unreal ships as an Editor Python plugin
-        and Godot as a GDScript addon, so neither needs a compile toolchain to install.
-      </p>
+      <!-- The product, demonstrated rather than described. -->
+      <div class="stage-wrap rise" style="animation-delay: 0.5s">
+        <div class="stage">
+          <div class="pane">
+            <div class="pane-head">Hierarchy — Unity</div>
+            <div class="pane-body">
+              <div class="row"><span class="glyph"></span> Main Camera</div>
+              <div class="row"><span class="glyph"></span> Directional Light</div>
+              <div class="row"><span class="glyph"></span> Level_01</div>
+              <div class="row indent sel-a"><span class="glyph"></span> PlayerRig</div>
+              <div class="row indent"><span class="glyph"></span> Terrain</div>
+              <div class="row indent sel-b"><span class="glyph"></span> EnemySpawner</div>
+              <div class="row indent"><span class="glyph"></span> UI_Canvas</div>
+            </div>
+          </div>
 
-      <h2>It runs on your machine</h2>
-      <div class="card">
-        <p style="margin-bottom: 12px">
-          DevGame drives the agents you already pay for — Claude Code, Codex, Cursor, Grok, OpenCode
-          — using your own subscriptions. The backend runs locally, on your project, on your
-          machine.
-        </p>
-        <p class="note" style="margin: 0">
-          You can use DevGame from a browser or a phone, but that is a client pairing to the backend
-          on your own computer. There is no hosted version that runs your project for you, and your
-          code is not uploaded anywhere.
+          <div class="pane composer">
+            <div class="pane-head">Composer — DevGame</div>
+            <div class="composer-fill">
+              <div class="thread">
+                <div class="msg msg-user">
+                  <span class="chip-static"><span class="glyph"></span>Motor.cs</span><br />
+                  Where does the jump impulse get applied?
+                </div>
+                <div class="msg msg-agent">
+                  In <span class="path">Motor.cs:142</span> — it runs on the fixed step, so a
+                  frame-rate spike swallows it.
+                </div>
+              </div>
+              <div class="presence-line"><span class="dot"></span> Editor presence</div>
+              <div class="chips">
+                <span class="chip a"><span class="glyph"></span>PlayerRig.prefab</span>
+                <span class="chip b"><span class="glyph"></span>EnemySpawner</span>
+              </div>
+              <div class="input-box">
+                Why does this stop firing after a scene reload?<span class="caret"></span>
+              </div>
+            </div>
+            <div class="composer-foot">
+              <span class="badge-live"><span class="dot"></span>connected</span>
+              <span>·</span>
+              <span>claude&nbsp;code</span>
+              <span class="push">local checkout</span>
+            </div>
+          </div>
+        </div>
+        <p class="stage-caption">
+          The selection travels with the message. The agent gets the object, not a description of
+          it.
         </p>
       </div>
 
-      <h2>Open source</h2>
-      <p>
-        DevGame is MIT-licensed and developed in the open. If it ever goes a direction you dislike,
-        you have everything you need to fork it.
-      </p>
-      <ul>
-        <li><a href="https://github.com/piero-dev25/devgame">Source code</a></li>
-        <li><a href="https://github.com/piero-dev25/devgame/releases">Releases</a></li>
-      </ul>
+      <!-- ENGINES -->
+      <section id="presence">
+        <span class="sec-label">Editor presence</span>
+        <h2>Three engines, no compiler.</h2>
+        <p class="sec-lede">
+          Each plugin is a small editor-only add-on that streams your current selection over a local
+          WebSocket. Nothing ships in a player build, and nothing needs a compile toolchain to
+          install.
+        </p>
+
+        <div class="grid grid-3">
+          <div class="cell">
+            <h3>
+              <span class="mark">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                >
+                  <path d="M6 1l4.4 2.5v5L6 11 1.6 8.5v-5L6 1z" />
+                </svg>
+              </span>
+              Unity
+            </h3>
+            <p>A UPM package. Survives domain reloads and reconnects on its own.</p>
+            <code class="cmd">com.ironmind.editor-presence</code>
+          </div>
+          <div class="cell">
+            <h3>
+              <span class="mark">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                >
+                  <circle cx="6" cy="6" r="4.6" />
+                  <path d="M6 3.1v5.8" />
+                </svg>
+              </span>
+              Unreal
+            </h3>
+            <p>An Editor Python plugin. Content-only, so a Blueprint project is fine.</p>
+            <code class="cmd">EditorPresence.uplugin</code>
+          </div>
+          <div class="cell">
+            <h3>
+              <span class="mark">
+                <svg
+                  width="12"
+                  height="12"
+                  viewBox="0 0 12 12"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.4"
+                >
+                  <rect x="1.5" y="2.4" width="9" height="7.2" rx="1.6" />
+                </svg>
+              </span>
+              Godot
+            </h3>
+            <p>A GDScript addon. Drop it in <code>addons/</code> and tick it on.</p>
+            <code class="cmd">addons/editor_presence</code>
+          </div>
+        </div>
+
+        <ul class="checks">
+          <li>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M3 8.5l3.2 3.2L13 5" />
+            </svg>
+            Editor-only — never in a shipped build
+          </li>
+          <li>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M3 8.5l3.2 3.2L13 5" />
+            </svg>
+            Reconnects after a domain reload
+          </li>
+          <li>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M3 8.5l3.2 3.2L13 5" />
+            </svg>
+            Multi-select, capped and truncated safely
+          </li>
+        </ul>
+      </section>
+
+      <!-- AGENTS -->
+      <section id="agents">
+        <span class="sec-label">Bring your own agents</span>
+        <h2>It drives the subscriptions you already pay for.</h2>
+        <p class="sec-lede">
+          DevGame does not resell tokens and has no quota of its own. Log into the harnesses you
+          already use, and orchestrate them from one surface.
+        </p>
+
+        <div class="grid grid-5">
+          <div class="cell">
+            <h3>Claude Code</h3>
+            <code class="cmd">claude</code>
+          </div>
+          <div class="cell">
+            <h3>Codex</h3>
+            <code class="cmd">codex</code>
+          </div>
+          <div class="cell">
+            <h3>Cursor</h3>
+            <code class="cmd">cursor-agent</code>
+          </div>
+          <div class="cell">
+            <h3>Grok</h3>
+            <code class="cmd">grok</code>
+          </div>
+          <div class="cell">
+            <h3>OpenCode</h3>
+            <code class="cmd">opencode</code>
+          </div>
+        </div>
+
+        <ul class="checks">
+          <li>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M3 8.5l3.2 3.2L13 5" />
+            </svg>
+            No keys resold, no quota caps of ours
+          </li>
+          <li>
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.2"
+            >
+              <path d="M3 8.5l3.2 3.2L13 5" />
+            </svg>
+            Switch models mid-thread
+          </li>
+        </ul>
+      </section>
+
+      <!-- LOCAL -->
+      <section id="local">
+        <div class="split">
+          <div>
+            <span class="sec-label">Local-first</span>
+            <h2>Your project never leaves your machine.</h2>
+            <p class="sec-lede" style="margin-bottom: 0">
+              The backend runs on your computer, against your checkout. The desktop app, the browser
+              and the phone clients are all just clients pairing to it over your own network.
+            </p>
+            <ul class="checks">
+              <li>
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                >
+                  <path d="M3 8.5l3.2 3.2L13 5" />
+                </svg>
+                No code upload
+              </li>
+              <li>
+                <svg
+                  width="13"
+                  height="13"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.2"
+                >
+                  <path d="M3 8.5l3.2 3.2L13 5" />
+                </svg>
+                Device pairing, not an account for your source
+              </li>
+            </ul>
+          </div>
+          <div class="panel">
+            <p style="margin-bottom: 14px">
+              <strong style="color: var(--text)">To be straight about it:</strong>
+              there is no hosted version that runs your project for you. When you open DevGame in a
+              browser or on a phone, you are talking to the backend on your own computer.
+            </p>
+            <p style="font-size: 0.9rem">
+              That is the design rather than a gap we intend to close. It is also why there is no
+              sign-up wall between you and the source.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <!-- OPEN SOURCE -->
+      <section>
+        <span class="sec-label">Open source</span>
+        <h2>MIT, and developed in the open.</h2>
+        <p class="sec-lede">
+          If DevGame ever goes a direction you dislike, you already have everything you need to fork
+          it — which is exactly how DevGame itself came to exist.
+        </p>
+        <div class="cta-row" style="justify-content: flex-start">
+          <a class="btn btn-ghost" href="https://github.com/piero-dev25/devgame">Source code</a>
+          <a class="btn btn-ghost" href="https://github.com/piero-dev25/devgame/releases">
+            Releases
+          </a>
+        </div>
+      </section>
+
+      <!-- ATTRIBUTION -->
+      <section>
+        <div class="attrib">
+          <span class="sec-label">Where this came from</span>
+          <h2>
+            DevGame is a fork of <span class="nb">T3 Code</span>, built by
+            <span class="nb">T3 Tools, Inc.</span>
+          </h2>
+          <p>
+            <strong>
+              Almost everything that makes this application work was written by them.
+            </strong>
+            The agent harness, the terminal, checkpointing, source control and all four client apps
+            are theirs. We did not build an agent workbench and add a few game-development features
+            to it — we took a finished, well-engineered product and specialised it.
+          </p>
+          <p>
+            If you want the general-purpose harness rather than the game-development one, use
+            <a href="https://github.com/pingdotgg/t3code">T3 Code</a>. It is the better tool for
+            that job, and it is where this came from.
+          </p>
+          <p style="margin-bottom: 0">
+            <a href="https://github.com/piero-dev25/devgame/blob/main/ATTRIBUTION.md">
+              Read the full attribution →
+            </a>
+          </p>
+        </div>
+      </section>
 
       <footer>
-        <p>
-          <strong
-            >DevGame is a fork of <a href="https://github.com/pingdotgg/t3code">T3 Code</a>, built
-            by T3 Tools, Inc.</strong
-          >
-          Almost everything that makes this application work was written by them — the agent
-          harness, the terminal, checkpointing, source control and all four client apps. We
-          specialised it for game development; we did not build it.
-        </p>
-        <p>
-          If you want the general-purpose agent harness rather than the game-development one, use
-          <a href="https://github.com/pingdotgg/t3code">T3 Code</a> — it is the better tool for that
-          job and it is where this came from.
-        </p>
-        <p>DevGame is made by Ironmind Studios Inc. MIT licensed.</p>
+        <span>DevGame — made by Ironmind Studios Inc.</span>
+        <a href="https://github.com/piero-dev25/devgame">GitHub</a>
+        <a href="https://github.com/pingdotgg/t3code">Upstream: T3 Code</a>
+        <span class="mono" style="margin-left: auto; font-size: 0.78rem">MIT licensed</span>
       </footer>
     </div>
   </body>
