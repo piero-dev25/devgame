@@ -1,4 +1,30 @@
-# OPEN: the app cannot complete connection setup with its own environment
+# STILL OPEN: the app cannot complete connection setup with its own environment
+
+> **Update 2026-08-03, after the dev-proxy fix (`e8c02bfbd`).**
+>
+> A fresh critic found that `/editor-presence` was missing from
+> `DEV_PROXIED_PATH_PREFIXES`, so vite accepted the upgrade and never answered
+> it. The proposed causal chain was: hung presence sockets accumulate → Chrome's
+> per-profile pending-connection limit is exhausted → the app's own `/ws` is
+> starved → this banner. The critic measured the starvation directly and was
+> explicit that "fixing the prefix fully fixes the environment connection" was
+> **not** proven.
+>
+> **It is now disproven.** With the fix in, a single tab, and no other app tab
+> open:
+>
+> - the presence chip connects and renders reliably — that half is fixed and
+>   verified repeatedly;
+> - **this banner still appears.**
+>
+> So the missing prefix was a real bug worth fixing on its own merits, and the
+> presence feature really was creating hung sockets — but it is not the cause of
+> this failure. Everything below still stands, and the open question is
+> unchanged: the app makes two `GET /api/auth/session` calls, both 200, and then
+> never reaches ticket-minting or a socket.
+>
+> One hypothesis this update ADDS to the eliminated list: connection-pool
+> starvation by presence sockets.
 
 The one thing standing between editor presence and being visibly usable. The
 chips render and the indicator shows "Editor presence: connecting…", but they
