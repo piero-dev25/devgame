@@ -547,6 +547,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (thirdPartySessionForPopupPolicy === null) {
       return { kind: "denyOnly" };
     }
+    // NOT third-party — carved out onto the original, unconditional
+    // loadInPanel behavior. Record precisely why: this mechanism (deny +
+    // loadURL bypassing will-navigate) applies IDENTICALLY to a preview
+    // guest — nothing about it is third-party-specific. The carve-out
+    // exists only because preview is assumed trusted (the user's own dev
+    // server), an assumption inherited from G3's own scoping rather than
+    // tested here. That assumption is under separate investigation
+    // (whether preview's contextIsolation=false plus the picker preload
+    // leaks anything privileged onto a page that can itself load
+    // third-party scripts/CDN embeds/remote assets). If it resolves badly,
+    // this carve-out needs revisiting — widening it is a scope decision
+    // for whoever owns that finding, not something to do preemptively here.
     if (wc.session !== thirdPartySessionForPopupPolicy) {
       return { kind: "loadInPanel" };
     }
