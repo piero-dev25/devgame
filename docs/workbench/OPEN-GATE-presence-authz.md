@@ -1,8 +1,11 @@
-# OPEN GATE — presence has one flat trust level
+# OPEN GATE — presence has no workspace scoping
 
-**This must be closed before editor presence is enabled for anyone but the
-developer running it locally.** It is a deliberate step-1 scope call, recorded
-here so it cannot ship by being forgotten.
+**`workspace.root` scoping must be closed before editor presence is enabled
+for anyone but the developer running it locally.** Per-role scope enforcement
+(the other half of this gate) has since closed — see "What has since closed"
+below — but this document stays open, because the remaining hole is still
+real and this is the artifact someone reads to decide whether the route may
+be exposed.
 
 ## What was measured
 
@@ -17,40 +20,85 @@ weak subscriber  opened=true  frames=1   <- read ALL presence, including
 weak publisher   opened=true             <- and injected a selection
 ```
 
-So **every token this server has ever issued, at any scope, is a full
-read-and-write credential on the presence plane.** The route authenticates but
-does not authorize.
+So, at the time this was measured, **every token this server had ever
+issued, at any scope, was a full read-and-write credential on the presence
+plane.** The route authenticated but did not authorize.
 
-`EditorPresenceRoute.ts`'s own header comment says this plainly — it enforces
-no per-role scopes and no `workspace.root` matching, because
-`RPC_REQUIRED_SCOPES` covers RPC methods only and a raw upgrade route gets no
-compile-time scope guarantee. The comment is accurate. The gap is total rather
-than partial, which the comment does not convey.
+`EditorPresenceRoute.ts`'s header comment described this plainly at the
+time — it enforced no per-role scopes and no `workspace.root` matching. The
+per-role half is now fixed; the module doc's SECURITY NOTE describes the
+current state, including exactly how each role's scope failure is signalled.
 
-## Why it matters more than it first looks
+## What has since closed
 
-Presence is not decorative. It tells the agent what the user is looking at, and
-that goes into the prompt. A caller who can write presence can influence what
-the agent believes the user selected; a caller who can read it learns project
-paths and workspace roots.
+Per-role scopes are enforced: `AuthOrchestrationReadScope` for
+`role=subscriber`, `AuthOrchestrationOperateScope` for `role=publisher`,
+checked after authentication and before any registry mutation — a rejected
+connection (bad credential OR insufficient scope) never allocates a
+connection token, registers a publisher, or adds a subscriber. Both roles'
+scope rejections are mutation-proven: `EditorPresenceRoute.test.ts` covers a
+correctly-scoped session on each role connecting successfully, an
+incorrectly-scoped session on each role being refused, and — separately — a
+rejected publisher's `hello` frame never reaching the registry even when it
+races the server's own rejecting close.
 
-The related hijack — any caller claiming an existing `session.id` and taking
-over a real editor's identity — **has since been fixed**: the superseded
-connection is now closed with code 4402 instead of being silently muted. But
-that fix stops the takeover being _silent_; it does not stop an unauthorized
-caller from connecting in the first place. That is this gate.
+Re-ran the exact weak-token probe above against a `review:write`-only token
+today, extended to also capture every message frame received (not just
+whether the socket opened) and to check the registry state a properly-scoped
+observer sees after the weak publisher's `hello`:
 
-## What closing it requires
+```
+weak token scopes: [ 'review:write' ]
+weak subscriber  opened=true  frames=0  closeCode=4401  closeReason=insufficient_scope: subscriber requires orchestration:read
+weak publisher   opened=true  closeCode=4401  closeReason=insufficient_scope: publisher requires orchestration:operate
+registry state after weak publisher's hello: editors=[]
+```
 
-- Per-role scopes: `AuthOrchestrationReadScope` for `role=subscriber`,
-  `AuthOrchestrationOperateScope` for `role=publisher`, checked after auth and
-  before any registry mutation.
-- `workspace.root` scoping, so a subscriber sees only presence for workspaces
-  it is entitled to rather than every editor on the machine.
-- A test per rule, mutation-proven — a scope check with no test that fails when
-  it is removed is not a scope check.
+Both upgrades still complete (by design — see the AUTH ORDERING NOTE), but
+the publisher is closed immediately with code 4401 before it can register
+anything (`editors=[]` confirms no other client ever saw it), and the
+subscriber is closed the same way having received zero frames (`frames=0`)
+— it is never added to the fan-out list, so it neither reads nor writes any
+presence data. This is asserted, not just measured once by hand:
+`EditorPresenceRoute.test.ts`'s subscriber scope-rejection test collects
+every `message` frame the socket receives and asserts the array is empty —
+specifically so a regression that registered the subscriber before checking
+its scope (the exact shape that would leak a real frame the way the ORIGINAL
+weak-token probe did) fails loudly instead of passing on close-code alone.
+
+The related session-hijack fix (any caller claiming an existing `session.id`
+and taking over a real editor's identity, closed with code 4402 instead of
+being silently muted) is unrelated to this gate and was already in place
+before the scope work above.
+
+## What is still open
+
+- **`workspace.root` scoping.** A session with the right role-scope can see
+  (subscriber) or publish as (publisher) presence for **every** workspace on
+  the machine, not just its own — `AuthOrchestrationReadScope` /
+  `AuthOrchestrationOperateScope` are per-role, not per-workspace. This is
+  the actual remaining gate.
+- **Subscriber credential-rejection visibility.** A separate, lower-severity
+  item, tracked independently: a subscriber's pre-upgrade HTTP 401 for a
+  missing/invalid credential is not actually visible to a raw browser
+  `WebSocket` (a WS handshake failure exposes no status code to JS, by
+  spec), so the web client currently cannot distinguish "your token is bad,
+  stop retrying" from "the server is unreachable, keep retrying" and
+  defaults to the latter. Deliberately NOT closed by the scope-enforcement
+  work above — that work's own subscriber SCOPE rejection was specifically
+  built to avoid landing in this same blind spot (see the module doc's
+  SECURITY NOTE for why it closes post-upgrade instead), but the
+  pre-existing CREDENTIAL path was left alone rather than restructured
+  as a side effect.
+- A test per rule, mutation-proven — a scope check with no test that fails
+  when it is removed is not a scope check. This standard is met for the
+  per-role scope work; it still needs to be met for `workspace.root`
+  scoping once that lands.
 
 ## Until then
 
 Local single-user development only. Do not expose this route over a tunnel, a
-relay, or a LAN binding, and do not enable it for a multi-user environment.
+relay, or a LAN binding, and do not enable it for a multi-user environment —
+a caller who correctly holds a read or operate scope, but for a DIFFERENT
+project, can still see or publish presence for a workspace that isn't
+theirs.

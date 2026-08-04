@@ -8,35 +8,78 @@
  * no `packages/contracts` change. See
  * docs/workbench/spec-editor-presence.md for why.
  *
- * SECURITY NOTE (step 1 scope): both roles authenticate via the existing
+ * SECURITY NOTE: both roles authenticate via the existing
  * `EnvironmentAuth.authenticateWebSocketUpgrade` (bearer token or wsTicket),
- * same as every other connection to this server. What this route does
- * *not* yet do is enforce per-role scopes (`AuthOrchestrationReadScope` for
- * subscriber, `AuthOrchestrationOperateScope` for publisher) or
- * `workspace.root` matching against a thread's cwd — `RPC_REQUIRED_SCOPES`
- * (`../auth/RpcAuthorization.ts`) covers RPC methods only, so a raw upgrade
- * route gets no compile-time scope guarantee. That is deliberately step 3's
- * job ("Scope check and workspace scoping — close the two real holes step 1
- * opens"), not step 1's. Any authenticated session can see presence today.
+ * same as every other connection to this server, and now also enforce
+ * per-role scopes — `AuthOrchestrationReadScope` for subscriber,
+ * `AuthOrchestrationOperateScope` for publisher — reusing the exact scope
+ * vocabulary `RPC_REQUIRED_SCOPES` (`../auth/RpcAuthorization.ts`) uses for
+ * RPC methods, not a new scheme. This route is a raw upgrade outside
+ * `WsRpcGroup` / `WS_METHODS`, so it gets no compile-time coverage from
+ * `RPC_REQUIRED_SCOPES` — the checks below are this route's own hand-written
+ * equivalent.
  *
- * AUTH ORDERING NOTE: the two roles authenticate in a different order
- * relative to the WebSocket upgrade, and that split is deliberate rather
- * than an inconsistency. Subscribers are browsers, so an HTTP 401 refusal
- * before the upgrade is perfectly visible and they authenticate first, same
- * as every other connection to this server. Publishers are engine plugins
- * (Unity, Godot, Unreal); a refused upgrade is indistinguishable from
- * "nothing is listening" to them, because the engine only logs the real
- * refusal reason natively, where no script can read it — measured against a
- * real Godot client, see docs/workbench/godot-probe-findings.md. So the
- * publisher upgrade is accepted unconditionally and authentication happens
- * from inside the publisher's read loop, rejecting on failure with an
- * application close code (>= 4000) and a human-readable reason that the
+ * Both roles' SCOPE check — deliberately UNLIKE either role's CREDENTIAL
+ * check, see the AUTH ORDERING NOTE below — is enforced the SAME way:
+ * accept the upgrade, then close post-upgrade with
+ * `EDITOR_PRESENCE_CLOSE_CODE.invalidCredential` (4401), the SAME code as a
+ * bad token, not a new one, because retrying with a valid-but-unscoped
+ * token can't self-heal any more than retrying with a bad one can. This
+ * ordering choice is load-bearing, not cosmetic: a WebSocket close code
+ * (unlike an HTTP status on a failed handshake) is something a raw browser
+ * `WebSocket` can actually observe. Rejecting a subscriber's scope failure
+ * pre-upgrade (an HTTP 403) was tried first and reverted — it is the
+ * difference between a rejection the client can act on and one that
+ * degrades into "server unreachable," retried forever with a fresh ws
+ * ticket minted on every attempt: a request storm, not just a socket retry.
+ * This choice has a cost worth disclosing the same way the publisher's own
+ * ordering choice does (see the AUTH ORDERING NOTE below): an
+ * authenticated-but-unscoped subscriber now causes a REAL upgrade — a held
+ * socket and a live fiber — where it previously got a cheap pre-upgrade
+ * 403. `EditorPresenceRegistry`'s `MAX_SUBSCRIBERS` cap only counts
+ * REGISTERED subscribers (`addSubscriber` runs strictly after the scope
+ * check passes — see `runSubscriberConnection` below), so a stream of
+ * valid-but-unscoped connections is uncapped. Not a hole on its own — it
+ * still requires a genuine, authenticated token — but the same class of
+ * widening the publisher path already discloses, not a new one.
+ *
+ * Still NOT done: `workspace.root` matching against a thread's cwd. That
+ * remains a real hole, deliberately out of scope for this pass — any
+ * session with the right role-scope can see (subscriber) or publish as
+ * (publisher) presence for every workspace, not just its own. See
+ * docs/workbench/OPEN-GATE-presence-authz.md for the full gate history.
+ *
+ * AUTH ORDERING NOTE: the two roles' CREDENTIAL checks run in a different
+ * order relative to the WebSocket upgrade — deliberate, though the two
+ * reasons are not symmetric, which is worth being honest about rather than
+ * implying one tidy justification covers both. Publishers are engine
+ * plugins (Unity, Godot, Unreal); a refused upgrade is indistinguishable
+ * from "nothing is listening" to them, because the engine only logs the
+ * real refusal reason natively, where no script can read it — measured
+ * against a real Godot client, see docs/workbench/godot-probe-findings.md.
+ * So the publisher upgrade is accepted unconditionally and authentication
+ * happens from inside the publisher's read loop, rejecting on failure with
+ * an application close code (>= 4000) and a human-readable reason the
  * engine *can* see. This slightly widens the pre-auth surface for
  * publishers (an unauthenticated caller can now cause a real upgrade), but
  * rejection is immediate and never allocates a connection token, registers
  * a publisher, or otherwise touches registry state before authentication
- * succeeds — see `runPublisherConnection` below.
+ * succeeds — see `runPublisherConnection` below. Subscribers are browsers,
+ * and their credential check runs BEFORE the upgrade, matching every other
+ * authenticated endpoint on this server — but NOT because the resulting
+ * HTTP 401 is actually visible
+ * to the browser's own `WebSocket` the way a publisher's close code is
+ * visible to an engine: it is not. A raw WS handshake failure exposes no
+ * status code or reason to JS, by spec — the exact blind spot the publisher
+ * path exists to avoid. That gap is real and pre-existing; it is NOT fixed
+ * here, because fixing it changes the subscriber's credential-rejection
+ * SHAPE (pre-upgrade HTTP vs. post-upgrade close), and this pass only had
+ * to close the SCOPE hole — see the SECURITY NOTE above, whose post-upgrade
+ * close deliberately does NOT reuse this pre-upgrade shape for the new
+ * scope check, precisely so the scope check doesn't widen this same blind
+ * spot.
  */
+import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -89,11 +132,22 @@ function readRole(request: HttpServerRequest.HttpServerRequest): EditorPresenceR
   return role === "publisher" || role === "subscriber" ? role : null;
 }
 
-const runPublisherConnection = (
+/**
+ * Exported ONLY so `EditorPresenceRoute.test.ts` can drive it directly with
+ * a fake `Socket` for a deterministic proof of the `connectionToken`
+ * invariant (see the test file's "rejected publishers never register"
+ * suite) — real-WebSocket timing cannot reliably win that race in this
+ * runtime (a review pass's own suggested reproduction was tried against a
+ * deliberately reintroduced bug and did not reproduce; see the test file
+ * for the full investigation), so the invariant is proven by controlling
+ * message-handler invocation order directly instead of racing real network
+ * I/O. Every other caller should keep going through `editorPresenceRouteLayer`.
+ */
+export const runPublisherConnection = (
   socket: Socket.Socket,
   registry: EditorPresenceRegistry.EditorPresenceRegistry["Service"],
   authenticate: Effect.Effect<
-    unknown,
+    EnvironmentAuth.AuthenticatedSession,
     EnvironmentAuth.ServerAuthCredentialError | EnvironmentAuth.ServerAuthInternalError
   >,
 ) =>
@@ -197,7 +251,26 @@ const runPublisherConnection = (
           // authentication, and the rejecting close write on failure, both
           // have to happen from inside `onOpen` rather than before
           // `runString` is called.
-          onOpen: authenticate.pipe(
+          onOpen: Effect.gen(function* () {
+            const session = yield* authenticate;
+            // Scope check, not just authentication — see the module doc's
+            // SECURITY NOTE. A publisher is about to be able to cause real
+            // engine side effects, so it needs the operate-level scope, the
+            // same one `RPC_REQUIRED_SCOPES` requires for every other
+            // state-changing orchestration RPC. Rejected with the SAME
+            // close code as a bad token (`invalidCredential`, 4401): the
+            // token authenticated fine, but retrying with it can never
+            // self-heal a missing scope, so a well-behaved client must
+            // treat this as credential-class and stop, not hammer.
+            if (!session.scopes.includes(AuthOrchestrationOperateScope)) {
+              yield* rejectUpgrade(
+                EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+                `insufficient_scope: publisher requires ${AuthOrchestrationOperateScope}`,
+              );
+              return;
+            }
+            connectionToken = registry.newConnectionToken();
+          }).pipe(
             Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
               rejectUpgrade(
                 publisherCredentialCloseCode(error),
@@ -207,9 +280,6 @@ const runPublisherConnection = (
             Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
               rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
             ),
-            Effect.map(() => {
-              connectionToken = registry.newConnectionToken();
-            }),
           ),
         },
       )
@@ -231,17 +301,21 @@ const runPublisherConnection = (
 const runSubscriberConnection = (
   socket: Socket.Socket,
   registry: EditorPresenceRegistry.EditorPresenceRegistry["Service"],
+  session: EnvironmentAuth.AuthenticatedSession,
 ) =>
   Effect.gen(function* () {
     const write = yield* socket.writer;
     const send = (frame: string) => write(frame).pipe(Effect.catch(() => Effect.void));
+    const rejectUpgrade = (code: number, reason: string) =>
+      write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
 
     // The writer is only actually pumped once the read loop is running (see
     // `run*`'s `onOpen` option below) — a write issued before that point
     // sits in an internal queue that nothing ever drains and hangs
-    // indefinitely. Sending the initial `presence` frame from `onOpen`
-    // rather than before `runString` is not a style choice, it is required
-    // for the write to complete at all.
+    // indefinitely. Sending the initial `presence` frame — or the scope
+    // rejection's close, below — from `onOpen` rather than before
+    // `runString` is not a style choice, it is required for either write to
+    // complete at all.
     //
     // Subscribers don't send anything meaningful themselves; the message
     // handler is a no-op and the read loop only exists to hold the
@@ -249,11 +323,40 @@ const runSubscriberConnection = (
     yield* socket
       .runString(() => Effect.void, {
         onOpen: Effect.gen(function* () {
+          // Scope check — see the route's SECURITY NOTE and the comment at
+          // this function's call site for why this runs here, post-upgrade,
+          // instead of as a pre-upgrade HTTP rejection. Mirrors the
+          // publisher's own scope check exactly: same required-scope
+          // pattern, same reused close code, and the same shape that
+          // guarantees nothing is ever registered before the check passes
+          // — there is no `connectionToken`-like flag to race here because
+          // the check and the registration both happen sequentially inside
+          // this one `onOpen`, never split across a separate pipeline
+          // stage the way the publisher's used to be (see the "rejected
+          // publishers never register" tests for the bug that shape had).
+          if (!session.scopes.includes(AuthOrchestrationReadScope)) {
+            yield* rejectUpgrade(
+              EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+              `insufficient_scope: subscriber requires ${AuthOrchestrationReadScope}`,
+            );
+            return;
+          }
           const initialFrame = yield* registry.addSubscriber(send);
           yield* send(initialFrame);
         }),
       })
-      .pipe(Effect.ensuring(registry.removeSubscriber(send)));
+      .pipe(
+        // Same reasoning as the publisher's read loop (see
+        // `runPublisherConnection` above): a close WE initiate (the scope
+        // rejection above) surfaces as a read-loop FAILURE, not a clean
+        // completion, unless recognised here — otherwise a routine
+        // rejection would log like a crash.
+        Effect.catchFilter(
+          Socket.SocketCloseError.filterClean(isServerInitiatedCloseCode),
+          () => Effect.void,
+        ),
+        Effect.ensuring(registry.removeSubscriber(send)),
+      );
   });
 
 export const editorPresenceRouteLayer = Layer.unwrap(
@@ -285,10 +388,15 @@ export const editorPresenceRouteLayer = Layer.unwrap(
           return HttpServerResponse.empty();
         }
 
-        // Subscribers are browsers: an HTTP 401 on a bad credential is
-        // perfectly visible to them, so authenticate before the upgrade,
-        // exactly as every other connection to this server does.
-        yield* serverAuth.authenticateWebSocketUpgrade(request).pipe(
+        // Subscribers' CREDENTIAL check runs before the upgrade, matching
+        // every other authenticated endpoint on this server — see the
+        // module doc's AUTH ORDERING NOTE for why this predates scope
+        // enforcement and is deliberately left alone here: that pre-upgrade
+        // HTTP 401 is not actually visible to a raw browser `WebSocket` on
+        // a bad credential (a known, pre-existing gap) — fixing it changes
+        // this check's shape, and this pass only had to close the SCOPE
+        // hole below, not rebuild the credential path.
+        const session = yield* serverAuth.authenticateWebSocketUpgrade(request).pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
             failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
           ),
@@ -298,7 +406,16 @@ export const editorPresenceRouteLayer = Layer.unwrap(
         );
 
         const socket = yield* request.upgrade;
-        yield* runSubscriberConnection(socket, registry);
+        // The SCOPE check happens inside `runSubscriberConnection`, AFTER
+        // this upgrade — see the module doc's SECURITY NOTE for why: doing
+        // it here, pre-upgrade, as an HTTP 403 would land in the SAME
+        // invisible-to-a-raw-`WebSocket` blind spot as the credential check
+        // above, except worse — every insufficiently-scoped subscriber
+        // would retry forever, minting a fresh ws ticket on each attempt.
+        // Post-upgrade lets it close with the SAME credential-class code
+        // (4401) the publisher already uses for a missing scope, which the
+        // web client already classifies correctly as stop-retrying.
+        yield* runSubscriberConnection(socket, registry, session);
         return HttpServerResponse.empty();
       }).pipe(
         Effect.catchTags({
