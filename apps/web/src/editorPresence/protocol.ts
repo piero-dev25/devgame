@@ -20,13 +20,48 @@ export interface EditorPresenceSelection {
   readonly items: ReadonlyArray<EditorPresenceItem>;
 }
 
-// Server-side entries also carry `capabilities: string[]` (task #47's
-// spec-editor-presence-commands.md) — deliberately NOT parsed or exposed
-// here yet. This client has no command-dispatch UI to gate on it: that is
-// task #52 (engine selector + Play/Stop toolbar), which is the surface
-// that actually needs to know what an engine can do before offering a
-// control for it. Wiring the field through with nothing yet reading it
-// would be dead code; adding it lands together with #52.
+/**
+ * A publisher's declared capability set (`hello.capabilities`) — see
+ * spec-editor-presence-commands.md's "Capability advertisement" table. Open
+ * strings, matching `editor.id`/`items[].kind`'s existing open-string
+ * philosophy — mirrors the server's own `EditorPresenceCapability` (also
+ * `string`).
+ *
+ * Absent or malformed on the wire means `[]`, never a guessed default — see
+ * `parseCapabilities` below. A default that claims a capability is a lie
+ * whenever it's wrong; a default that claims none is merely conservative
+ * (server-side doc comment, restated here since this file is this route's
+ * hand-maintained twin, not a shared package).
+ */
+export type EditorPresenceCapability = string;
+
+/**
+ * Play/pause/stop state a publisher reports about itself — see
+ * spec-unity-play-stop.md's ruling ("acceptance is an edge, play state is a
+ * level"). The toolbar (#52) drives its Play/Pause/Stop button states off
+ * THIS field, never off a command reply: a domain reload (Unity entering or
+ * exiting play mode) can kill the connection before any commandResult is
+ * sent, but presence is a level, republished in full on every reconnect, so
+ * the true state always arrives here regardless.
+ *
+ * Deliberately a CLOSED union, unlike `capabilities`/`editor.id`/
+ * `items[].kind` — mirrors the server's own `EditorPresencePlayState`: play
+ * state is a physical concept every publisher in this repo computes from
+ * its own engine API, with no third-party-extensibility case for a fourth
+ * value, so the toolbar can switch on it exhaustively.
+ */
+export type EditorPresencePlayState = "stopped" | "playing" | "paused";
+
+const EDITOR_PRESENCE_PLAY_STATES: ReadonlySet<string> = new Set<EditorPresencePlayState>([
+  "stopped",
+  "playing",
+  "paused",
+]);
+
+function isEditorPresencePlayState(value: unknown): value is EditorPresencePlayState {
+  return typeof value === "string" && EDITOR_PRESENCE_PLAY_STATES.has(value);
+}
+
 export interface EditorPresenceEntry {
   readonly editor: { readonly id: string; readonly name: string; readonly version: string };
   readonly session: { readonly id: string };
@@ -34,6 +69,17 @@ export interface EditorPresenceEntry {
   readonly connected: boolean;
   readonly lastSeenAt: string;
   readonly selection: EditorPresenceSelection | null;
+  readonly capabilities: ReadonlyArray<EditorPresenceCapability>;
+  /**
+   * The publisher's own most recently reported play/pause state, or `null`
+   * when it has never reported one — an older publisher that predates this
+   * field, or a fresh registration that hasn't sent its first `playState`
+   * frame yet. Also the correct steady state for a publisher whose
+   * `capabilities` don't include `"play"`/`"stop"` at all — there is
+   * nothing to report, so the toolbar should show no play-state control
+   * rather than guessing "stopped".
+   */
+  readonly playState: EditorPresencePlayState | null;
 }
 
 export interface EditorPresenceFrame {
@@ -74,6 +120,23 @@ function parseSelection(value: unknown): EditorPresenceSelection | null {
   return { seq: value.seq, at: value.at, items };
 }
 
+/**
+ * Defensive, not strict: an entry with a missing or malformed
+ * `capabilities` field still parses (as `[]`), mirroring the server's own
+ * "absent means unknown, not a lie" default rather than dropping the whole
+ * entry over one optional field. Non-string items are dropped individually
+ * — the same per-item tolerance `parseItem`'s caller already uses for
+ * `selection.items`.
+ */
+function parseCapabilities(value: unknown): ReadonlyArray<EditorPresenceCapability> {
+  if (!Array.isArray(value)) return [];
+  const capabilities: string[] = [];
+  for (const item of value) {
+    if (isNonEmptyString(item)) capabilities.push(item);
+  }
+  return capabilities;
+}
+
 function parseEntry(value: unknown): EditorPresenceEntry | null {
   if (!isRecord(value)) return null;
   const editor = value.editor;
@@ -96,6 +159,8 @@ function parseEntry(value: unknown): EditorPresenceEntry | null {
     connected: value.connected === true,
     lastSeenAt: isNonEmptyString(value.lastSeenAt) ? value.lastSeenAt : "",
     selection: parseSelection(value.selection),
+    capabilities: parseCapabilities(value.capabilities),
+    playState: isEditorPresencePlayState(value.playState) ? value.playState : null,
   };
 }
 

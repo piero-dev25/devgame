@@ -19,6 +19,8 @@ function entry(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntr
     connected: true,
     lastSeenAt: "2026-08-01T00:00:00.000Z",
     selection: null,
+    capabilities: [],
+    playState: null,
     ...overrides,
   };
 }
