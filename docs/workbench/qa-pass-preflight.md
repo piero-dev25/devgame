@@ -97,6 +97,34 @@ checkout — quiesce fails regardless of what signal A said. Both signals must
 pass. Neither check stops or restarts anything; both are purely observational
 and were run this way against the live stack.
 
+**Signal C — the tree must actually COMPILE, checked per app you are about to
+launch.** Confirmed live on 2026-08-04, and it is the signal that a dirty-file
+count alone will not give you:
+
+```sh
+cd apps/desktop && npx tsgo --noEmit   # exit 0 required
+```
+
+A clean `build:desktop` from HEAD does **not** discharge this. `dev:desktop`
+builds the WORKING TREE, so HEAD and the tree are different objects and only
+one of them is what you are about to ship into the bundle. Both statements can
+be true at once — "HEAD builds clean" and "the tree has 22 type errors" — and
+they were, on the run that produced this note: every failing line sat inside
+another lane's uncommitted hunks, one of them a bare
+`Cannot find name 'browserSession'`, which is mid-keystroke work rather than a
+design problem.
+
+Why this is a hard gate and not a caveat to note in the report: the errors were
+in `apps/desktop/src/preview/Manager.ts`, which is the Browser panel's
+desktop-only code path — the single thing that launch was being run to verify.
+Launching anyway would not have produced a result with an asterisk on it; it
+would have produced a result **about different code**. That is the stale-rig
+shape from the E2E rule: evidence naming the wrong build.
+
+Signals A and B tell you whether the tree is still MOVING. Signal C tells you
+whether the tree is COHERENT. A tree can be perfectly still and completely
+broken.
+
 ## 3. Clean restart recipe (web dev stack)
 
 **Written, not exercised this session** — do not stop the currently-running
