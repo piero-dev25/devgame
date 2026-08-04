@@ -31,6 +31,11 @@ function editor(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEnt
 // that explicit object, not a shared instance reused across tests.
 function readyFacts(overrides: Partial<UnitySetupFacts> = {}): UnitySetupFacts {
   return {
+    // Play-readiness is independent of this field (see
+    // EngineToolbar.logic.ts's isUnityPlayReady doc comment) — true here
+    // simply because these fixtures otherwise describe an actual Unity
+    // project.
+    isUnityProject: true,
     cliAvailable: true,
     cliDiscoveredPath: null,
     lockfilePresent: true,

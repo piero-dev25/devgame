@@ -1,6 +1,7 @@
 import {
   ChevronDownIcon,
   ChevronsLeftRightEllipsisIcon,
+  CopyIcon,
   PlusIcon,
   QrCodeIcon,
   RefreshCwIcon,
@@ -8,7 +9,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { useAtomValue } from "@effect/atom-react";
-import { type ReactNode, memo, useCallback, useMemo, useState } from "react";
+import { type ReactNode, memo, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
@@ -30,6 +31,10 @@ import {
   type DesktopServerExposureState,
   type DesktopWslState,
   type EnvironmentId,
+  type UnitySetupFacts,
+  type UnitySetupPackageLockState,
+  type UnitySetupPipelineListOutcome,
+  type UnitySetupProbeResult,
 } from "@t3tools/contracts";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import {
@@ -135,6 +140,9 @@ import {
 } from "~/state/environments";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
+import { useProjects } from "~/state/entities";
+import { readPreparedConnection } from "~/state/session";
+import { fetchUnitySetupProbe } from "../../unity/fetchSetupProbe";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
@@ -1731,6 +1739,208 @@ function CloudRemoteEnvironmentRows({
   ) : null;
 }
 
+// -----------------------------------------------------------------------
+// Unity setup (#92, increment 3) — read-only, per-item status. Reads
+// `facts`, never `primary` — `primary` answers "what's the ONE most useful
+// sentence to show right now" (the toolbar's job); this panel answers
+// "what is the state of each thing," which is what `facts` exists for. No
+// button here writes anything: Phase 2's install actions are a separate,
+// later, gated feature (plan §5).
+// -----------------------------------------------------------------------
+
+/** `unity pipeline install --project-path "<path>" --json --non-interactive`
+ * (plan §3's F12) — the exact flags DevGame's own future install action
+ * would send. Settled and verified; safe to show as a real command. The
+ * selection package's own install command is deliberately NOT offered the
+ * same way — see `UnitySelectionPackageRow` below for why. */
+function unityPipelineInstallCommand(workspaceRoot: string): string {
+  return `unity pipeline install --project-path "${workspaceRoot}" --json --non-interactive`;
+}
+
+function formatPackageLockStatus(state: UnitySetupPackageLockState): string {
+  if (!state.installed) return "Not installed";
+  return state.resolvedVersion ? `Installed (${state.resolvedVersion})` : "Installed";
+}
+
+function formatUnityCliStatus(facts: UnitySetupFacts): string {
+  if (facts.cliAvailable) return "Installed";
+  if (facts.cliDiscoveredPath) {
+    return `Found at ${facts.cliDiscoveredPath}, but not on this app's PATH`;
+  }
+  return "Not installed";
+}
+
+function formatUnityInstanceStatus(
+  pipelineList: UnitySetupPipelineListOutcome | undefined,
+): string {
+  if (!pipelineList) return "Not checked yet";
+  if (pipelineList._tag === "cliError") return `Couldn't check — ${pipelineList.message}`;
+  const matched = pipelineList.matched;
+  if (!matched || !matched.isRunning) return "Not open";
+  if (!matched.isReachable) {
+    return matched.safeMode === true ? "Open, in Safe Mode" : "Open, not responding yet";
+  }
+  return matched.pipelineVersion
+    ? `Open and responding — Pipeline ${matched.pipelineVersion}`
+    : "Open and responding";
+}
+
+function formatSelectionPackagePairingSuffix(facts: UnitySetupFacts): string {
+  if (!facts.selectionPackage.installed) return "";
+  if (facts.selectionPublisherRegistered) return " — paired";
+  if (facts.withinPairingGraceWindow) return " — checking pairing…";
+  return " — not paired yet";
+}
+
+/** One `CopyIcon` button, no per-call generic context needed — this panel
+ * only ever has ONE copyable string live at a time (the Pipeline install
+ * command), unlike the pairing-code/trace-id copy buttons elsewhere in
+ * this file that distinguish several kinds in one `onCopy` handler. */
+function CopyCommandButton({ command }: { readonly command: string }) {
+  const { copyToClipboard } = useCopyToClipboard({
+    target: "command",
+    onCopy: () => {
+      toastManager.add({ type: "success", title: "Command copied" });
+    },
+    onError: (error) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not copy command",
+          description: error.message,
+        }),
+      );
+    },
+  });
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="icon-xs"
+            variant="outline"
+            aria-label="Copy command"
+            onClick={() => copyToClipboard(command, undefined)}
+          />
+        }
+      >
+        <CopyIcon className="size-3.5" aria-hidden />
+      </TooltipTrigger>
+      <TooltipPopup side="bottom" className="max-w-sm break-all">
+        {command}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
+
+/** The four per-item rows (Unity CLI, Pipeline package, selection package,
+ * live Unity instance) — rendered only when `facts.isUnityProject` is
+ * true; see `UnitySetupSection` for the "not a Unity project" fallback. */
+function UnitySetupRows({
+  facts,
+  workspaceRoot,
+}: {
+  readonly facts: UnitySetupFacts;
+  readonly workspaceRoot: string;
+}) {
+  return (
+    <>
+      <SettingsRow title="Unity CLI" description={formatUnityCliStatus(facts)} />
+      <SettingsRow
+        title="Pipeline package"
+        description={formatPackageLockStatus(facts.pipelinePackage)}
+        control={
+          facts.pipelinePackage.installed ? undefined : (
+            <CopyCommandButton command={unityPipelineInstallCommand(workspaceRoot)} />
+          )
+        }
+      />
+      <SettingsRow
+        title="Unity Editor"
+        description={formatUnityInstanceStatus(facts.pipelineList)}
+      />
+      <SettingsRow
+        title="Selection package"
+        description={`${formatPackageLockStatus(facts.selectionPackage)}${formatSelectionPackagePairingSuffix(facts)}`}
+      />
+    </>
+  );
+}
+
+/** Fetches `UnitySetupProbe`'s result for the primary environment's own
+ * bound project (`ServerConfig.cwd` server-side — see UnitySetupProbe.ts's
+ * own module doc for why there is nothing else to point this at) and
+ * renders the section. Scoped to the primary environment, mirroring the
+ * existing "This environment" section a few rows up in this same file —
+ * there is no project picker anywhere in Settings today, and this panel
+ * does not invent one. */
+function UnitySetupSection({
+  primaryEnvironmentId,
+}: {
+  readonly primaryEnvironmentId: EnvironmentId | null;
+}) {
+  const projects = useProjects();
+  // A server process is scoped to exactly one project (plan §1's F6); if
+  // this environment's project list ever carries more than one entry, that
+  // is a real ambiguity this panel should not paper over by guessing —
+  // it falls back to a generic label rather than picking one. See
+  // `UnitySetupProbe.ts`'s own module doc for the "one process, one
+  // project" invariant this reads.
+  const project =
+    primaryEnvironmentId === null
+      ? null
+      : (() => {
+          const matches = projects.filter((p) => p.environmentId === primaryEnvironmentId);
+          return matches.length === 1 ? matches[0]! : null;
+        })();
+
+  const [result, setResult] = useState<UnitySetupProbeResult | null>(null);
+  useEffect(() => {
+    // Fetched on mount and whenever the primary environment changes — this
+    // section has no "panel open" or "Play click" moment of its own to
+    // hook the plan's cadence table to; visiting this settings page IS the
+    // on-demand trigger here, same as the toolbar's own mount-time fetch
+    // in ChatView.tsx.
+    setResult(null);
+    if (primaryEnvironmentId === null) return;
+    const prepared = readPreparedConnection(primaryEnvironmentId);
+    if (!prepared) return;
+    let cancelled = false;
+    fetchUnitySetupProbe({
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((value) => {
+        if (!cancelled) setResult(value);
+      })
+      .catch((cause) => {
+        console.error("Failed to fetch Unity setup status:", cause);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [primaryEnvironmentId]);
+
+  if (primaryEnvironmentId === null) return null;
+
+  const headerSuffix = project ? ` — ${project.title}` : "";
+
+  return (
+    <SettingsSection title={`Unity integration${headerSuffix}`}>
+      {result === null ? (
+        <SettingsRow title="Checking…" description="Reading this project's Unity setup." />
+      ) : !result.facts.isUnityProject ? (
+        <SettingsRow
+          title="Not a Unity project"
+          description="This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found."
+        />
+      ) : (
+        <UnitySetupRows facts={result.facts} workspaceRoot={project?.workspaceRoot ?? ""} />
+      )}
+    </SettingsSection>
+  );
+}
+
 export function ConnectionsSettings() {
   const desktopBridge = window.desktopBridge;
   const { environments } = useEnvironments();
@@ -3061,6 +3271,8 @@ export function ConnectionsSettings() {
               </>
             )}
           </SettingsSection>
+
+          <UnitySetupSection primaryEnvironmentId={primaryEnvironmentId} />
 
           {isLocalBackendRemotelyReachable ? (
             <SettingsSection
