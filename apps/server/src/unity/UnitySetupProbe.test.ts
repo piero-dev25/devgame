@@ -50,7 +50,11 @@ function stubPipelineClient(
       play: () => Effect.die("unexpected play call"),
       stop: () => Effect.die("unexpected stop call"),
       pause: () => Effect.die("unexpected pause call"),
-      list: () => Effect.succeed({ _tag: "ok", value: { instances: [], latestVersion: null } }),
+      list: () =>
+        Effect.succeed({
+          _tag: "ok",
+          value: { instances: [], latestVersion: null, unparseableInstanceCount: 0 },
+        }),
       ...overrides,
     }),
   );
@@ -117,7 +121,10 @@ describe("UnitySetupProbe", () => {
           isAvailable: () => Effect.succeed(false),
           list: () => {
             listCalled = true;
-            return Effect.succeed({ _tag: "ok", value: { instances: [], latestVersion: null } });
+            return Effect.succeed({
+              _tag: "ok",
+              value: { instances: [], latestVersion: null, unparseableInstanceCount: 0 },
+            });
           },
         }),
       (cwd) =>
@@ -162,6 +169,7 @@ describe("UnitySetupProbe", () => {
                     },
                   ],
                   latestVersion: null,
+                  unparseableInstanceCount: 0,
                 },
               }),
           }),
@@ -207,6 +215,7 @@ describe("UnitySetupProbe", () => {
                     },
                   ],
                   latestVersion: null,
+                  unparseableInstanceCount: 0,
                 },
               }),
           }),
@@ -258,6 +267,7 @@ describe("UnitySetupProbe", () => {
                   },
                 ],
                 latestVersion: null,
+                unparseableInstanceCount: 0,
               },
             }),
         }),
@@ -303,6 +313,7 @@ describe("UnitySetupProbe", () => {
                     },
                   ],
                   latestVersion: null,
+                  unparseableInstanceCount: 0,
                 },
               }),
           }),
@@ -368,6 +379,7 @@ describe("UnitySetupProbe", () => {
                     },
                   ],
                   latestVersion: null,
+                  unparseableInstanceCount: 0,
                 },
               }),
           }),

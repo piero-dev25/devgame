@@ -54,6 +54,7 @@ function readyFacts(overrides: Partial<UnitySetupFacts> = {}): UnitySetupFacts {
         safeMode: false,
       },
       latestVersion: null,
+      unparseableInstanceCount: 0,
     },
     selectionPublisherRegistered: false,
     withinPairingGraceWindow: false,
@@ -234,6 +235,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
               safeMode: null,
             },
             latestVersion: null,
+            unparseableInstanceCount: 0,
           },
         }),
         {
@@ -265,6 +267,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
               safeMode: null,
             },
             latestVersion: null,
+            unparseableInstanceCount: 0,
           },
         }),
         { state: "S7b", message: "Waiting for Unity to respond…" },
@@ -345,7 +348,14 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
   it("NOT ready: pipelineList ran but matched is null (no live instance for this project)", () => {
     expect(
       isUnityPlayReady(
-        readyFacts({ pipelineList: { _tag: "ran", matched: null, latestVersion: null } }),
+        readyFacts({
+          pipelineList: {
+            _tag: "ran",
+            matched: null,
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
       ),
     ).toBe(false);
   });
@@ -367,6 +377,7 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
               safeMode: null,
             },
             latestVersion: null,
+            unparseableInstanceCount: 0,
           },
         }),
       ),
@@ -390,6 +401,7 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
               safeMode: null,
             },
             latestVersion: null,
+            unparseableInstanceCount: 0,
           },
         }),
       ),

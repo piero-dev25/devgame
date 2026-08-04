@@ -422,8 +422,11 @@ describe("list", () => {
   it.effect("parses zero instances as a real, valid empty array — not a failure", () =>
     Effect.gen(function* () {
       const runner = callCountingRunner([pipelineListEnvelope([])]);
-      const result = yield* withClient(runner.run, (client) => client.list());
-      expect(result).toEqual({ _tag: "ok", value: { instances: [], latestVersion: null } });
+      const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
+      expect(result).toEqual({
+        _tag: "ok",
+        value: { instances: [], latestVersion: null, unparseableInstanceCount: 0 },
+      });
     }),
   );
 
@@ -445,7 +448,7 @@ describe("list", () => {
             },
           ]),
         ]);
-        const result = yield* withClient(runner.run, (client) => client.list());
+        const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
         expect(result).toEqual({
           _tag: "ok",
           value: {
@@ -462,6 +465,7 @@ describe("list", () => {
               },
             ],
             latestVersion: null,
+            unparseableInstanceCount: 0,
           },
         });
       }),
@@ -477,7 +481,7 @@ describe("list", () => {
             "0.5.0",
           ),
         ]);
-        const result = yield* withClient(runner.run, (client) => client.list());
+        const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
         expect(result._tag).toBe("ok");
         if (result._tag !== "ok") return;
         expect(result.value.latestVersion).toBe("0.5.0");
@@ -494,7 +498,7 @@ describe("list", () => {
           { projectPath: "/Users/piero/Projects/Deepmind" },
         ]),
       ]);
-      const result = yield* withClient(runner.run, (client) => client.list());
+      const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
       expect(result._tag).toBe("ok");
       if (result._tag !== "ok") return;
       expect(result.value.instances.map((instance) => instance.projectPath)).toEqual([
@@ -513,8 +517,27 @@ describe("list", () => {
           seenArgs.push(input.args);
           return okOutput(pipelineListEnvelope([]));
         };
-        yield* withClient(runner, (client) => client.list());
+        yield* withClient(runner, (client) => client.list(PROJECT));
         expect(seenArgs).toEqual([["pipeline", "list", "--json"]]);
+      }),
+  );
+
+  it.effect(
+    "pins the subprocess cwd to workspaceRoot — a real invocation-directory dependency, not a --project-path substitute",
+    () =>
+      Effect.gen(function* () {
+        // Found live (2026-08-04, presence-authz): `unity pipeline list
+        // --json` is sensitive to the directory it's invoked FROM, even
+        // though it takes no `--project-path` argv (the test above). This
+        // is the fix for that — see UnityPipelineClient.ts's `list` doc
+        // comment for the real Mafia Game repro.
+        const seenCwds: Array<string | undefined> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seenCwds.push(input.cwd);
+          return okOutput(pipelineListEnvelope([]));
+        };
+        yield* withClient(runner, (client) => client.list(PROJECT));
+        expect(seenCwds).toEqual([PROJECT]);
       }),
   );
 
@@ -529,7 +552,7 @@ describe("list", () => {
           warnings: [],
         }),
       ]);
-      const result = yield* withClient(runner.run, (client) => client.list());
+      const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
       expect(result).toEqual({
         _tag: "error",
         message: "No Unity Editor instances found anywhere",
@@ -540,28 +563,100 @@ describe("list", () => {
   it.effect("unparseable stdout folds into { _tag: 'error' }, never throws", () =>
     Effect.gen(function* () {
       const runner = callCountingRunner(["not json at all"]);
-      const result = yield* withClient(runner.run, (client) => client.list());
+      const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
       expect(result._tag).toBe("error");
     }),
   );
 
-  it.effect(
-    "a well-formed envelope whose instances entries are missing a required field folds into { _tag: 'error' }, not a silent partial parse",
-    () =>
-      Effect.gen(function* () {
-        const runner = callCountingRunner([
-          JSON.stringify({
-            success: true,
-            command: "pipeline list",
-            data: { instances: [{ projectPath: PROJECT }], latestVersion: null }, // missing every other instance field
-            errors: [],
-            warnings: [],
-          }),
-        ]);
-        const result = yield* withClient(runner.run, (client) => client.list());
-        expect(result._tag).toBe("error");
-      }),
-  );
+  describe("resilience to a malformed peer instance — the live Mafia Game defect (2026-08-04)", () => {
+    it.effect(
+      "a lone malformed instance entry is DROPPED and counted, not a whole-list failure",
+      () =>
+        Effect.gen(function* () {
+          const runner = callCountingRunner([
+            JSON.stringify({
+              success: true,
+              command: "pipeline list",
+              data: { instances: [{ projectPath: PROJECT }], latestVersion: null }, // missing every other instance field
+              errors: [],
+              warnings: [],
+            }),
+          ]);
+          const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
+          expect(result).toEqual({
+            _tag: "ok",
+            value: { instances: [], latestVersion: null, unparseableInstanceCount: 1 },
+          });
+        }),
+    );
+
+    it.effect(
+      "one good entry survives a malformed peer with a MISSING pid (not null — absent) — the exact live Mafia Game shape",
+      () =>
+        Effect.gen(function* () {
+          const runner = callCountingRunner([
+            JSON.stringify({
+              success: true,
+              command: "pipeline list",
+              data: {
+                instances: [
+                  {
+                    // The good entry — real, well-formed, exactly what
+                    // Mafia Game itself reports.
+                    projectPath: "/Users/pieroherrera/Projects/Mafia Game",
+                    pid: 39658,
+                    isRunning: true,
+                    hasPipelinePackage: false,
+                    pipelineServer: { isReachable: false, apiUrl: null },
+                    pipelineVersion: null,
+                    updateAvailable: false,
+                    safeMode: null,
+                  },
+                  {
+                    // The phantom peer — live-observed shape: `pid` is
+                    // ABSENT, not `null`. `parsePipelineListInstance`'s
+                    // `isNullOr(pid, isNumber)` only accepts `null` or a
+                    // number, so `undefined` fails it — this is the exact
+                    // entry that took the whole S4 classification down to
+                    // S12 before this fix.
+                    projectPath: "/Users/pieroherrera/Projects/t3code-fork",
+                    isRunning: true,
+                    hasPipelinePackage: false,
+                    pipelineServer: { isReachable: false, apiUrl: null },
+                    pipelineVersion: null,
+                    updateAvailable: false,
+                    safeMode: null,
+                  },
+                ],
+                latestVersion: null,
+              },
+              errors: [],
+              warnings: [],
+            }),
+          ]);
+          const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
+          expect(result).toEqual({
+            _tag: "ok",
+            value: {
+              instances: [
+                {
+                  projectPath: "/Users/pieroherrera/Projects/Mafia Game",
+                  pid: 39658,
+                  isRunning: true,
+                  hasPipelinePackage: false,
+                  isReachable: false,
+                  pipelineVersion: null,
+                  updateAvailable: false,
+                  safeMode: null,
+                },
+              ],
+              latestVersion: null,
+              unparseableInstanceCount: 1,
+            },
+          });
+        }),
+    );
+  });
 
   it.effect(
     "a well-formed envelope missing data.latestVersion entirely folds into { _tag: 'error' }, never silently read as null",
@@ -576,7 +671,7 @@ describe("list", () => {
             warnings: [],
           }),
         ]);
-        const result = yield* withClient(runner.run, (client) => client.list());
+        const result = yield* withClient(runner.run, (client) => client.list(PROJECT));
         expect(result._tag).toBe("error");
       }),
   );

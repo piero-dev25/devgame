@@ -87,6 +87,19 @@ export const UnitySetupPipelineListOutcome = Schema.Union([
      * `UnitySetupPipelineInstance` (where an earlier, reconstructed-not-
      * captured version of this contract wrongly put it). */
     latestVersion: Schema.NullOr(Schema.String),
+    /** How many entries of `data.instances` the server DROPPED because
+     * they didn't match the shape this contract recognizes — 0 on the
+     * common path. Found live (2026-08-04, presence-authz): `pipeline
+     * list` is machine-wide, and a single stray/malformed peer instance
+     * (observed: a phantom self-referential entry with no `pid` at all,
+     * reported for whatever directory invoked the CLI) used to take the
+     * ENTIRE list down under an all-or-nothing parse — discarding a
+     * perfectly healthy `matched` entry along with it. The parser is now
+     * resilient (see `UnityPipelineClient.ts`'s `parsePipelineListResult`),
+     * but resilience that hides its own trade-off is a worse failure mode
+     * than the one it replaces — this field is what keeps a partial parse
+     * honest instead of silent, on the wire, not just in server logs. */
+    unparseableInstanceCount: Schema.Number,
   }),
   /** `unity pipeline list --json` exited non-zero, or its output didn't
    * parse into the shape this module recognizes. Carries the CLI's own

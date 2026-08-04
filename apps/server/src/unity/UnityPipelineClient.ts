@@ -206,12 +206,18 @@ const UNITY_PLAY_MODES: ReadonlySet<string> = new Set<UnityPlayMode>([
  * alongside `instances` in `data` itself (a CLI-wide fact, not an
  * instance-specific one), so it's returned separately by
  * `parsePipelineListResult` below rather than on this type.
- * `parsePipelineListInstance` still fails safe on a shape mismatch (falls
- * through to `cliError`, the same "don't guess at an unfamiliar shape"
- * posture as `parseEditorStatusResult`) — one captured sample from one CLI
- * version is not a contract, so a future field this parser doesn't
- * recognize still degrades to S12's verbatim-CLI-message passthrough
- * rather than a wrong classification. */
+ *
+ * `parsePipelineListInstance` still fails safe on a shape mismatch — an
+ * unrecognized entry is DROPPED, not silently coerced — but as of the real
+ * E2E round trip against `Mafia Game` (2026-08-04, presence-authz), a
+ * single bad entry among several no longer takes the whole list down with
+ * it (see `parsePipelineListResult`'s doc comment). `pipeline list` is
+ * machine-wide (no `--project-path` filter — see `list`'s own doc comment
+ * below), so ANY other stray or malformed instance the CLI happens to
+ * report — on any user's machine — used to be able to poison a probe for a
+ * project that was itself perfectly healthy. One captured sample from one
+ * CLI version is not a contract; a future field this module doesn't
+ * recognize on ONE entry now costs that one entry, not the whole answer. */
 export interface UnityPipelineListInstance {
   readonly projectPath: string;
   readonly pid: number | null;
@@ -229,6 +235,16 @@ export interface UnityPipelineListInstance {
 export interface UnityPipelineListResult {
   readonly instances: ReadonlyArray<UnityPipelineListInstance>;
   readonly latestVersion: string | null;
+  /** How many entries of `data.instances` this parse DROPPED because they
+   * didn't match `UnityPipelineListInstance`'s shape — 0 on the common
+   * path. Exists so a dropped entry is a visible, honest fact
+   * (`UnitySetupFacts.pipelineList` on the wire carries it too), never a
+   * silent truncation: `instances.length` alone can't distinguish "the CLI
+   * genuinely reported N instances" from "the CLI reported N+k and this
+   * parser threw k of them away." See `parsePipelineListResult`'s doc
+   * comment for why dropping (not failing the whole parse) is correct
+   * here. */
+  readonly unparseableInstanceCount: number;
 }
 
 function isNullOr<A>(value: unknown, check: (value: unknown) => value is A): value is A | null {
@@ -277,24 +293,43 @@ function parsePipelineListInstance(entry: unknown): UnityPipelineListInstance | 
 
 /** Parses `pipeline list`'s `data` object as a whole: every entry of
  * `data.instances`, plus the CLI-wide `data.latestVersion` sitting
- * alongside it. `null` (not a value with an empty `instances` array) when
- * the shape itself is unrecognized — an EMPTY `instances` array is a real,
- * valid answer ("no Editor instances running anywhere"), distinct from
- * "couldn't even parse the response," which the caller treats as a CLI
- * error (S12), not as "zero instances." A missing/wrong-typed
- * `latestVersion` key fails the whole parse the same as a bad instance
- * entry does — `undefined` is not `null`, and a value this module doesn't
- * recognize should not be silently treated as "no update available." */
+ * alongside it. `null` (not a value with an empty `instances` array) ONLY
+ * when the ENVELOPE shape itself is unrecognized (`data` isn't a record,
+ * `instances` isn't an array, or `latestVersion` is present with the wrong
+ * type) — an EMPTY `instances` array is a real, valid answer ("no Editor
+ * instances running anywhere"), distinct from "couldn't even parse the
+ * response," which the caller treats as a CLI error (S12).
+ *
+ * ONE MALFORMED INSTANCE ENTRY no longer fails this whole parse — it is
+ * DROPPED and counted in `unparseableInstanceCount` instead. Found live,
+ * not hypothesized (2026-08-04, presence-authz, real E2E round trip against
+ * `Mafia Game`): `pipeline list` has no `--project-path` filter (see
+ * `list`'s doc comment below) and can report an entry for whatever
+ * directory invoked the CLI, even when that directory isn't a Unity
+ * project at all and the entry it reports is missing fields (observed:
+ * `pid` absent, not `null`) — a machine-wide CLI quirk entirely outside
+ * this codebase's control. Under the OLD all-or-nothing parse, that one
+ * unrelated phantom entry took down the classification of a perfectly
+ * healthy, perfectly well-formed Mafia Game entry sitting right next to it
+ * in the same array — S12 instead of the correct S4. `pipeline list` is
+ * explicitly documented as machine-wide/multi-instance (this module's own
+ * `list` doc comment), so ANY stray or malformed instance on ANY user's
+ * machine could trip the old behavior; this is the actual defect, not a
+ * one-off. */
 function parsePipelineListResult(data: unknown): UnityPipelineListResult | null {
   if (!isRecord(data) || !Array.isArray(data.instances)) return null;
   if (!isNullOr(data.latestVersion, isString)) return null;
   const instances: UnityPipelineListInstance[] = [];
+  let unparseableInstanceCount = 0;
   for (const entry of data.instances) {
     const instance = parsePipelineListInstance(entry);
-    if (instance === null) return null;
+    if (instance === null) {
+      unparseableInstanceCount += 1;
+      continue;
+    }
     instances.push(instance);
   }
-  return { instances, latestVersion: data.latestVersion };
+  return { instances, latestVersion: data.latestVersion, unparseableInstanceCount };
 }
 
 /** Parses `editor_status`'s `data.result` object. `null` on anything that
@@ -350,23 +385,40 @@ export class UnityPipelineClient extends Context.Service<
       workspaceRoot: string,
     ) => Effect.Effect<UnityPipelineResult<UnityEditorStatus>>;
     /** `unity pipeline list --json` — every running Editor instance
-     * Pipeline can currently see, regardless of project. Takes NO
-     * `workspaceRoot`: unlike `status`/`play`/`stop`/`pause`, `pipeline
-     * list` has no `--project-path` filter at all (confirmed against
-     * `unity pipeline list --help` — see
-     * docs/workbench/plan-setup-integration.md §1's F14) — matching an
-     * entry to "this project" is the CALLER's job (`UnitySetupProbe.ts`,
-     * via `@t3tools/shared/workspaceRootPath`'s normalizer), not this
-     * client's. `notReady`/`cliUnavailable` are structurally impossible
-     * results here (there is no "wrong project" or "not open" concept for
-     * a command that lists every instance), but the return type stays
+     * Pipeline can currently see, regardless of project. Unlike
+     * `status`/`play`/`stop`/`pause`, `pipeline list` has no
+     * `--project-path` FILTER at all (confirmed against `unity pipeline
+     * list --help` — see docs/workbench/plan-setup-integration.md §1's
+     * F14) — matching a returned entry to "this project" is still the
+     * CALLER's job (`UnitySetupProbe.ts`, via
+     * `@t3tools/shared/workspaceRootPath`'s normalizer), not this client's.
+     *
+     * `workspaceRoot` IS still taken here, but for a different reason than
+     * `--project-path`: it's the CWD this method spawns the `unity`
+     * process from, not a CLI argument. Found live (2026-08-04,
+     * presence-authz, real E2E round trip against `Mafia Game`): the
+     * subprocess's OWN invocation directory affects what `pipeline list`
+     * reports — invoked from this server process's own cwd (the repo
+     * checkout, not any Unity project) rather than the project being
+     * probed, the CLI injected a phantom self-referential instance entry
+     * for that non-Unity directory. Pinning `cwd` to the project actually
+     * being asked about is what "probe this project's setup" already
+     * means, and it also happens to avoid that phantom entry — but even if
+     * some future CLI version stops needing this, `parsePipelineListResult`
+     * (UnityPipelineClient.ts) is now resilient to a stray/malformed peer
+     * entry regardless, so this is belt-and-suspenders, not the only
+     * fix. `notReady`/`cliUnavailable` are structurally impossible results
+     * here (there is no "wrong project" or "not open" concept for a
+     * command that lists every instance), but the return type stays
      * `UnityPipelineResult` for the same reason `status` does: a `cli
      * Unavailable`/`error` outcome IS still possible ( the binary vanished
      * between `isAvailable()` and this call, or the JSON envelope itself
      * doesn't parse), and folding those into a bespoke smaller type here
      * would just require the caller to re-derive the same handling this
      * module's every other method already gives it for free. */
-    readonly list: () => Effect.Effect<UnityPipelineResult<UnityPipelineListResult>>;
+    readonly list: (
+      workspaceRoot: string,
+    ) => Effect.Effect<UnityPipelineResult<UnityPipelineListResult>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -381,12 +433,14 @@ export const make = Effect.gen(function* () {
 
   const runUnityCommand = (
     args: ReadonlyArray<string>,
+    cwd?: string,
   ): Effect.Effect<UnityCliEnvelope | null, ProcessRunner.ProcessRunError> =>
     processRunner
       .run({
         command: UNITY_CLI_COMMAND,
         args: [...args, "--json"],
         timeout: COMMAND_TIMEOUT_SEC,
+        ...(cwd !== undefined ? { cwd } : {}),
       })
       .pipe(Effect.map((output) => parseUnityCliEnvelope(output.stdout)));
 
@@ -470,12 +524,16 @@ export const make = Effect.gen(function* () {
   /** `unity pipeline list --json` — no `--project-path` (plan §1's F14:
    * the flag doesn't exist for this subcommand), so this is a bare
    * `runUnityCommand` call, not `runEditorCommand` (which always appends
-   * one). `notReady` is not a real outcome for this subcommand (there is
+   * one). `workspaceRoot` IS still passed through to `runUnityCommand` as
+   * the subprocess `cwd` — see the `list` doc comment on the service
+   * interface above for why (the CLI's own output is sensitive to
+   * invocation directory, independent of the missing `--project-path`
+   * flag). `notReady` is not a real outcome for this subcommand (there is
    * no single project to be "not ready" for), so a `notReady` envelope
    * reply — which should never happen in practice — folds into `error`
    * rather than silently reusing a tag whose meaning doesn't apply here. */
-  const list: UnityPipelineClient["Service"]["list"] = () =>
-    runUnityCommand(["pipeline", "list"]).pipe(
+  const list: UnityPipelineClient["Service"]["list"] = (workspaceRoot) =>
+    runUnityCommand(["pipeline", "list"], workspaceRoot).pipe(
       Effect.map((envelope): UnityPipelineResult<UnityPipelineListResult> => {
         if (envelope === null) {
           return { _tag: "error", message: "unparseable response from 'unity pipeline list'" };
@@ -496,6 +554,21 @@ export const make = Effect.gen(function* () {
           : { _tag: "ok", value: parsed };
       }),
       Effect.catch(processRunErrorToResult<UnityPipelineListResult>),
+      // Honesty check for `parsePipelineListResult`'s resilience above: a
+      // dropped entry must never be silent, even when nothing downstream
+      // ever reads `UnitySetupFacts.pipelineList.unparseableInstanceCount`
+      // off the wire. Logged here, not just carried on the value, so it's
+      // visible in server logs for callers/scripts that only look at the
+      // classified state.
+      Effect.tap((result) =>
+        result._tag === "ok" && result.value.unparseableInstanceCount > 0
+          ? Effect.logWarning("'unity pipeline list' dropped unparseable instance entries", {
+              workspaceRoot,
+              unparseableInstanceCount: result.value.unparseableInstanceCount,
+              keptInstanceCount: result.value.instances.length,
+            })
+          : Effect.void,
+      ),
     );
 
   return UnityPipelineClient.of({

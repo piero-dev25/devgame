@@ -203,7 +203,11 @@ export const make = Effect.gen(function* () {
       // short-TTL cache in front of the `pipeline list` call (to bound
       // request rate from a chattier caller than "on demand") would make
       // it reachable live, without any change to the classifier itself.
-      const listResult = yield* unityPipelineClient.list();
+      // `workspaceRoot` pins the subprocess's own cwd, not a `--project-path`
+      // filter (that flag still doesn't exist for this subcommand) — see
+      // `UnityPipelineClient.ts`'s `list` doc comment for the live-observed
+      // reason: the CLI's own output is sensitive to invocation directory.
+      const listResult = yield* unityPipelineClient.list(workspaceRoot);
       let classifierPipelineList: UnitySetupClassifierPipelineList;
       let factsPipelineList: UnitySetupPipelineListOutcome;
       if (listResult._tag === "ok") {
@@ -216,9 +220,15 @@ export const make = Effect.gen(function* () {
         // `latestVersion` is CLI-wide (plan §1, corrected against the real
         // captured sample — see UnityPipelineClient.ts), so it's read off
         // the list result itself, not off `matched`.
-        const { latestVersion } = listResult.value;
+        const { latestVersion, unparseableInstanceCount } = listResult.value;
+        // The classifier never sees `unparseableInstanceCount` — it's a
+        // diagnostic/honesty fact (see UnitySetupPipelineListOutcome's doc
+        // comment in packages/contracts/src/unitySetup.ts), not a
+        // classification input; `matched`/`latestVersion` are exactly what
+        // `classifyUnitySetup` needs and nothing more, same "facts vs.
+        // primary state" separation the rest of this module already keeps.
         classifierPipelineList = { _tag: "ran", matched, latestVersion };
-        factsPipelineList = { _tag: "ran", matched, latestVersion };
+        factsPipelineList = { _tag: "ran", matched, latestVersion, unparseableInstanceCount };
       } else {
         // `notReady`/`cliUnavailable` are not real outcomes for `list()`
         // (see that method's own doc comment in UnityPipelineClient.ts),
