@@ -10,11 +10,15 @@ import {
 import { assert, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import * as EngineTypeResolver from "../../project/EngineTypeResolver.ts";
+import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -28,6 +32,7 @@ const asCheckpointRef = (value: string): CheckpointRef => CheckpointRef.make(val
 const projectionSnapshotLayer = it.layer(
   OrchestrationProjectionSnapshotQueryLive.pipe(
     Layer.provideMerge(RepositoryIdentityResolver.layer),
+    Layer.provideMerge(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(NodeServices.layer),
   ),
@@ -262,6 +267,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           repositoryIdentity: null,
+          engineType: null,
           defaultModelSelection: {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
@@ -380,6 +386,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           title: "Project 1",
           workspaceRoot: "/tmp/project-1",
           repositoryIdentity: null,
+          engineType: null,
           defaultModelSelection: {
             instanceId: ProviderInstanceId.make("codex"),
             model: "gpt-5-codex",
@@ -1820,6 +1827,80 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       );
     }),
   );
+
+  // Regression coverage for the review finding that every other engineType
+  // assertion in this file uses a workspace root that doesn't exist on disk
+  // (e.g. "/tmp/project-1"), so `?? null` and the dedup Map in
+  // resolveEngineTypesForProjects were never exercised with a real,
+  // non-null result. This test writes an actual project.godot marker to a
+  // real temp directory and threads it through every path a project reaches
+  // a client: the batched map (getSnapshot, getShellSnapshot) and the two
+  // direct single-project Effect.all lookups (getActiveProjectByWorkspaceRoot,
+  // getProjectShellById).
+  it.effect("threads a live-detected engine type through every project read path", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-projection-engine-type-",
+      });
+      yield* fileSystem.writeFileString(
+        path.join(workspaceRoot, "project.godot"),
+        "[gd_scene load_steps=1 format=3]\n",
+      );
+
+      yield* sql`DELETE FROM projection_projects`;
+      yield* sql`
+        INSERT INTO projection_projects (
+          project_id,
+          title,
+          workspace_root,
+          default_model_selection_json,
+          scripts_json,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'project-engine-type',
+          'Engine Type Project',
+          ${workspaceRoot},
+          NULL,
+          '[]',
+          '2026-03-01T00:00:00.000Z',
+          '2026-03-01T00:00:01.000Z',
+          NULL
+        )
+      `;
+
+      const snapshot = yield* snapshotQuery.getSnapshot();
+      const project = snapshot.projects.find(
+        (candidate) => candidate.id === asProjectId("project-engine-type"),
+      );
+      assert.equal(project?.engineType, "godot");
+
+      const shellSnapshot = yield* snapshotQuery.getShellSnapshot();
+      const shellProject = shellSnapshot.projects.find(
+        (candidate) => candidate.id === asProjectId("project-engine-type"),
+      );
+      assert.equal(shellProject?.engineType, "godot");
+
+      const byWorkspaceRoot = yield* snapshotQuery.getActiveProjectByWorkspaceRoot(workspaceRoot);
+      assert.equal(byWorkspaceRoot._tag, "Some");
+      if (byWorkspaceRoot._tag === "Some") {
+        assert.equal(byWorkspaceRoot.value.engineType, "godot");
+      }
+
+      const byId = yield* snapshotQuery.getProjectShellById(asProjectId("project-engine-type"));
+      assert.equal(byId._tag, "Some");
+      if (byId._tag === "Some") {
+        assert.equal(byId.value.engineType, "godot");
+      }
+    }),
+  );
 });
 
 it.effect(
@@ -1842,6 +1923,14 @@ it.effect(
                 rootPath: cwd,
               };
             }),
+        }),
+      ),
+      // This test is scoped to repository-identity dedup, not engine-type
+      // detection — a stub avoids pulling in FileSystem/Path/WorkspacePaths
+      // for something the test doesn't exercise.
+      Layer.provideMerge(
+        Layer.succeed(EngineTypeResolver.EngineTypeResolver, {
+          detect: () => Effect.succeed(null),
         }),
       ),
       Layer.provideMerge(SqlitePersistenceMemory),

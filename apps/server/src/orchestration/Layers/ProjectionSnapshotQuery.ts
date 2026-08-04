@@ -55,6 +55,7 @@ import { ProjectionThreadProposedPlan } from "../../persistence/Services/Project
 import { ProjectionThreadSession } from "../../persistence/Services/ProjectionThreadSessions.ts";
 import { ProjectionThread } from "../../persistence/Services/ProjectionThreads.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import * as EngineTypeResolver from "../../project/EngineTypeResolver.ts";
 import { ORCHESTRATION_PROJECTOR_NAMES } from "./ProjectionPipeline.ts";
 import {
   ProjectionSnapshotQuery,
@@ -285,12 +286,14 @@ function mapSessionRow(
 function mapProjectShellRow(
   row: Schema.Schema.Type<typeof ProjectionProjectDbRowSchema>,
   repositoryIdentity: OrchestrationProject["repositoryIdentity"],
+  engineType: OrchestrationProject["engineType"],
 ): OrchestrationProjectShell {
   return {
     id: row.projectId,
     title: row.title,
     workspaceRoot: row.workspaceRoot,
     repositoryIdentity,
+    engineType,
     defaultModelSelection: row.defaultModelSelection,
     scripts: row.scripts,
     createdAt: row.createdAt,
@@ -335,6 +338,7 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
 const makeProjectionSnapshotQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   const repositoryIdentityResolver = yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
+  const engineTypeResolver = yield* EngineTypeResolver.EngineTypeResolver;
   const repositoryIdentityResolutionConcurrency = 4;
   const resolveRepositoryIdentitiesForProjects = Effect.fn(
     "ProjectionSnapshotQuery.resolveRepositoryIdentitiesForProjects",
@@ -364,6 +368,44 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       filteredProjectRows.map((row) => [
         row.projectId,
         repositoryIdentityByWorkspaceRoot.get(row.workspaceRoot) ?? null,
+      ]),
+    );
+  });
+
+  // Mirrors resolveRepositoryIdentitiesForProjects above: batched, deduped
+  // by workspace root, and resolved LIVE on every read rather than stored
+  // (see EngineTypeResolver for why). EngineTypeResolver.detect never
+  // fails, so this helper is simpler than its repositoryIdentity sibling —
+  // there's no error channel to thread through.
+  const engineTypeResolutionConcurrency = 4;
+  const resolveEngineTypesForProjects = Effect.fn(
+    "ProjectionSnapshotQuery.resolveEngineTypesForProjects",
+  )(function* (
+    projectRows: ReadonlyArray<Schema.Schema.Type<typeof ProjectionProjectDbRowSchema>>,
+    options?: {
+      readonly includeDeleted?: boolean;
+    },
+  ) {
+    const filteredProjectRows =
+      options?.includeDeleted === true
+        ? projectRows
+        : projectRows.filter((row) => row.deletedAt === null);
+    const uniqueWorkspaceRoots = [...new Set(filteredProjectRows.map((row) => row.workspaceRoot))];
+    const engineTypeByWorkspaceRoot = new Map(
+      yield* Effect.forEach(
+        uniqueWorkspaceRoots,
+        (workspaceRoot) =>
+          engineTypeResolver
+            .detect(workspaceRoot)
+            .pipe(Effect.map((engineType) => [workspaceRoot, engineType] as const)),
+        { concurrency: engineTypeResolutionConcurrency },
+      ),
+    );
+
+    return new Map(
+      filteredProjectRows.map((row) => [
+        row.projectId,
+        engineTypeByWorkspaceRoot.get(row.workspaceRoot) ?? null,
       ]),
     );
   });
@@ -1410,12 +1452,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projectRows,
                 { includeDeleted: true },
               );
+              const engineTypes = yield* resolveEngineTypesForProjects(projectRows, {
+                includeDeleted: true,
+              });
 
               const projects: ReadonlyArray<OrchestrationProject> = projectRows.map((row) => ({
                 id: row.projectId,
                 title: row.title,
                 workspaceRoot: row.workspaceRoot,
                 repositoryIdentity: repositoryIdentities.get(row.projectId) ?? null,
+                engineType: engineTypes.get(row.projectId) ?? null,
                 defaultModelSelection: row.defaultModelSelection,
                 scripts: row.scripts,
                 createdAt: row.createdAt,
@@ -1793,6 +1839,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
               const repositoryIdentities =
                 yield* resolveRepositoryIdentitiesForProjects(projectRows);
+              const engineTypes = yield* resolveEngineTypesForProjects(projectRows);
               const latestTurnByThread = new Map(
                 latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
               );
@@ -1805,7 +1852,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 projects: Arr.filterMap(projectRows, (row) =>
                   row.deletedAt === null
                     ? Result.succeed(
-                        mapProjectShellRow(row, repositoryIdentities.get(row.projectId) ?? null),
+                        mapProjectShellRow(
+                          row,
+                          repositoryIdentities.get(row.projectId) ?? null,
+                          engineTypes.get(row.projectId) ?? null,
+                        ),
                       )
                     : Result.failVoid,
                 ),
@@ -1938,6 +1989,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             const repositoryIdentities = yield* resolveRepositoryIdentitiesForProjects(
               projectRows.filter((row) => activeProjectIds.has(row.projectId)),
             );
+            const engineTypes = yield* resolveEngineTypesForProjects(
+              projectRows.filter((row) => activeProjectIds.has(row.projectId)),
+            );
             const latestTurnByThread = new Map(
               latestTurnRows.map((row) => [row.threadId, mapLatestTurn(row)] as const),
             );
@@ -1950,7 +2004,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               projects: Arr.filterMap(projectRows, (row) =>
                 row.deletedAt === null && activeProjectIds.has(row.projectId)
                   ? Result.succeed(
-                      mapProjectShellRow(row, repositoryIdentities.get(row.projectId) ?? null),
+                      mapProjectShellRow(
+                        row,
+                        repositoryIdentities.get(row.projectId) ?? null,
+                        engineTypes.get(row.projectId) ?? null,
+                      ),
                     )
                   : Result.failVoid,
               ),
@@ -2071,13 +2129,22 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.flatMap((option) =>
           Option.isNone(option)
             ? Effect.succeed(Option.none<OrchestrationProject>())
-            : repositoryIdentityResolver.resolve(option.value.workspaceRoot).pipe(
-                Effect.map((repositoryIdentity) =>
+            : Effect.all(
+                {
+                  repositoryIdentity: repositoryIdentityResolver.resolve(
+                    option.value.workspaceRoot,
+                  ),
+                  engineType: engineTypeResolver.detect(option.value.workspaceRoot),
+                },
+                { concurrency: "unbounded" },
+              ).pipe(
+                Effect.map(({ repositoryIdentity, engineType }) =>
                   Option.some({
                     id: option.value.projectId,
                     title: option.value.title,
                     workspaceRoot: option.value.workspaceRoot,
                     repositoryIdentity,
+                    engineType,
                     defaultModelSelection: option.value.defaultModelSelection,
                     scripts: option.value.scripts,
                     createdAt: option.value.createdAt,
@@ -2100,13 +2167,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       Effect.flatMap((option) =>
         Option.isNone(option)
           ? Effect.succeed(Option.none<OrchestrationProjectShell>())
-          : repositoryIdentityResolver
-              .resolve(option.value.workspaceRoot)
-              .pipe(
-                Effect.map((repositoryIdentity) =>
-                  Option.some(mapProjectShellRow(option.value, repositoryIdentity)),
-                ),
+          : Effect.all(
+              {
+                repositoryIdentity: repositoryIdentityResolver.resolve(option.value.workspaceRoot),
+                engineType: engineTypeResolver.detect(option.value.workspaceRoot),
+              },
+              { concurrency: "unbounded" },
+            ).pipe(
+              Effect.map(({ repositoryIdentity, engineType }) =>
+                Option.some(mapProjectShellRow(option.value, repositoryIdentity, engineType)),
               ),
+            ),
       ),
     );
 

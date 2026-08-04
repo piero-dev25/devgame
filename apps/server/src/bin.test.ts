@@ -33,6 +33,7 @@ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { orchestrationHttpApiLayer } from "./orchestration/http.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import * as EngineTypeResolver from "./project/EngineTypeResolver.ts";
 import {
   makePersistedServerRuntimeState,
   persistServerRuntimeState,
@@ -99,6 +100,7 @@ const makeProjectPersistenceLayer = (config: ServerConfig.ServerConfig["Service"
   Layer.mergeAll(
     OrchestrationLayerLive.pipe(
       Layer.provideMerge(RepositoryIdentityResolver.layer),
+      Layer.provideMerge(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
       Layer.provideMerge(SqlitePersistenceLayerLive),
     ),
     WorkspacePaths.layer,

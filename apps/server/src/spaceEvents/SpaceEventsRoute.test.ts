@@ -40,6 +40,8 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { OrchestrationLayerLive } from "../orchestration/runtimeLayer.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
+import * as EngineTypeResolver from "../project/EngineTypeResolver.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
 import { spaceEventsRouteLayer } from "./SpaceEventsRoute.ts";
 
@@ -57,6 +59,7 @@ import { spaceEventsRouteLayer } from "./SpaceEventsRoute.ts";
 const makeSpaceEventsDependenciesLayer = () =>
   Layer.mergeAll(EnvironmentAuth.layer, OrchestrationLayerLive).pipe(
     Layer.provideMerge(RepositoryIdentityResolver.layer),
+    Layer.provideMerge(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
     Layer.provideMerge(ServerSecretStore.layer),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(

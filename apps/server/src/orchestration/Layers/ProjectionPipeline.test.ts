@@ -26,6 +26,8 @@ import {
 } from "../../persistence/Layers/Sqlite.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
+import * as EngineTypeResolver from "../../project/EngineTypeResolver.ts";
+import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import {
   ORCHESTRATION_PROJECTOR_NAMES,
@@ -2672,6 +2674,7 @@ const engineLayer = it.layer(
     Layer.provideMerge(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolver.layer),
+    Layer.provide(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), {

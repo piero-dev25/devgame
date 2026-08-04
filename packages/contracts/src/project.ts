@@ -14,6 +14,14 @@ const PROJECT_READ_FILE_PATH_MAX_LENGTH = 512;
 export const ProjectEntryKind = Schema.Literals(["file", "directory"]);
 export type ProjectEntryKind = typeof ProjectEntryKind.Type;
 
+// The game engine a project is written against, detected live from
+// well-known marker files in the workspace root (see EngineTypeResolver on
+// the server). `null` (unknown engine) is represented outside this schema —
+// call sites use `Schema.NullOr(EngineType)` — since "no marker matched" is
+// a valid, common outcome, not an invalid one.
+export const EngineType = Schema.Literals(["unity", "unreal", "godot", "threejs"]);
+export type EngineType = typeof EngineType.Type;
+
 export const ProjectSearchEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   // An empty query is a bounded browse: the index returns frecency-ordered

@@ -6,6 +6,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
 import { ProviderOptionSelections } from "./model.ts";
 import { RepositoryIdentity } from "./environment.ts";
+import { EngineType } from "./project.ts";
 import {
   ApprovalRequestId,
   CheckpointRef,
@@ -216,6 +217,11 @@ export const OrchestrationProject = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  // Detected LIVE from workspace marker files on every read (see
+  // EngineTypeResolver) — never persisted, so it can't go stale when an
+  // engine is added to an existing project folder. Optional so servers/
+  // fixtures predating this field still decode.
+  engineType: Schema.optional(Schema.NullOr(EngineType)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
@@ -445,6 +451,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   title: TrimmedNonEmptyString,
   workspaceRoot: TrimmedNonEmptyString,
   repositoryIdentity: Schema.optional(Schema.NullOr(RepositoryIdentity)),
+  // See OrchestrationProject.engineType — same live-detection contract.
+  engineType: Schema.optional(Schema.NullOr(EngineType)),
   defaultModelSelection: Schema.NullOr(ModelSelection),
   scripts: Schema.Array(ProjectScript),
   createdAt: IsoDateTime,
