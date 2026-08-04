@@ -10,7 +10,6 @@ import {
   probeUnityLockfilePresent,
   resolveUnityLaunchPlan,
   resolveUnityLaunchPlanForProject,
-  UNITY_COLD_START_EXECUTE_METHOD,
 } from "./UnityColdStart.ts";
 
 const makeTempDir = Effect.gen(function* () {
@@ -34,44 +33,32 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
 
 describe("resolveUnityLaunchPlan (pure decision — spec's test bar: chooses correctly present vs absent)", () => {
   it("chooses warm when the lockfile is present", () => {
-    expect(
-      resolveUnityLaunchPlan("/Applications/Unity/Hub/Editor/6000.3.14f1/Unity.app", "/proj", true),
-    ).toEqual({ kind: "warm" });
+    expect(resolveUnityLaunchPlan("/proj", true)).toEqual({ kind: "warm" });
   });
 
-  it("chooses cold, with the exact -projectPath/-executeMethod argv, when the lockfile is absent", () => {
-    const plan = resolveUnityLaunchPlan(
-      "/Applications/Unity/Hub/Editor/6000.3.14f1/Unity.app",
-      "/proj",
-      false,
-    );
+  it("chooses cold, with the exact `unity open <path>` argv, when the lockfile is absent", () => {
+    const plan = resolveUnityLaunchPlan("/proj", false);
     expect(plan).toEqual({
       kind: "cold",
-      args: [
-        "/Applications/Unity/Hub/Editor/6000.3.14f1/Unity.app",
-        "-projectPath",
-        "/proj",
-        "-executeMethod",
-        UNITY_COLD_START_EXECUTE_METHOD,
-      ],
+      args: ["unity", "open", "/proj", "--json"],
     });
   });
 });
 
-describe("buildUnityColdStartArgs", () => {
+describe("buildUnityColdStartArgs (VERIFIED live: `unity open <path>` — positional, not --project-path)", () => {
   it("never includes -batchmode or -quit — the cold path leaves a visible, interactive Editor", () => {
-    const args = buildUnityColdStartArgs("/path/to/Unity", "/proj");
+    const args = buildUnityColdStartArgs("/proj");
     expect(args).not.toContain("-batchmode");
     expect(args).not.toContain("-quit");
   });
 
-  it("targets the Unity-side cold-start entry point by its fully-qualified name", () => {
-    const args = buildUnityColdStartArgs("/path/to/Unity", "/proj");
-    const methodIndex = args.indexOf("-executeMethod");
-    expect(methodIndex).toBeGreaterThanOrEqual(0);
-    expect(args[methodIndex + 1]).toBe(
-      "Ironmind.EditorPresence.EditorPresenceColdStartEntryPoint.EnterPlaymodeOnLaunch",
-    );
+  it("passes the project path as a bare positional argument, not a --project-path flag", () => {
+    // `unity open --project-path <path>` errors with "unknown option" —
+    // measured live against the real `unity` CLI. `unity open <path>` is
+    // the only form that works.
+    const args = buildUnityColdStartArgs("/proj");
+    expect(args).not.toContain("--project-path");
+    expect(args).toEqual(["unity", "open", "/proj", "--json"]);
   });
 });
 
@@ -114,7 +101,7 @@ it.layer(TestLayer)("probeUnityLockfilePresent / resolveUnityLaunchPlanForProjec
       Effect.gen(function* () {
         const cwd = yield* makeTempDir;
         yield* writeTextFile(cwd, "Temp/UnityLockfile", "");
-        const plan = yield* resolveUnityLaunchPlanForProject("/path/to/Unity", cwd);
+        const plan = yield* resolveUnityLaunchPlanForProject(cwd);
         expect(plan).toEqual({ kind: "warm" });
       }),
   );
@@ -124,7 +111,7 @@ it.layer(TestLayer)("probeUnityLockfilePresent / resolveUnityLaunchPlanForProjec
     () =>
       Effect.gen(function* () {
         const cwd = yield* makeTempDir;
-        const plan = yield* resolveUnityLaunchPlanForProject("/path/to/Unity", cwd);
+        const plan = yield* resolveUnityLaunchPlanForProject(cwd);
         expect(plan.kind).toBe("cold");
         if (plan.kind === "cold") {
           expect(plan.args).toContain(cwd);

@@ -8,16 +8,32 @@
  * while the lockfile is held. That single fact splits "make Unity play" in
  * half:
  *
- * - WARM: an Editor is already open (lockfile present) — a `command` frame
- *   over the existing Editor Presence connection, exactly like every other
- *   engine. See `EditorPresenceRegistry.ts`'s `sendCommand` /
- *   `EditorPresenceRoute.ts`'s `dispatchEditorCommand`.
- * - COLD: no Editor is open (lockfile absent) — launch one with
- *   `-projectPath <path> -executeMethod <Class.Method>`, where the invoked
- *   method enters Play Mode once the project finishes loading. The Unity
- *   side of that entry point is
- *   `unity/com.ironmind.editor-presence/Editor/EditorPresenceColdStartEntryPoint.cs`
- *   (`EnterPlaymodeOnLaunch`).
+ * - WARM: an Editor is already open (lockfile present) — `../unity/
+ *   UnityPipelineClient.ts`'s `play`/`stop`/`pause`/`status`, which shell
+ *   out to Unity's official `unity` CLI / `com.unity.pipeline` package.
+ * - COLD: no Editor is open (lockfile absent) — launch one.
+ *
+ * REVISED BY OWNER DIRECTION (superseding this module's original design):
+ * the cold launch is `unity open <projectRoot>` — the `unity` CLI's own
+ * command, VERIFIED live (see `UnityColdStart.test.ts` and the session this
+ * shipped in) to auto-detect the correct Editor version from the project's
+ * own `ProjectVersion.txt` and return once the launch itself is confirmed
+ * (not once the Editor finishes loading — a caller polls
+ * `UnityPipelineClient.status` afterward for that, per that module's own
+ * "No Pipeline instance found for project" -> `notReady` handling). This
+ * REPLACES the original design of invoking the raw Unity Editor binary
+ * directly with `-projectPath <path> -executeMethod <Class.Method>`: no
+ * caller yet exists for a `-projectPath` launch (see the SCOPE note below),
+ * and the CLI's `open` subcommand does everything that mechanism needed
+ * without depending on our own `com.ironmind.editor-presence` plugin being
+ * installed in the target project at all — which, per the owner's
+ * redirect, it currently is NOT in the one project that matters tonight
+ * (`~/Projects/Deepmind`). The old `-executeMethod` entry point
+ * (`unity/com.ironmind.editor-presence/Editor/EditorPresenceColdStartEntryPoint.cs`,
+ * `EnterPlaymodeOnLaunch`) is not deleted — it remains the answer for the
+ * separate WebSocket-based Editor Presence path this module does not cover
+ * (an Editor that cannot reach this server directly) — but it is not what
+ * `buildUnityColdStartArgs` below builds.
  *
  * The cold path is launch-time ONLY — per the spec's own warning, it cannot
  * drive an Editor that is already running (the lockfile rejects the second
@@ -32,7 +48,8 @@
  * #47 with zero RPC callers for the identical reason ("build the capability,
  * the caller comes later"). A future caller (the toolbar's dispatch, task
  * #52, or a CLI command) composes `resolveUnityLaunchPlan` with its own
- * process-spawn mechanism.
+ * process-spawn mechanism — `ProcessRunner` (`../processRunner.ts`), the
+ * same one `UnityPipelineClient.ts` already uses for the warm path.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -42,39 +59,37 @@ import * as Path from "effect/Path";
  * already has that project open. See the module doc above. */
 export const UNITY_LOCKFILE_RELATIVE_PATH = "Temp/UnityLockfile";
 
-/** The Unity-side static method a cold-launched Editor calls once the
- * project has finished loading, via Unity's own `-executeMethod` contract —
- * see `EditorPresenceColdStartEntryPoint.cs`. Exported so a future caller
- * building the actual launch and this module's own tests share one source
- * of truth rather than two copies of the fully-qualified name drifting
- * apart. */
-export const UNITY_COLD_START_EXECUTE_METHOD =
-  "Ironmind.EditorPresence.EditorPresenceColdStartEntryPoint.EnterPlaymodeOnLaunch";
+/** Same binary `UnityPipelineClient.ts` shells out to for the warm path —
+ * kept as its own constant here (not imported from that module) so this
+ * file has no dependency on it; both independently name the same `unity`
+ * CLI on PATH. */
+const UNITY_CLI_COMMAND = "unity";
 
 export type UnityLaunchPlan =
   | { readonly kind: "warm" }
   | { readonly kind: "cold"; readonly args: ReadonlyArray<string> };
 
 /**
- * Pure: the exact argv a cold launch would pass to the Unity Editor binary.
- * Deliberately NO `-batchmode` / `-quit` — the point of the cold path is a
- * normal, VISIBLE Editor the user can keep working in once Play is entered,
- * not a headless job that runs the method and exits. `unityEditorPath` is
- * `argv[0]`, matching how every other spawn site in this repo builds an
- * argv (the executable is part of the array, not a separate parameter the
- * caller has to remember to prepend).
+ * Pure: the exact argv a cold launch would pass to spawn the `unity` CLI.
+ * `args[0]` is the command itself (`"unity"`), matching how every other
+ * spawn site in this repo builds an argv. Deliberately NO `-batchmode` /
+ * `-quit` — the point of the cold path is a normal, VISIBLE Editor the user
+ * can keep working in once Play is entered, not a headless job that runs
+ * and exits. `--json` is included so a caller gets the same machine-
+ * readable envelope `UnityPipelineClient.ts` parses elsewhere, rather than
+ * the human-formatted default.
+ *
+ * VERIFIED live: `unity open <projectRoot>` takes the project path as a
+ * POSITIONAL argument, not a `--project-path` flag — that flag is only
+ * accepted by `unity command`/`unity pipeline`, not `unity open`, and
+ * errors with "unknown option" if used here. `unity open` auto-detects and
+ * launches the correct installed Editor version from the project's own
+ * `ProjectVersion.txt`, so there is no separate Editor-path parameter to
+ * thread through here at all (a real simplification over the previous
+ * design, which needed the caller to know where the Editor binary lived).
  */
-export function buildUnityColdStartArgs(
-  unityEditorPath: string,
-  projectRoot: string,
-): ReadonlyArray<string> {
-  return [
-    unityEditorPath,
-    "-projectPath",
-    projectRoot,
-    "-executeMethod",
-    UNITY_COLD_START_EXECUTE_METHOD,
-  ];
+export function buildUnityColdStartArgs(projectRoot: string): ReadonlyArray<string> {
+  return [UNITY_CLI_COMMAND, "open", projectRoot, "--json"];
 }
 
 /**
@@ -85,12 +100,11 @@ export function buildUnityColdStartArgs(
  * Effect/FileSystem plumbing required.
  */
 export function resolveUnityLaunchPlan(
-  unityEditorPath: string,
   projectRoot: string,
   lockfilePresent: boolean,
 ): UnityLaunchPlan {
   if (lockfilePresent) return { kind: "warm" };
-  return { kind: "cold", args: buildUnityColdStartArgs(unityEditorPath, projectRoot) };
+  return { kind: "cold", args: buildUnityColdStartArgs(projectRoot) };
 }
 
 /**
@@ -105,6 +119,13 @@ export function resolveUnityLaunchPlan(
  * refusal; a launch silently never offered because of a transient stat
  * error is the worse failure mode, since nothing distinguishes it from
  * "the user never asked."
+ *
+ * This is a zero-round-trip, purely local pre-flight check — cheaper than
+ * asking `UnityPipelineClient.status` (a real subprocess spawn + a local
+ * HTTP round trip to a possibly-nonexistent server) just to learn "is
+ * anyone even listening." `UnityPipelineClient`'s own `notReady` outcome is
+ * the authoritative live signal once a command is actually attempted; this
+ * probe exists to decide WHETHER to attempt one before paying that cost.
  */
 export const probeUnityLockfilePresent = (
   projectRoot: string,
@@ -119,16 +140,15 @@ export const probeUnityLockfilePresent = (
 /**
  * Combines the probe and the decision — the end-to-end "choose by probing
  * the lockfile" the spec asks for. Separate from `resolveUnityLaunchPlan`
- * so a caller that already knows presence (e.g. a test, or a future
- * `EditorPresenceRegistry`-aware caller that checks the WARM path's own
- * registry first and only probes the filesystem as a fallback) is not
- * forced through a filesystem effect it doesn't need.
+ * so a caller that already knows presence (e.g. a test, or a future caller
+ * that checks `UnityPipelineClient.status` first and only probes the
+ * filesystem as a fallback) is not forced through a filesystem effect it
+ * doesn't need.
  */
 export const resolveUnityLaunchPlanForProject = (
-  unityEditorPath: string,
   projectRoot: string,
 ): Effect.Effect<UnityLaunchPlan, never, FileSystem.FileSystem | Path.Path> =>
   Effect.gen(function* () {
     const lockfilePresent = yield* probeUnityLockfilePresent(projectRoot);
-    return resolveUnityLaunchPlan(unityEditorPath, projectRoot, lockfilePresent);
+    return resolveUnityLaunchPlan(projectRoot, lockfilePresent);
   });
