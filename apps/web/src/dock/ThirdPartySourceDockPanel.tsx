@@ -34,13 +34,20 @@
  * has. No active route at all → the action is unavailable with a stated
  * reason, not a silent no-op.
  *
- * REGISTERED (task #55) — `ChatDock.tsx` registers this panel now, so the
- * code path this file describes is reachable. Read `ChatDock.tsx`'s own
- * registration comment before treating that as "shippable": as of
- * registration, `#75`'s F1/F2/F3/F5/F7 findings against the
- * `will-attach-webview` allowlist are fixed (`f425a8ebd`), and an
- * INDEPENDENT REVIEW of the fix commit is still running and may land
- * further findings.
+ * REGISTRATION HELD (`a10d37791`), NOT registered as of this comment —
+ * corrected 2026-08-04, an earlier version of this comment said
+ * `ChatDock.tsx` registers this panel; that was true only briefly. The
+ * independent review that found F1/F2/F3/F5/F7 real also proved a
+ * complete bypass of F2/F3 (G1: the will-attach-webview allowlist
+ * classified from the wrong field) and a second, larger-blast-radius
+ * issue (G4: `thirdPartySourceTabId()` is a fixed, guessable string
+ * reachable by every automation MCP tool with no partition check).
+ * Registration was reverted rather than left live behind either. G1 is
+ * now fixed and re-verified DENIED against the reviewer's own probe
+ * (`098aea5e2`); G4 is a separate lane's active work. This file, its
+ * component, and its tests are otherwise finished — read `ChatDock.tsx`'s
+ * own registration comment for the current, authoritative status before
+ * assuming this is reachable.
  *
  * F4 SIGN-OUT (owner ruling, relayed 2026-08-04): "Sign out" clears the
  * ACTIVE source's cookies/storage only — see `onSignOut` below and

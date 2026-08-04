@@ -67,10 +67,16 @@ export const PREVIEW_WEBVIEW_PREFERENCES =
  * pass before merge — a review addressing version N doesn't clear
  * version N+1 just because it was written in response.
  *
- * STILL NOT LIVE, for a separate reason: the third-party dock panel
- * (`ThirdPartySourceDockPanel.tsx`) is not yet registered in `ChatDock.tsx`
- * — that's the dock-migration lane's active territory, sequenced
- * separately — so no real `<webview>` on this partition attaches yet.
+ * STILL NOT LIVE, for a separate reason — and NOT the original one. The
+ * third-party dock panel (`ThirdPartySourceDockPanel.tsx`) WAS registered
+ * in `ChatDock.tsx` at one point, then the registration was deliberately
+ * HELD (`a10d37791`) once the independent review proved a full bypass of
+ * F2/F3 (G1) and identified a second, larger-blast-radius issue (G4: a
+ * fixed, guessable tabId reachable by every automation MCP tool). G1 is
+ * now fixed (`098aea5e2`) and re-verified DENIED against the reviewer's
+ * own probe; G4 is a separate lane's active work. Un-holding registration
+ * requires BOTH closed, not just this one — see `ChatDock.tsx`'s own
+ * registration comment for the current, authoritative status.
  */
 export const THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES =
   "contextIsolation=true,sandbox=true,nodeIntegration=false";
