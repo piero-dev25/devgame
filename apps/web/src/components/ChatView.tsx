@@ -128,6 +128,11 @@ import {
 } from "../rightPanelStore";
 import { useFileExplorerStore } from "~/fileExplorerStore";
 import {
+  selectTerminalDockPanelTerminalIds,
+  selectThreadTerminalDockState,
+  useTerminalDockStore,
+} from "~/terminalDockStore";
+import {
   isPreviewSupportedInRuntime,
   setActivePreviewTab,
   useThreadPreviewState,
@@ -164,6 +169,7 @@ import {
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
   openChatDockPanel,
+  TERMINAL_PANEL_ID,
   toggleChatDockPanel,
 } from "~/dock/chatDockHandle";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
@@ -667,17 +673,13 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     environmentId: threadRef.environmentId,
     threadId,
   });
-  const panelSurfaces = useRightPanelStore(
-    (state) => selectThreadRightPanelState(state.byThreadKey, threadRef).surfaces,
-  );
-  const panelTerminalIds = useMemo(
-    () =>
-      new Set(
-        panelSurfaces.flatMap((surface) =>
-          surface.kind === "terminal" ? surface.terminalIds : [],
-        ),
-      ),
-    [panelSurfaces],
+  // Task #53: Terminal moved to a dock panel — this exclusion, which used
+  // to read `rightPanelStore`'s "terminal" surfaces, now reads
+  // `terminalDockStore` instead (see that file's own doc comment). Same
+  // purpose as before: a terminal claimed by the dock panel must never ALSO
+  // render in the drawer.
+  const panelTerminalIds = useTerminalDockStore((state) =>
+    selectTerminalDockPanelTerminalIds(state.byThreadKey, threadRef),
   );
   const drawerTerminalSessions = useMemo(
     () =>
@@ -986,174 +988,13 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   );
 });
 
-interface PersistentThreadTerminalPanelProps {
-  threadRef: ScopedThreadRef;
-  surface: Extract<RightPanelSurface, { kind: "terminal" }>;
-  launchContext: PersistentTerminalLaunchContext | null;
-  focusRequestId: number;
-  keybindings: ResolvedKeybindingsConfig;
-  onAddTerminalContext: (selection: TerminalContextSelection) => void;
-  onSplitTerminal: () => void;
-  onSplitTerminalVertical: () => void;
-  onNewTerminal: () => void;
-  onActiveTerminalChange: (terminalId: string) => void;
-  onCloseTerminal: (terminalId: string) => void;
-  splitShortcutLabel?: string | undefined;
-  splitVerticalShortcutLabel?: string | undefined;
-  newShortcutLabel?: string | undefined;
-  closeShortcutLabel?: string | undefined;
-}
-
-const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPanel({
-  threadRef,
-  surface,
-  launchContext,
-  focusRequestId,
-  keybindings,
-  onAddTerminalContext,
-  onSplitTerminal,
-  onSplitTerminalVertical,
-  onNewTerminal,
-  onActiveTerminalChange,
-  onCloseTerminal,
-  splitShortcutLabel,
-  splitVerticalShortcutLabel,
-  newShortcutLabel,
-  closeShortcutLabel,
-}: PersistentThreadTerminalPanelProps) {
-  const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
-  const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
-  const projectRef = serverThread
-    ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
-    : draftThread
-      ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
-      : null;
-  const project = useProject(projectRef);
-  const knownTerminalSessions = useKnownTerminalSessions({
-    environmentId: threadRef.environmentId,
-    threadId: threadRef.threadId,
-  });
-  const threadWorktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
-  const activeSummary =
-    knownTerminalSessions.find((session) => session.target.terminalId === surface.activeTerminalId)
-      ?.state.summary ?? null;
-  const worktreePath =
-    launchContext?.worktreePath ?? activeSummary?.worktreePath ?? threadWorktreePath;
-  const cwd = useMemo(
-    () =>
-      launchContext?.cwd ??
-      activeSummary?.cwd ??
-      (project
-        ? projectScriptCwd({
-            project: { cwd: project.workspaceRoot },
-            worktreePath,
-          })
-        : null),
-    [activeSummary?.cwd, launchContext?.cwd, project, worktreePath],
-  );
-  const runtimeEnv = useMemo(
-    () =>
-      project
-        ? projectScriptRuntimeEnv({
-            project: { cwd: project.workspaceRoot },
-            worktreePath,
-          })
-        : {},
-    [project, worktreePath],
-  );
-  const terminalLabelsById = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const terminalId of surface.terminalIds) {
-      const summary =
-        knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
-          .summary ?? null;
-      labels.set(terminalId, resolveTerminalSessionLabel(terminalId, summary));
-    }
-    return labels;
-  }, [knownTerminalSessions, surface.terminalIds]);
-  const terminalLaunchLocationsById = useMemo(() => {
-    const locations = new Map<
-      string,
-      {
-        readonly cwd: string;
-        readonly worktreePath: string | null;
-        readonly runtimeEnv: Record<string, string>;
-      }
-    >();
-    for (const terminalId of surface.terminalIds) {
-      const summary =
-        knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
-          .summary ?? null;
-      const terminalWorktreePath =
-        launchContext?.worktreePath ?? summary?.worktreePath ?? threadWorktreePath;
-      const terminalCwd =
-        launchContext?.cwd ??
-        summary?.cwd ??
-        (project
-          ? projectScriptCwd({
-              project: { cwd: project.workspaceRoot },
-              worktreePath: terminalWorktreePath,
-            })
-          : null);
-      if (!terminalCwd || !project) continue;
-      locations.set(terminalId, {
-        cwd: terminalCwd,
-        worktreePath: terminalWorktreePath,
-        runtimeEnv: projectScriptRuntimeEnv({
-          project: { cwd: project.workspaceRoot },
-          worktreePath: terminalWorktreePath,
-        }),
-      });
-    }
-    return locations;
-  }, [
-    knownTerminalSessions,
-    launchContext?.cwd,
-    launchContext?.worktreePath,
-    project,
-    surface.terminalIds,
-    threadWorktreePath,
-  ]);
-
-  if (!project || !cwd) return null;
-
-  return (
-    <ThreadTerminalDrawer
-      mode="panel"
-      threadRef={threadRef}
-      threadId={threadRef.threadId}
-      cwd={cwd}
-      worktreePath={worktreePath}
-      runtimeEnv={runtimeEnv}
-      height={0}
-      terminalIds={surface.terminalIds}
-      activeTerminalId={surface.activeTerminalId}
-      terminalGroups={[
-        {
-          id: surface.id,
-          terminalIds: surface.terminalIds,
-          ...(surface.splitDirection === "vertical" ? { splitDirection: "vertical" as const } : {}),
-        },
-      ]}
-      activeTerminalGroupId={surface.id}
-      focusRequestId={focusRequestId}
-      onSplitTerminal={onSplitTerminal}
-      onSplitTerminalVertical={onSplitTerminalVertical}
-      onNewTerminal={onNewTerminal}
-      splitShortcutLabel={splitShortcutLabel}
-      splitVerticalShortcutLabel={splitVerticalShortcutLabel}
-      newShortcutLabel={newShortcutLabel}
-      closeShortcutLabel={closeShortcutLabel}
-      onActiveTerminalChange={onActiveTerminalChange}
-      onCloseTerminal={onCloseTerminal}
-      onHeightChange={() => undefined}
-      onAddTerminalContext={onAddTerminalContext}
-      terminalLabelsById={terminalLabelsById}
-      terminalLaunchLocationsById={terminalLaunchLocationsById}
-      keybindings={keybindings}
-    />
-  );
-});
+// Task #53: `PersistentThreadTerminalPanel` (the right-panel terminal
+// surface's own renderer) is DELETED here, same as Diff/Files' own inline
+// renderers before it — Terminal is now `dock/TerminalDockPanel.tsx`, a
+// fully self-contained dock panel (its own `ThreadTerminalDrawer` mode=
+// "panel" usage, own thread/project/cwd resolution, own
+// `terminalDockStore.ts`-backed group state), no longer threaded down from
+// ChatView at all.
 
 // Errors surface through two maps (draft-keyed and thread-keyed) whose entries
 // can race around promotion, so each write carries its time to let the latest
@@ -1512,16 +1353,6 @@ function ChatViewContent(props: ChatViewProps) {
     () => [...new Set([...activeServerOrderedTerminalIds, ...terminalUiState.terminalIds])],
     [activeServerOrderedTerminalIds, terminalUiState.terminalIds],
   );
-  const activeTerminalLabelsById = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const session of activeThreadKnownSessions) {
-      labels.set(
-        session.target.terminalId,
-        resolveTerminalSessionLabel(session.target.terminalId, session.state.summary),
-      );
-    }
-    return labels;
-  }, [activeThreadKnownSessions]);
   const activeThreadRef = useMemo(
     () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
     [activeThread],
@@ -1548,14 +1379,22 @@ function ChatViewContent(props: ChatViewProps) {
   const activePreviewMiniPlayer = usePreviewMiniPlayerStore((state) =>
     selectThreadPreviewMiniPlayer(state.byThreadKey, activeThreadRef),
   );
+  // Task #53: reads `terminalDockStore` instead of `rightPanelStore` — see
+  // that store's own doc comment. `terminalDockState` (not just the id set)
+  // is also kept here: the global `terminal.split`/`terminal.splitVertical`/
+  // `terminal.close` keyboard shortcuts (keybindings.ts) still need to
+  // reach the PANEL's active group when focus is inside it, and there is no
+  // ChatView-reachable ref into a sibling dock panel the way there was into
+  // the old right-panel `activeRightPanelSurface` — this store IS that
+  // reachable state, same as `TerminalDockPanel.tsx` reads for itself.
+  const terminalDockState = useTerminalDockStore((state) =>
+    selectThreadTerminalDockState(state.byThreadKey, activeThreadRef),
+  );
+  const activeTerminalDockGroup =
+    terminalDockState.groups.find((group) => group.id === terminalDockState.activeGroupId) ?? null;
   const panelTerminalIds = useMemo(
-    () =>
-      new Set(
-        rightPanelState.surfaces.flatMap((surface) =>
-          surface.kind === "terminal" ? surface.terminalIds : [],
-        ),
-      ),
-    [rightPanelState.surfaces],
+    () => new Set(terminalDockState.groups.flatMap((group) => group.terminalIds)),
+    [terminalDockState.groups],
   );
   const allocatableActiveTerminalIds = useMemo(
     () => [...new Set([...activeKnownTerminalIds, ...panelTerminalIds])],
@@ -3391,11 +3230,34 @@ function ChatViewContent(props: ChatViewProps) {
       useRightPanelStore.getState().close(activeThreadRef);
     }
   }, [activeThreadRef]);
+  // Task #53: `addTerminalSurface` is now the open-only redirect
+  // `addDiffSurface`/`addFilesSurface` already established for their own
+  // panels — same name (RightPanelTabs' add-menu and the `terminal.new`
+  // keyboard shortcut both still call it), simplified body. Launching an
+  // actual terminal now happens entirely inside `TerminalDockPanel.tsx`
+  // (its own `onNewTerminal`) for mouse-driven opens; this function only
+  // still does real work for the KEYBOARD-shortcut case below, where focus
+  // is already inside the panel and there is no click to delegate to.
   const addTerminalSurface = useCallback(() => {
+    if (!activeThreadRef || !activeProject) return;
+    openChatDockPanel(TERMINAL_PANEL_ID);
+  }, [activeProject, activeThreadRef]);
+  // The four callbacks below exist ONLY for the global `terminal.new`/
+  // `terminal.split`/`terminal.splitVertical`/`terminal.close` keyboard
+  // shortcuts (keybindings.ts) when `getTerminalFocusOwner()` reports focus
+  // is inside the panel (`data-terminal-owner="right-panel"`, set by
+  // `ThreadTerminalDrawer` itself regardless of which component mounts it —
+  // see terminalFocus.ts). `TerminalDockPanel.tsx` is a SIBLING subtree,
+  // not reachable via ref/context the way `activeRightPanelSurface` used to
+  // be threaded down to it — so these read/write `terminalDockStore`
+  // directly, the same reachable state `TerminalDockPanel.tsx` itself
+  // reads, rather than duplicating panel-only UI (the panel's own tab
+  // strip/buttons still do the mouse-driven equivalent independently).
+  const newPanelTerminal = useCallback(() => {
     if (!activeThreadRef || !activeThreadId || !activeProject) return;
     const cwd = gitCwd ?? activeProject.workspaceRoot;
     const terminalId = nextTerminalId(allocatableActiveTerminalIds);
-    useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
+    useTerminalDockStore.getState().openTerminal(activeThreadRef, terminalId);
     setTerminalFocusRequestId((value) => value + 1);
     void openTerminal({
       environmentId: activeThreadRef.environmentId,
@@ -3425,16 +3287,16 @@ function ChatViewContent(props: ChatViewProps) {
         !activeThreadRef ||
         !activeThreadId ||
         !activeProject ||
-        activeRightPanelSurface?.kind !== "terminal" ||
-        activeRightPanelSurface.terminalIds.length >= MAX_TERMINALS_PER_GROUP
+        !activeTerminalDockGroup ||
+        activeTerminalDockGroup.terminalIds.length >= MAX_TERMINALS_PER_GROUP
       ) {
         return;
       }
       const terminalId = nextTerminalId(allocatableActiveTerminalIds);
       const cwd = gitCwd ?? activeProject.workspaceRoot;
-      useRightPanelStore
+      useTerminalDockStore
         .getState()
-        .splitTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId, direction);
+        .splitTerminal(activeThreadRef, activeTerminalDockGroup.id, terminalId, direction);
       setTerminalFocusRequestId((value) => value + 1);
       void openTerminal({
         environmentId: activeThreadRef.environmentId,
@@ -3452,7 +3314,7 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [
       activeProject,
-      activeRightPanelSurface,
+      activeTerminalDockGroup,
       activeThreadId,
       activeThreadRef,
       activeThreadWorktreePath,
@@ -3464,30 +3326,25 @@ function ChatViewContent(props: ChatViewProps) {
   const splitPanelTerminalVertical = useCallback(() => {
     splitPanelTerminal("vertical");
   }, [splitPanelTerminal]);
-  const activatePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
-      useRightPanelStore
-        .getState()
-        .activateTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
-    },
-    [activeRightPanelSurface, activeThreadRef],
-  );
   const closePanelTerminal = useCallback(
     (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
+      if (!activeThreadRef || !activeTerminalDockGroup) return;
       void closeTerminalMutation({
         environmentId: activeThreadRef.environmentId,
         input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
       });
+      // Suppresses `terminalId` from `terminalUiStateStore`'s own
+      // reconciliation too — same cross-store call the old right-panel
+      // `closePanelTerminal` made, so a just-closed panel terminal can
+      // never transiently flash into the DRAWER before the server reports
+      // it gone.
       storeCloseTerminal(activeThreadRef, terminalId);
-      useRightPanelStore
+      useTerminalDockStore
         .getState()
-        .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
+        .closeTerminal(activeThreadRef, activeTerminalDockGroup.id, terminalId);
       setTerminalFocusRequestId((value) => value + 1);
     },
-    [activeRightPanelSurface, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
+    [activeTerminalDockGroup, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
   );
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
@@ -3501,12 +3358,10 @@ function ChatViewContent(props: ChatViewProps) {
       if (surface.kind === "preview" && surface.resourceId) {
         setActivePreviewTab(activeThreadRef, surface.resourceId);
       }
-      if (surface.kind === "terminal") {
-        setTerminalFocusRequestId((value) => value + 1);
-      }
       // Review fix (#56): dropped the `surface.kind === "diff"` branch that
-      // used to live here. It's now unreachable by construction — "diff" is
-      // no longer a member of RightPanelSurface (rightPanelStore.ts), so a
+      // used to live here; task #53 drops the `surface.kind === "terminal"`
+      // one the same way. Both are now unreachable by construction — neither
+      // is a member of RightPanelSurface (rightPanelStore.ts) any more, so a
       // surface passed here can never have that kind; the compiler catching
       // this comparison is exactly the point of that removal.
     },
@@ -3537,6 +3392,10 @@ function ChatViewContent(props: ChatViewProps) {
         dismissPlanSidebarForCurrentTurn();
       }
 
+      // Task #53: dropped the `surface.kind === "terminal"` branch that used
+      // to live here, same reasoning as `activateRightPanelSurface` above —
+      // unreachable by construction now that "terminal" is no longer a
+      // member of RightPanelSurface.
       for (const surface of surfaces) {
         if (surface.kind === "preview" && surface.resourceId) {
           void closePreviewSession({
@@ -3545,15 +3404,6 @@ function ChatViewContent(props: ChatViewProps) {
             tabId: surface.resourceId,
             threadRef: activeThreadRef,
           });
-        }
-        if (surface.kind === "terminal") {
-          for (const terminalId of surface.terminalIds) {
-            storeCloseTerminal(activeThreadRef, terminalId);
-            void closeTerminalMutation({
-              environmentId: activeThreadRef.environmentId,
-              input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
-            });
-          }
         }
       }
     },
@@ -4633,8 +4483,8 @@ function ChatViewContent(props: ChatViewProps) {
       if (command === "terminal.close") {
         event.preventDefault();
         event.stopPropagation();
-        if (terminalFocusOwner === "right-panel" && activeRightPanelSurface?.kind === "terminal") {
-          closePanelTerminal(activeRightPanelSurface.activeTerminalId);
+        if (terminalFocusOwner === "right-panel" && activeTerminalDockGroup) {
+          closePanelTerminal(activeTerminalDockGroup.activeTerminalId);
           return;
         }
         if (!terminalUiState.terminalOpen) return;
@@ -4646,7 +4496,7 @@ function ChatViewContent(props: ChatViewProps) {
         event.preventDefault();
         event.stopPropagation();
         if (terminalFocusOwner === "right-panel") {
-          addTerminalSurface();
+          newPanelTerminal();
           return;
         }
         if (!terminalUiState.terminalOpen) {
@@ -5877,24 +5727,6 @@ function ChatViewContent(props: ChatViewProps) {
           visible
         />
       </Suspense>
-    ) : activeRightPanelSurface?.kind === "terminal" ? (
-      <PersistentThreadTerminalPanel
-        threadRef={activeThreadRef}
-        surface={activeRightPanelSurface}
-        launchContext={activeTerminalLaunchContext ?? null}
-        focusRequestId={terminalFocusRequestId}
-        keybindings={keybindings}
-        onAddTerminalContext={addTerminalContextToDraft}
-        onSplitTerminal={splitPanelTerminal}
-        onSplitTerminalVertical={splitPanelTerminalVertical}
-        onNewTerminal={addTerminalSurface}
-        onActiveTerminalChange={activatePanelTerminal}
-        onCloseTerminal={closePanelTerminal}
-        splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
-        splitVerticalShortcutLabel={splitTerminalVerticalShortcutLabel ?? undefined}
-        newShortcutLabel={newTerminalShortcutLabel ?? undefined}
-        closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
-      />
     ) : activeRightPanelSurface?.kind === "plan" ? (
       <PlanSidebar
         activePlan={activePlan}
@@ -6314,7 +6146,6 @@ function ChatViewContent(props: ChatViewProps) {
           activeSurfaceId={activeRightPanelSurface?.id ?? null}
           pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
           previewSessions={activePreviewState.sessions}
-          terminalLabelsById={activeTerminalLabelsById}
           onActivate={activateRightPanelSurface}
           onCloseSurface={closeRightPanelSurface}
           onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
@@ -6340,7 +6171,6 @@ function ChatViewContent(props: ChatViewProps) {
             activeSurfaceId={activeRightPanelSurface?.id ?? null}
             pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
             previewSessions={activePreviewState.sessions}
-            terminalLabelsById={activeTerminalLabelsById}
             onActivate={activateRightPanelSurface}
             onCloseSurface={closeRightPanelSurface}
             onCloseOtherSurfaces={closeOtherRightPanelSurfaces}

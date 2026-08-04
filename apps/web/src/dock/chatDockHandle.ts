@@ -51,6 +51,10 @@ export const DIFF_PANEL_ID = "diff";
 /** Task #61, following the same pattern: `ChatView.tsx`'s `addFilesSurface`
  * needs this id to call `openChatDockPanel` after Files moved to the dock. */
 export const FILES_PANEL_ID = "files";
+/** Task #53, third slice, same pattern again: `ChatView.tsx`'s
+ * `addTerminalSurface` needs this id to call `openChatDockPanel` after
+ * Terminal moved to the dock. */
+export const TERMINAL_PANEL_ID = "terminal";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;

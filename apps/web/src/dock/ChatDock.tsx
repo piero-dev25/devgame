@@ -38,14 +38,20 @@ import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, Files, MessageCircle, PanelLeft } from "lucide-react";
+import { FileDiff, Files, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import { DIFF_PANEL_ID, FILES_PANEL_ID, registerChatDockHandle } from "./chatDockHandle";
+import {
+  DIFF_PANEL_ID,
+  FILES_PANEL_ID,
+  registerChatDockHandle,
+  TERMINAL_PANEL_ID,
+} from "./chatDockHandle";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import FilesDockPanel from "./FilesDockPanel";
+import TerminalDockPanel from "./TerminalDockPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -62,6 +68,7 @@ const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
 const FILES_GROUP_ID = "group-files";
+const TERMINAL_GROUP_ID = "group-terminal";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -246,10 +253,36 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * The default preset: sidebar on the left, chat next to it, Diff and Files
- * further right — the same third-column slot Files occupied before Part A
- * deleted our own version of it, now occupied by T3's own Diff AND Files
- * surfaces instead of a re-filled stand-in.
+ * Part B, third slice (task #53): T3's own Terminal surface as an ordinary
+ * dock panel. `TerminalDockPanel.tsx` is closer to Files' shape than Diff's
+ * — see its own doc comment for the session-lifecycle reasoning that makes
+ * it so.
+ *
+ * `singleton: true`: same reasoning as Diff/Files — one thread's terminal
+ * workspace (itself capable of holding several groups/splits internally,
+ * via `TerminalDockPanel`'s own tab strip) has no case for two simultaneous
+ * PANEL instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as Diff/
+ * Files — nothing depends on this panel staying mounted, and closing it no
+ * longer ends any session (see `terminalDockStore.ts`'s own doc comment for
+ * why that's a deliberate, precedent-matching change from the old
+ * right-panel tab's close behaviour).
+ */
+chatDockPanelRegistry.register({
+  id: TERMINAL_PANEL_ID,
+  title: "Terminal",
+  icon: TerminalSquare,
+  component: TerminalDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Diff, Files and
+ * Terminal further right — the same third-column slot Files occupied
+ * before Part A deleted our own version of it, now occupied by T3's own
+ * Diff, Files AND Terminal surfaces instead of a re-filled stand-in.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
@@ -303,7 +336,8 @@ function buildChatDockPreset(): SerializedDockview {
   const CHAT_WIDTH = 640;
   const DIFF_WIDTH = 400;
   const FILES_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH;
+  const TERMINAL_WIDTH = 400;
+  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH + TERMINAL_WIDTH;
 
   return {
     grid: {
@@ -334,6 +368,15 @@ function buildChatDockPreset(): SerializedDockview {
             size: FILES_WIDTH,
             data: { id: FILES_GROUP_ID, views: [FILES_PANEL_ID], activeView: FILES_PANEL_ID },
           },
+          {
+            type: "leaf",
+            size: TERMINAL_WIDTH,
+            data: {
+              id: TERMINAL_GROUP_ID,
+              views: [TERMINAL_PANEL_ID],
+              activeView: TERMINAL_PANEL_ID,
+            },
+          },
         ],
       },
     },
@@ -342,6 +385,7 @@ function buildChatDockPreset(): SerializedDockview {
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
       [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
+      [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),
     },
     activeGroup: CHAT_GROUP_ID,
   };

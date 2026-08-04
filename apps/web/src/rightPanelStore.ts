@@ -4,14 +4,14 @@
  * This is intentionally a shallow workspace model: it owns an ordered set of
  * surface descriptors and the active surface, while each feature continues to
  * own its durable resource state. Browser surfaces point at preview tab ids,
- * terminal surfaces point at terminal session ids, and plan remains a
- * singleton surface. Diff and Files ("files"/"file") used to live here too —
- * both are gone as of spec-surfaces-as-dock-panels.md, Part B: each moved to
- * a first-class dock panel, with its own visibility owned by the dock and
- * (for Files) its own in-panel selection state owned by a dedicated store
- * (`fileExplorerStore.ts`, mirroring `diffPanelStore.ts`'s own split for
- * Diff) — see `RIGHT_PANEL_KINDS`'s own comment for why each kind is
- * DELETED here rather than left unused.
+ * and plan remains a singleton surface. Diff, Files ("files"/"file") and, as
+ * of task #53, Terminal used to live here too — all are gone as of
+ * spec-surfaces-as-dock-panels.md, Part B: each moved to a first-class dock
+ * panel, with its own visibility owned by the dock and its own in-panel
+ * selection state owned by a dedicated store (`fileExplorerStore.ts` for
+ * Files, `terminalDockStore.ts` for Terminal, mirroring `diffPanelStore.ts`'s
+ * own split for Diff) — see `RIGHT_PANEL_KINDS`'s own comment for why each
+ * kind is DELETED here rather than left unused.
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -20,34 +20,27 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-// "diff" and, as of task #61, "files"/"file" are deliberately NOT members —
-// spec-surfaces-as-dock-panels.md, Part B moved each to a first-class dock
-// panel (see dock/ChatDock.tsx's registrations), and removing a kind from
-// this union (rather than leaving it unused) is what let the compiler find
-// every stale call site on the Diff pass — six of them across two files,
-// including onToggleDiff's Cmd+D binding, none of which a runtime check
-// alone would have flagged. The persisted-data side of each retired kind
-// still exists — see migratePersistedRightPanelState's own comment on why
-// those spots are exempt. This is the template for Terminal/Browser's own
-// eventual promotion: move the surface, then delete its kind here.
-export const RIGHT_PANEL_KINDS = ["plan", "preview", "terminal"] as const;
+// "diff", as of task #61 "files"/"file", and as of task #53 "terminal" are
+// deliberately NOT members — spec-surfaces-as-dock-panels.md, Part B moved
+// each to a first-class dock panel (see dock/ChatDock.tsx's registrations),
+// and removing a kind from this union (rather than leaving it unused) is
+// what let the compiler find every stale call site on the Diff pass — six
+// of them across two files, including onToggleDiff's Cmd+D binding, none of
+// which a runtime check alone would have flagged; on Files it found 36
+// across 7 files. The persisted-data side of each retired kind still
+// exists — see migratePersistedRightPanelState's own comment on why those
+// spots are exempt. This is the template Browser's own eventual promotion
+// follows too: move the surface, then delete its kind here.
+export const RIGHT_PANEL_KINDS = ["plan", "preview"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
 export type RightPanelSurface =
   | { id: `browser:${string}`; kind: "preview"; resourceId: string }
   | { id: "browser:new"; kind: "preview"; resourceId: null }
-  | {
-      id: `terminal:${string}`;
-      kind: "terminal";
-      resourceId: string;
-      terminalIds: string[];
-      activeTerminalId: string;
-      splitDirection?: "horizontal" | "vertical";
-    }
   | { id: "plan"; kind: "plan" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 9;
+const RIGHT_PANEL_STORAGE_VERSION = 10;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -57,17 +50,8 @@ export interface ThreadRightPanelState {
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "terminal">) => void;
+  open: (ref: ScopedThreadRef, kind: RightPanelKind) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
-  openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
-  splitTerminal: (
-    ref: ScopedThreadRef,
-    surfaceId: string,
-    terminalId: string,
-    direction?: "horizontal" | "vertical",
-  ) => void;
-  activateTerminal: (ref: ScopedThreadRef, surfaceId: string, terminalId: string) => void;
-  closeTerminal: (ref: ScopedThreadRef, surfaceId: string, terminalId: string) => void;
   activateSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeOtherSurfaces: (ref: ScopedThreadRef, surfaceId: string) => void;
@@ -77,7 +61,7 @@ interface RightPanelStoreState {
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
-  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "terminal">) => void;
+  toggle: (ref: ScopedThreadRef, kind: RightPanelKind) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -87,9 +71,7 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
   surfaces: [],
 };
 
-const singletonSurface = (
-  kind: Exclude<RightPanelKind, "preview" | "terminal">,
-): RightPanelSurface => {
+const singletonSurface = (kind: Exclude<RightPanelKind, "preview">): RightPanelSurface => {
   switch (kind) {
     case "plan":
       return { id: "plan", kind };
@@ -100,14 +82,6 @@ const browserSurface = (tabId: string | null): RightPanelSurface =>
   tabId
     ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
     : { id: "browser:new", kind: "preview", resourceId: null };
-
-const terminalSurface = (terminalId: string): RightPanelSurface => ({
-  id: `terminal:${terminalId}`,
-  kind: "terminal",
-  resourceId: terminalId,
-  terminalIds: [terminalId],
-  activeTerminalId: terminalId,
-});
 
 const upsertSurface = (
   current: ThreadRightPanelState,
@@ -154,22 +128,26 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                 threadState && typeof threadState === "object" ? threadState : null;
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
-                    // v8 added "diff"; v9 (task #61) adds "files" (the
-                    // browser) and "file" (one opened file) — each moved to
-                    // a first-class dock panel (spec-surfaces-as-dock-
-                    // panels.md, Part B) and no longer a right-panel surface
-                    // kind ChatView renders; visibility for each now lives
-                    // in the dock's own layout state. "File"'s own payload
-                    // (relativePath/revealLine/revealRequestId, which open
-                    // files) moved WITH it, into fileExplorerStore.ts's own
-                    // v1 store — a fresh store with nothing to migrate FROM,
-                    // so there's no coercion to preserve here, only a strip.
+                    // v8 added "diff"; v9 (task #61) added "files" (the
+                    // browser) and "file" (one opened file); v10 (task #53)
+                    // adds "terminal" — each moved to a first-class dock
+                    // panel (spec-surfaces-as-dock-panels.md, Part B) and no
+                    // longer a right-panel surface kind ChatView renders;
+                    // visibility for each now lives in the dock's own layout
+                    // state. Terminal's own payload (terminalIds/
+                    // activeTerminalId/splitDirection, which panes are open)
+                    // moved WITH it, into terminalDockStore.ts's own v1
+                    // store — a fresh store with nothing to migrate FROM
+                    // (same as Files' fileExplorerStore.ts before it), so
+                    // there's no coercion to preserve here, only a strip.
                     // Drop any persisted entry of a retired kind rather than
                     // resurrect a tab with nothing behind it; activeSurfaceId
                     // below already falls back to null when its target
-                    // surface is gone, so this is a non-destructive strip of
-                    // just these surfaces, same as the terminal-validation
-                    // drops further down.
+                    // surface is gone, so this is a non-destructive strip —
+                    // the underlying PTY sessions a persisted "terminal"
+                    // entry pointed at are NOT destroyed by this, only their
+                    // client-side tab position resets (see
+                    // terminalDockStore.ts's own doc comment).
                     //
                     // Cast past RightPanelSurface's CURRENT union
                     // deliberately: a persisted surface can be an OLDER
@@ -187,42 +165,12 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                     if (
                       (surface as { kind: string }).kind === "diff" ||
                       (surface as { kind: string }).kind === "files" ||
-                      (surface as { kind: string }).kind === "file"
+                      (surface as { kind: string }).kind === "file" ||
+                      (surface as { kind: string }).kind === "terminal"
                     ) {
                       return [];
                     }
-                    if (surface.kind !== "terminal") return [surface];
-                    if (
-                      !("resourceId" in surface) ||
-                      typeof surface.resourceId !== "string" ||
-                      surface.id !== `terminal:${surface.resourceId}`
-                    ) {
-                      return [];
-                    }
-                    const terminalIds =
-                      "terminalIds" in surface && Array.isArray(surface.terminalIds)
-                        ? [
-                            ...new Set(
-                              surface.terminalIds.filter(
-                                (terminalId): terminalId is string =>
-                                  typeof terminalId === "string",
-                              ),
-                            ),
-                          ]
-                        : [surface.resourceId];
-                    const activeTerminalId =
-                      "activeTerminalId" in surface &&
-                      typeof surface.activeTerminalId === "string" &&
-                      terminalIds.includes(surface.activeTerminalId)
-                        ? surface.activeTerminalId
-                        : (terminalIds[0] ?? surface.resourceId);
-                    return [
-                      {
-                        ...surface,
-                        terminalIds: terminalIds.length > 0 ? terminalIds : [surface.resourceId],
-                        activeTerminalId,
-                      },
-                    ];
+                    return [surface];
                   })
                 : [];
               const activeSurfaceId = surfaces.some(
@@ -276,85 +224,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
-          }),
-        })),
-      openTerminal: (ref, terminalId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
-            upsertSurface(current, terminalSurface(terminalId)),
-          ),
-        })),
-      splitTerminal: (ref, surfaceId, terminalId, direction = "horizontal") =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => ({
-            ...current,
-            isOpen: true,
-            activeSurfaceId: surfaceId,
-            surfaces: current.surfaces.map((surface) => {
-              if (surface.id !== surfaceId || surface.kind !== "terminal") return surface;
-              const { splitDirection: _splitDirection, ...baseSurface } = surface;
-              return {
-                ...baseSurface,
-                terminalIds: surface.terminalIds.includes(terminalId)
-                  ? surface.terminalIds
-                  : [...surface.terminalIds, terminalId],
-                activeTerminalId: terminalId,
-                ...(direction === "vertical" ? { splitDirection: "vertical" as const } : {}),
-              };
-            }),
-          })),
-        })),
-      activateTerminal: (ref, surfaceId, terminalId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => ({
-            ...current,
-            activeSurfaceId: surfaceId,
-            surfaces: current.surfaces.map((surface) =>
-              surface.id === surfaceId &&
-              surface.kind === "terminal" &&
-              surface.terminalIds.includes(terminalId)
-                ? { ...surface, activeTerminalId: terminalId }
-                : surface,
-            ),
-          })),
-        })),
-      closeTerminal: (ref, surfaceId, terminalId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const surface = current.surfaces.find(
-              (entry) => entry.id === surfaceId && entry.kind === "terminal",
-            );
-            if (!surface || surface.kind !== "terminal") return current;
-            const terminalIds = surface.terminalIds.filter((id) => id !== terminalId);
-            if (terminalIds.length === 0) {
-              const index = current.surfaces.findIndex((entry) => entry.id === surfaceId);
-              const surfaces = current.surfaces.filter((entry) => entry.id !== surfaceId);
-              const fallback = surfaces[Math.min(index, surfaces.length - 1)] ?? null;
-              return {
-                ...current,
-                isOpen: surfaces.length > 0 && current.isOpen,
-                surfaces,
-                activeSurfaceId:
-                  current.activeSurfaceId === surfaceId
-                    ? (fallback?.id ?? null)
-                    : current.activeSurfaceId,
-              };
-            }
-            return {
-              ...current,
-              surfaces: current.surfaces.map((entry) =>
-                entry.id === surfaceId && entry.kind === "terminal"
-                  ? {
-                      ...entry,
-                      terminalIds,
-                      activeTerminalId:
-                        entry.activeTerminalId === terminalId
-                          ? (terminalIds.at(-1) ?? terminalIds[0]!)
-                          : entry.activeTerminalId,
-                    }
-                  : entry,
-              ),
-            };
           }),
         })),
       activateSurface: (ref, surfaceId) =>
