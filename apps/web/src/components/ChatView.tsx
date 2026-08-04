@@ -1,7 +1,9 @@
 import {
   type ApprovalRequestId,
+  AuthPresenceCommandScope,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
+  type EngineType,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
@@ -136,6 +138,9 @@ import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { triggerAutoOpenPreview } from "./preview/autoOpenPreviewForScript";
+import { resolveThreeJsPlayScript } from "./preview/resolveThreeJsPlayScript";
+import { EngineToolbar } from "./EngineToolbar";
+import { resolveEngineToolbarView, type EngineToolbarAction } from "./EngineToolbar.logic";
 import { useTerminalDiscoveredPorts } from "~/portDiscoveryState";
 import {
   selectThreadPreviewMiniPlayer,
@@ -207,6 +212,12 @@ import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
 import { appendEditorSelectionToPrompt } from "../editorPresence/editorSelectionContext";
 import { getCurrentEditorPresenceChips } from "../editorPresence/store";
+import { useEditorPresence } from "../editorPresence/useEditorPresence";
+import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
+import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
+import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
+import { usePrimarySessionState } from "../environments/primary/sessionState";
+import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -1643,6 +1654,93 @@ function ChatViewContent(props: ChatViewProps) {
     [activeProject?.scripts],
   );
 
+  // Task #52 (Play/Stop toolbar): a SECOND `useEditorPresence` connection,
+  // alongside the one `EditorPresenceChips.tsx` already opens inside
+  // ChatComposer — a known, deliberate simplification, not an oversight.
+  // Sharing one connection across both call sites is a real improvement but
+  // a separate refactor from building the toolbar; this hook was designed
+  // to be callable from anywhere (plain React hook, no singleton guard), so
+  // a second subscriber is correct today, just not the cheapest shape.
+  const engineToolbarEditorPresence = useEditorPresence(environmentId);
+  const engineSelectorOverrides = useEngineSelectorStore((state) => state.overrideByProjectKey);
+  const detectedEngineType: EngineType | null = activeProject?.engineType ?? null;
+  const resolvedEngineType = selectProjectEngineType(
+    engineSelectorOverrides,
+    activeProjectRef,
+    detectedEngineType,
+  );
+  const connectedProjectEditor = resolveConnectedEditorForProject(
+    engineToolbarEditorPresence.editors,
+    activeProject,
+  );
+  const engineToolbarView = resolveEngineToolbarView({
+    engineType: resolvedEngineType,
+    connectedEditor: connectedProjectEditor,
+  });
+  const primarySessionState = usePrimarySessionState();
+  // Gates ONLY the editor-presence backend (Godot today) — see
+  // EngineToolbar.logic.ts's EngineDispatchBackend doc comment for why
+  // Unity's and three.js's backends must never be gated on this scope.
+  const hasPresenceCommandScope =
+    primarySessionState.data?.scopes?.includes(AuthPresenceCommandScope) ?? false;
+  const threeJsPlayScript = resolveThreeJsPlayScript(activeProject?.scripts);
+  // `null` means the button is enabled; a non-null string is BOTH the
+  // disabled reason shown in its tooltip AND (via the ternary at the call
+  // site) what decides whether `onPlayThreeJs` is passed at all — the
+  // component disables itself exactly when its `onPlay` prop is absent, so
+  // these two must never disagree.
+  const threeJsUnavailableReason = !isPreviewSupportedInRuntime()
+    ? "Preview only runs in the DevGame desktop app, not a browser tab."
+    : !threeJsPlayScript
+      ? 'No script has "Open preview automatically" configured for this project.'
+      : null;
+  const handleSelectEngine = useCallback(
+    (engine: EngineType) => {
+      if (!activeProjectRef) return;
+      useEngineSelectorStore.getState().selectEngine(activeProjectRef, engine);
+    },
+    [activeProjectRef],
+  );
+  const handleOpenConnectionsSettings = useCallback(() => {
+    void navigate({ to: "/settings/connections" });
+  }, [navigate]);
+  const handleEngineAction = useCallback(
+    (action: EngineToolbarAction) => {
+      // Unity has no route yet — that lane's own server-side CLI dispatch
+      // endpoint doesn't exist as a client-reachable route as of this
+      // change (their service, `UnityPipelineClient`, is ready; nobody has
+      // wired a route to it). Godot/Unreal go over the editor-presence
+      // command route this task just built; three.js never reaches this
+      // handler at all (its Play button calls `handlePlayThreeJs`
+      // directly — see the toolbar mount below).
+      if (engineToolbarView.backend !== "editor-presence") {
+        console.warn(
+          `Engine command "${action}" has no dispatch route wired yet for backend "${engineToolbarView.backend}".`,
+        );
+        return;
+      }
+      if (!connectedProjectEditor) return;
+      const prepared = readPreparedConnection(environmentId);
+      if (!prepared) return;
+      void dispatchEditorPresenceCommand({
+        httpBaseUrl: prepared.httpBaseUrl,
+        httpAuthorization: prepared.httpAuthorization,
+        sessionId: connectedProjectEditor.session.id,
+        action,
+      }).catch((cause) => {
+        // Transport failure only (couldn't reach the server) — a
+        // well-formed `{ok:false, error}` the server actually sent back is
+        // not an exception here, and isn't surfaced as one: the toolbar's
+        // own presence-driven state is the source of truth for whether the
+        // command "worked," not this call's return value, per
+        // spec-unity-play-stop.md's "acceptance is an edge, play state is
+        // a level" ruling.
+        console.error(`Failed to send engine command "${action}":`, cause);
+      });
+    },
+    [connectedProjectEditor, engineToolbarView.backend, environmentId],
+  );
+
   // Task #61: this used to reconcile rightPanelStore's own "files"/"file"
   // surfaces; both moved to fileExplorerStore.ts along with the rest of
   // "which file is open" (see that store's own doc comment). Kept HERE
@@ -2962,6 +3060,17 @@ function ChatViewContent(props: ChatViewProps) {
       setPendingAutoOpenPreview,
     ],
   );
+
+  // Task #52: the engine toolbar's three.js Play button. three.js has no
+  // engine to command — running the configured preview script (found by
+  // `resolveThreeJsPlayScript`) through the SAME path a manually-triggered
+  // script already uses is the entire mechanism; `runProjectScript` already
+  // owns the auto-open-preview watch internally (see its own P1-E comment
+  // above), so there is nothing further to wire here.
+  const handlePlayThreeJs = useCallback(() => {
+    if (!threeJsPlayScript) return;
+    void runProjectScript(threeJsPlayScript);
+  }, [runProjectScript, threeJsPlayScript]);
 
   const persistProjectScripts = useCallback(
     async (input: {
@@ -6021,6 +6130,26 @@ function ChatViewContent(props: ChatViewProps) {
                                   : {})}
                                 {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
                                 availableEnvironments={logicalProjectEnvironments}
+                              />
+                            </div>
+                          )}
+                          {activeProject && (
+                            // Task #52: deliberately NOT gated on
+                            // showComposerContextStrip/isGitRepo — an engine
+                            // project needn't be a git repo. Per-project
+                            // engine selection (not per-thread/per-tab), see
+                            // engineSelectorStore.ts.
+                            <div className="pointer-events-auto">
+                              <EngineToolbar
+                                resolvedEngineType={resolvedEngineType}
+                                view={engineToolbarView}
+                                onSelectEngine={handleSelectEngine}
+                                onAction={handleEngineAction}
+                                {...(threeJsUnavailableReason
+                                  ? { threeJsUnavailableReason }
+                                  : { onPlayThreeJs: handlePlayThreeJs })}
+                                hasPresenceCommandScope={hasPresenceCommandScope}
+                                onOpenConnectionsSettings={handleOpenConnectionsSettings}
                               />
                             </div>
                           )}

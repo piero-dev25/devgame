@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { selectProjectEngineType, useEngineSelectorStore } from "./engineSelectorStore";
 
-const PROJECT_REF = scopeProjectRef(EnvironmentId.make("environment-1"), ProjectId.make("project-1"));
+const PROJECT_REF = scopeProjectRef(
+  EnvironmentId.make("environment-1"),
+  ProjectId.make("project-1"),
+);
 const OTHER_PROJECT_REF = scopeProjectRef(
   EnvironmentId.make("environment-1"),
   ProjectId.make("project-2"),
@@ -15,13 +18,21 @@ describe("engineSelectorStore", () => {
 
   it("falls back to the detected engine when there is no override", () => {
     expect(
-      selectProjectEngineType(useEngineSelectorStore.getState().overrideByProjectKey, PROJECT_REF, "godot"),
+      selectProjectEngineType(
+        useEngineSelectorStore.getState().overrideByProjectKey,
+        PROJECT_REF,
+        "godot",
+      ),
     ).toBe("godot");
   });
 
   it("falls back to null when there is no override and no detected engine", () => {
     expect(
-      selectProjectEngineType(useEngineSelectorStore.getState().overrideByProjectKey, PROJECT_REF, null),
+      selectProjectEngineType(
+        useEngineSelectorStore.getState().overrideByProjectKey,
+        PROJECT_REF,
+        null,
+      ),
     ).toBeNull();
   });
 
@@ -36,7 +47,11 @@ describe("engineSelectorStore", () => {
     useEngineSelectorStore.getState().selectEngine(PROJECT_REF, "unity");
 
     expect(
-      selectProjectEngineType(useEngineSelectorStore.getState().overrideByProjectKey, PROJECT_REF, "godot"),
+      selectProjectEngineType(
+        useEngineSelectorStore.getState().overrideByProjectKey,
+        PROJECT_REF,
+        "godot",
+      ),
     ).toBe("unity");
   });
 
@@ -58,7 +73,11 @@ describe("engineSelectorStore", () => {
     store.clearOverride(PROJECT_REF);
 
     expect(
-      selectProjectEngineType(useEngineSelectorStore.getState().overrideByProjectKey, PROJECT_REF, "godot"),
+      selectProjectEngineType(
+        useEngineSelectorStore.getState().overrideByProjectKey,
+        PROJECT_REF,
+        "godot",
+      ),
     ).toBe("godot");
   });
 

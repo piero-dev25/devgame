@@ -29,6 +29,54 @@ export type EngineToolbarAction = "play" | "pause" | "stop" | "step";
  * advertise. */
 const CONTROL_ACTION_ORDER: ReadonlyArray<EngineToolbarAction> = ["play", "pause", "stop", "step"];
 
+/**
+ * The toolbar is NOT one mechanism with per-engine flavor text — it is
+ * three genuinely different dispatch paths, discovered while building this
+ * (team-lead's finding, 2026-08-03): Unity is redirected to a server-side
+ * Unity CLI shell-out (their editor-presence plugin isn't even installed in
+ * the owner's real project), three.js has no engine to command at all, and
+ * only Godot (and, once #50 lands, presumably Unreal) actually goes over an
+ * Editor Presence command frame. This has real consequences beyond which
+ * function gets called:
+ *
+ * - Only `"editor-presence"` needs `presence:command`. Gating Unity or
+ *   three.js behind that scope would be wrong — they never touch it.
+ * - Only `"editor-presence"` has a live `capabilities`/`playState` feed at
+ *   all (the presence WebSocket). `"unity-cli"` has no publisher and never
+ *   appears in the presence feed's editor list; `"threejs-script"` has no
+ *   engine, full stop.
+ */
+export type EngineDispatchBackend = "editor-presence" | "unity-cli" | "threejs-script";
+
+/**
+ * Exhaustive over `EngineType`'s 4 literals (no `default` — a 5th engine
+ * added to the contract without a case added here is a compile error, not
+ * a silent fallthrough). Godot and Unreal share the Editor Presence path
+ * today; if Unreal (#50) ends up on its own backend the way Unity did, this
+ * is the one place that changes.
+ */
+export function resolveEngineDispatchBackend(engineType: EngineType): EngineDispatchBackend {
+  switch (engineType) {
+    case "godot":
+    case "unreal":
+      return "editor-presence";
+    case "unity":
+      return "unity-cli";
+    case "threejs":
+      return "threejs-script";
+  }
+}
+
+/** Unity's actual advertised set on the CLI path, per team-lead's live
+ * verification against the owner's real Editor
+ * (`com.unity.pipeline 0.4.0-exp.1`): play/stop/pause, no frame-step —
+ * Pipeline has no scriptable step API, unlike Unity's OWN editor-presence
+ * plugin (never installed in the owner's project) which would have offered
+ * it. Fixed, not derived from any live feed — there is no `hello.capabilities`
+ * for a backend with no publisher. If the CLI's own capability set ever
+ * becomes queryable, this constant is what a live value should replace. */
+const UNITY_CLI_ACTIONS: ReadonlyArray<EngineToolbarAction> = ["play", "pause", "stop"];
+
 export interface EngineToolbarView {
   /** The engine this toolbar targets — override or detected, resolved by
    * the caller via `selectProjectEngineType` before this function runs.
@@ -36,24 +84,36 @@ export interface EngineToolbarView {
    * still renders (so the engine selector remains reachable), but with no
    * control cluster. */
   readonly engineType: EngineType | null;
-  /** three.js has no engine to command — "Play" means running the
-   * project's dev script and opening the preview (#51's existing path),
-   * never a presence command. Every other field below is meaningless when
-   * this is true; the component branches on it first. */
-  readonly isThreeJs: boolean;
+  /** `null` exactly when `engineType` is `null` — see `resolveEngineDispatchBackend`. */
+  readonly backend: EngineDispatchBackend | null;
+  /** Whether commands for this view need `presence:command` — true only
+   * for `"editor-presence"`. The component gates its scope-missing UI on
+   * THIS, never on a toolbar-wide flag: Unity and three.js don't use the
+   * scope and must never be disabled over it. */
+  readonly requiresPresenceCommandScope: boolean;
   /** Whether a connected editor was found for this project's workspace
-   * root. `false` for three.js (irrelevant) and for any engine with
-   * nothing currently connected — the correct response is a disabled
-   * control cluster, not a hidden toolbar: the engine is known even when
-   * nothing is connected right now. */
+   * root. Only meaningful for the `"editor-presence"` backend — `false`
+   * for `"unity-cli"` (no publisher, ever) and `"threejs-script"`
+   * (irrelevant), and for `"editor-presence"` with nothing currently
+   * connected. The correct response to `false` on `"editor-presence"` is a
+   * disabled control cluster, not a hidden toolbar: the engine is known
+   * even when nothing is connected right now. */
   readonly hasConnectedEditor: boolean;
-  /** Actions to render, already filtered to what the connected editor
-   * actually advertised — see spec-editor-presence-commands.md's
-   * "Capability advertisement": an unadvertised action must never appear
-   * as an enabled (or even present) control, since a plugin that hasn't
-   * implemented it will hang, not answer `unsupported_action`. Empty when
-   * there is no connected editor. */
+  /** Actions to render. For `"editor-presence"`, filtered to what the
+   * connected editor actually advertised — see
+   * spec-editor-presence-commands.md's "Capability advertisement": an
+   * unadvertised action must never appear as an enabled (or even present)
+   * control, since a plugin that hasn't implemented it will hang, not
+   * answer `unsupported_action`. For `"unity-cli"`, the fixed
+   * `UNITY_CLI_ACTIONS` set. Empty for `"threejs-script"` — the component
+   * renders its own single Play button for that backend instead of this
+   * list. */
   readonly availableActions: ReadonlyArray<EngineToolbarAction>;
+  /** For `"editor-presence"`, the connected editor's own reported state.
+   * For `"unity-cli"`, the caller-supplied `unityPlayState` (there is no
+   * status RPC wired yet as of this change — see `resolveEngineToolbarView`'s
+   * doc comment — so this is `null` until one exists). Always `null` for
+   * `"threejs-script"`. */
   readonly playState: EditorPresencePlayState | null;
 }
 
@@ -63,14 +123,60 @@ function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): Rea
 
 export function resolveEngineToolbarView(input: {
   readonly engineType: EngineType | null;
+  /** Only consulted for the `"editor-presence"` backend. */
   readonly connectedEditor: EditorPresenceEntry | null;
+  /**
+   * Only consulted for the `"unity-cli"` backend. `null` until a server
+   * endpoint exists to query Unity CLI play state (`unity command
+   * editor_status`, per team-lead's verification, has no client-reachable
+   * route yet — the same gap `dispatchEditorCommand` had for Godot before
+   * this task added one). A caller with nothing to pass should omit this
+   * or pass `null` explicitly; do not guess `"stopped"`.
+   */
+  readonly unityPlayState?: EditorPresencePlayState | null;
 }): EngineToolbarView {
   const { engineType, connectedEditor } = input;
-  const isThreeJs = engineType === "threejs";
-  if (isThreeJs || !connectedEditor) {
+  if (engineType === null) {
+    return {
+      engineType: null,
+      backend: null,
+      requiresPresenceCommandScope: false,
+      hasConnectedEditor: false,
+      availableActions: [],
+      playState: null,
+    };
+  }
+
+  const backend = resolveEngineDispatchBackend(engineType);
+
+  if (backend === "threejs-script") {
     return {
       engineType,
-      isThreeJs,
+      backend,
+      requiresPresenceCommandScope: false,
+      hasConnectedEditor: false,
+      availableActions: [],
+      playState: null,
+    };
+  }
+
+  if (backend === "unity-cli") {
+    return {
+      engineType,
+      backend,
+      requiresPresenceCommandScope: false,
+      hasConnectedEditor: false,
+      availableActions: UNITY_CLI_ACTIONS,
+      playState: input.unityPlayState ?? null,
+    };
+  }
+
+  // backend === "editor-presence"
+  if (!connectedEditor) {
+    return {
+      engineType,
+      backend,
+      requiresPresenceCommandScope: true,
       hasConnectedEditor: false,
       availableActions: [],
       playState: null,
@@ -79,7 +185,8 @@ export function resolveEngineToolbarView(input: {
   const actionSet = toActionSet(connectedEditor.capabilities);
   return {
     engineType,
-    isThreeJs: false,
+    backend,
+    requiresPresenceCommandScope: true,
     hasConnectedEditor: true,
     availableActions: CONTROL_ACTION_ORDER.filter((action) => actionSet.has(action)),
     playState: connectedEditor.playState,

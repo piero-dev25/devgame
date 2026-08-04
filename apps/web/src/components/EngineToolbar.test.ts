@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EditorPresenceEntry } from "../editorPresence/protocol";
-import { isPlayEngaged, resolveEngineToolbarView } from "./EngineToolbar.logic";
+import {
+  isPlayEngaged,
+  resolveEngineDispatchBackend,
+  resolveEngineToolbarView,
+} from "./EngineToolbar.logic";
 
 function editor(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntry {
   return {
@@ -17,29 +21,99 @@ function editor(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEnt
   };
 }
 
-describe("resolveEngineToolbarView — three.js", () => {
-  it("short-circuits to isThreeJs with no control cluster, regardless of a connected editor", () => {
+describe("resolveEngineDispatchBackend", () => {
+  it("routes Godot and Unreal to editor-presence", () => {
+    expect(resolveEngineDispatchBackend("godot")).toBe("editor-presence");
+    expect(resolveEngineDispatchBackend("unreal")).toBe("editor-presence");
+  });
+  it("routes Unity to the CLI backend, not editor-presence", () => {
+    expect(resolveEngineDispatchBackend("unity")).toBe("unity-cli");
+  });
+  it("routes three.js to the script backend", () => {
+    expect(resolveEngineDispatchBackend("threejs")).toBe("threejs-script");
+  });
+});
+
+describe("resolveEngineToolbarView — no engine known", () => {
+  it("renders no backend and no controls when the project has no engine at all", () => {
+    const view = resolveEngineToolbarView({ engineType: null, connectedEditor: null });
+    expect(view.backend).toBeNull();
+    expect(view.requiresPresenceCommandScope).toBe(false);
+    expect(view.availableActions).toEqual([]);
+  });
+});
+
+describe("resolveEngineToolbarView — threejs-script backend", () => {
+  it("needs no presence scope and has no control cluster, regardless of a connected editor", () => {
     const view = resolveEngineToolbarView({
       engineType: "threejs",
       connectedEditor: editor({ capabilities: ["play", "stop"] }),
     });
-    expect(view.isThreeJs).toBe(true);
+    expect(view.backend).toBe("threejs-script");
+    expect(view.requiresPresenceCommandScope).toBe(false);
     expect(view.hasConnectedEditor).toBe(false);
     expect(view.availableActions).toEqual([]);
   });
 });
 
-describe("resolveEngineToolbarView — no connected editor", () => {
-  it("reports no connected editor and an empty action list, but keeps the engine type", () => {
+describe("resolveEngineToolbarView — unity-cli backend", () => {
+  it("needs no presence scope", () => {
+    const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
+    expect(view.backend).toBe("unity-cli");
+    expect(view.requiresPresenceCommandScope).toBe(false);
+  });
+
+  it("advertises the fixed play/pause/stop set — no step, Pipeline has no scriptable frame step", () => {
+    const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
+    expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+  });
+
+  it("ignores any connectedEditor passed in — Unity never appears in the presence feed", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: editor({ editor: { id: "unity-1", name: "Unity", version: "6000.3" } }),
+    });
+    expect(view.hasConnectedEditor).toBe(false);
+    expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+  });
+
+  it("defaults playState to null when no status has been supplied", () => {
+    const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
+    expect(view.playState).toBeNull();
+  });
+
+  it("passes an explicitly supplied unityPlayState through", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: null,
+      unityPlayState: "playing",
+    });
+    expect(view.playState).toBe("playing");
+  });
+});
+
+describe("resolveEngineToolbarView — editor-presence backend (Godot today)", () => {
+  it("requires the presence scope with nothing connected", () => {
     const view = resolveEngineToolbarView({ engineType: "godot", connectedEditor: null });
-    expect(view.engineType).toBe("godot");
+    expect(view.backend).toBe("editor-presence");
+    expect(view.requiresPresenceCommandScope).toBe(true);
+  });
+
+  it("requires the presence scope even once an editor is connected", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "godot",
+      connectedEditor: editor({ capabilities: ["play"] }),
+    });
+    expect(view.requiresPresenceCommandScope).toBe(true);
+  });
+
+  it("reports no connected editor and an empty action list when nothing is connected", () => {
+    const view = resolveEngineToolbarView({ engineType: "godot", connectedEditor: null });
     expect(view.hasConnectedEditor).toBe(false);
     expect(view.availableActions).toEqual([]);
     expect(view.playState).toBeNull();
   });
-});
 
-describe("resolveEngineToolbarView — capability gating", () => {
   it("shows only what the connected editor actually advertised, e.g. Godot's real play+stop", () => {
     const view = resolveEngineToolbarView({
       engineType: "godot",
@@ -49,9 +123,9 @@ describe("resolveEngineToolbarView — capability gating", () => {
     expect(view.availableActions).toEqual(["play", "stop"]);
   });
 
-  it("shows Unity's full set in the fixed Play/Pause/Stop/Step order regardless of wire order", () => {
+  it("shows a full set in the fixed Play/Pause/Stop/Step order regardless of wire order", () => {
     const view = resolveEngineToolbarView({
-      engineType: "unity",
+      engineType: "godot",
       connectedEditor: editor({ capabilities: ["step", "stop", "play", "pause"] }),
     });
     expect(view.availableActions).toEqual(["play", "pause", "stop", "step"]);
@@ -59,25 +133,15 @@ describe("resolveEngineToolbarView — capability gating", () => {
 
   it("never fabricates an action the editor did not advertise", () => {
     const view = resolveEngineToolbarView({
-      engineType: "unity",
+      engineType: "godot",
       connectedEditor: editor({ capabilities: ["play"] }),
     });
     expect(view.availableActions).toEqual(["play"]);
   });
 
-  it("shows nothing for an editor that advertised no capabilities at all", () => {
-    const view = resolveEngineToolbarView({
-      engineType: "unreal",
-      connectedEditor: editor({ capabilities: [] }),
-    });
-    expect(view.availableActions).toEqual([]);
-  });
-});
-
-describe("resolveEngineToolbarView — playState passthrough", () => {
   it("passes the connected editor's playState through untouched", () => {
     const view = resolveEngineToolbarView({
-      engineType: "unity",
+      engineType: "godot",
       connectedEditor: editor({ capabilities: ["play"], playState: "playing" }),
     });
     expect(view.playState).toBe("playing");

@@ -5,7 +5,10 @@ import { parseEditorPresenceFrame } from "./protocol";
 /** Builds a minimally-valid `presence` frame JSON string, with `capabilities`
  * and `playState` overridable per test — everything else pinned to a fixed
  * valid shape so each test only varies the field it's actually about. */
-function buildFrame(overrides: { readonly capabilities?: unknown; readonly playState?: unknown }): string {
+function buildFrame(overrides: {
+  readonly capabilities?: unknown;
+  readonly playState?: unknown;
+}): string {
   return JSON.stringify({
     v: 1,
     type: "presence",
