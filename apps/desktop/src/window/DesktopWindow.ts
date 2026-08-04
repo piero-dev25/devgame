@@ -17,6 +17,10 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
+import {
+  PREVIEW_WEBVIEW_PREFERENCES,
+  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+} from "../preview/WebviewPreferences.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
 const TITLEBAR_HEIGHT = 40;
@@ -439,7 +443,53 @@ export const make = Effect.gen(function* () {
     // sessions. Merging the two checks here to save a branch would erode
     // that separation at the one place it's actually enforced.
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-      const partition = typeof params.partition === "string" ? params.partition : null;
+      // G1 (independent security review, follow-up to F2/F3, 2026-08-04),
+      // SHIP BLOCKER, PROVEN BY EXECUTION (decompiled shipped Electron
+      // binary + a live probe): this handler used to classify from
+      // `params.partition` — the bare `partition="..."` ATTRIBUTE — but
+      // Electron actually BUILDS the guest session from
+      // `webPreferences.partition`, a different field. The webview's
+      // `webpreferences="..."` attribute is parsed with NO key allowlist
+      // and applied LAST, silently overriding `partition` (and `preload`)
+      // on the object Electron actually uses. So a renderer could set
+      // `partition="persist:devgame-preview-X"` (passing the allowlist as
+      // preview) while `webpreferences="partition=persist:devgame-
+      // thirdparty-REAL,preload=/evil.js"` made Electron attach the REAL,
+      // logged-in third-party session with preview's laxer posture
+      // (preload untouched, contextIsolation forced false) applied to it
+      // — full `ipcRenderer` access inside the user's Figma/Notion
+      // session. Two independent closures below, either sufficient alone:
+      //
+      // 1. `params.webpreferences` must be BYTE-IDENTICAL to one of the
+      //    two known-good exported constants. Neither constant contains a
+      //    `partition=` or `preload=` key (or anything else), so this
+      //    alone makes the injection above impossible: smuggling an extra
+      //    key also deviates from the constant and is denied outright.
+      //    This is also the fix for G6 — every key not in one of the two
+      //    constants (`webviewTag=true`, `experimentalFeatures=true`, ...)
+      //    is now rejected, not just the six flags this handler happens
+      //    to force below.
+      // 2. Classify from `webPreferences.partition` — the field Electron
+      //    actually uses — not `params.partition`, and fail closed if the
+      //    two disagree. (1) should already make disagreement impossible
+      //    (neither constant can move `webPreferences.partition` away
+      //    from what the `partition=` attribute set), but this doesn't
+      //    lean on that being airtight forever.
+      const webpreferencesAttr =
+        typeof params.webpreferences === "string" ? params.webpreferences : null;
+      if (
+        webpreferencesAttr !== PREVIEW_WEBVIEW_PREFERENCES &&
+        webpreferencesAttr !== THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES
+      ) {
+        event.preventDefault();
+        return;
+      }
+      if (params.partition !== webPreferences.partition) {
+        event.preventDefault();
+        return;
+      }
+      const partition =
+        typeof webPreferences.partition === "string" ? webPreferences.partition : null;
       const isPreviewPartition = partition !== null && previewManager.isBrowserPartition(partition);
       const isThirdPartyPartition =
         partition !== null && previewManager.isThirdPartyBrowserPartition(partition);

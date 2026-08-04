@@ -120,6 +120,23 @@ export class BrowserSessionCacheClearError extends Schema.TaggedErrorClass<Brows
   }
 }
 
+// G9 (independent security review, 2026-08-04, INFO): guards the invariant
+// that `sessionsRef` (preview) and `thirdPartySessionsRef` (third-party)
+// never resolve the same partition string — see `resolveSession`'s own
+// comment for why a silent collision would be a handler-clobbering bug,
+// not just a wasted allocation.
+export class BrowserSessionPartitionCollisionError extends Schema.TaggedErrorClass<BrowserSessionPartitionCollisionError>()(
+  "BrowserSessionPartitionCollisionError",
+  {
+    scope: Schema.String,
+    partition: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Partition ${this.partition} (scope ${this.scope}) is already claimed by the other browser-session cache — refusing to create a second session for it.`;
+  }
+}
+
 export class BrowserSessionThirdPartySignOutError extends Schema.TaggedErrorClass<BrowserSessionThirdPartySignOutError>()(
   "BrowserSessionThirdPartySignOutError",
   {
@@ -135,6 +152,7 @@ export class BrowserSessionThirdPartySignOutError extends Schema.TaggedErrorClas
 export const BrowserSessionGetSessionError = Schema.Union([
   BrowserSessionPartitionDerivationError,
   BrowserSessionCreationError,
+  BrowserSessionPartitionCollisionError,
 ]);
 export type BrowserSessionGetSessionError = typeof BrowserSessionGetSessionError.Type;
 export const isBrowserSessionGetSessionError = Schema.is(BrowserSessionGetSessionError);
@@ -142,6 +160,7 @@ export const isBrowserSessionGetSessionError = Schema.is(BrowserSessionGetSessio
 export const BrowserSessionError = Schema.Union([
   BrowserSessionPartitionDerivationError,
   BrowserSessionCreationError,
+  BrowserSessionPartitionCollisionError,
   BrowserSessionStorageClearError,
   BrowserSessionCacheClearError,
   BrowserSessionThirdPartySignOutError,
@@ -178,11 +197,23 @@ export class BrowserSession extends Context.Service<
      * accepts an `origin` filter, so this clears cookies/storage for
      * exactly the given origin — NOT `clearCache()`, which has no origin
      * filter and would touch the shared partition's cache for both
-     * products; cache holds no auth-bearing data, so leaving it is a
-     * deliberate, documented gap, not an oversight. See the module doc
-     * above for why one partition was ruled safe in the first place — the
-     * same per-origin cookie isolation Electron already gives WITHIN a
-     * partition is what makes this selective sign-out possible too. */
+     * products.
+     *
+     * BOUNDED RESIDUAL, VERIFIED BY EXECUTION (not assumed): credentials
+     * are cleared — the next request from this origin will not
+     * authenticate — but previously-cached response BODIES for this
+     * origin can remain on disk after sign-out. Proven directly: a probe
+     * loaded a page from a local server that set a cookie and returned
+     * `Cache-Control: max-age=3600`, ran this exact clear (cookies only,
+     * no cache), killed the server, and reloaded the same URL in the same
+     * session — the page still rendered the original response body from
+     * disk, with no server able to answer. An authenticated Figma/Notion
+     * view (file names, thumbnails, team/project names) can behave the
+     * same way. This is exactly the shared-machine scenario the feature
+     * exists for, so it's recorded here rather than assumed safe: the gap
+     * is real, not merely theoretical, and the decision to accept it
+     * (rather than clear the whole partition's cache and degrade the
+     * OTHER product) stands as originally made. */
     readonly clearThirdPartySourceData: (
       origin: string,
     ) => Effect.Effect<void, BrowserSessionGetSessionError | BrowserSessionThirdPartySignOutError>;
@@ -210,15 +241,50 @@ export const make = Effect.gen(function* BrowserSessionMake() {
       return `${prefix}${Encoding.encodeHex(digest).slice(0, 20)}`;
     });
 
+  // G5 (independent security review, follow-up to F3, 2026-08-04): preview
+  // has MANY legitimate partitions — one per scope — so F3's single-string
+  // cache doesn't generalize directly; this is the Set equivalent. Every
+  // successful derivation adds its result here, and `isPartition` (below)
+  // checks membership instead of a `startsWith` prefix match. Without
+  // this, `persist:devgame-preview-anything` satisfied the prefix check
+  // for ANY suffix, and DesktopWindow.ts's `will-attach-webview` handler
+  // only strips a renderer-supplied `preload` for third-party partitions —
+  // on the assumption that "classified as preview" means "really is a
+  // preview session" backed by this process's own derivation. Same safety
+  // argument as F3's cache: a webview can only plausibly request a
+  // partition AFTER the renderer has already called `getPreviewConfig`
+  // (which calls `getSession` → this derivation) for that scope, so the
+  // set is always populated before a real attach attempt could reach it.
+  const derivedPreviewPartitions = new Set<string>();
+
   const derivePreviewPartitionForScope = derivePartition(PREVIEW_PARTITION_PREFIX);
   const derivePreviewPartition = Effect.fn("BrowserSession.getPartition")(function* (
     scope = "shared",
   ) {
-    return yield* derivePreviewPartitionForScope(scope);
+    const partition = yield* derivePreviewPartitionForScope(scope);
+    derivedPreviewPartitions.add(partition);
+    return partition;
   });
 
+  // G9 (independent security review, 2026-08-04, INFO): `sessionsRef` and
+  // `thirdPartySessionsRef` are two separate caches over ONE global
+  // Electron session registry — `session.fromPartition(partition)` returns
+  // the SAME underlying Session object for the same partition string
+  // regardless of which cache asked for it. The two partition prefixes
+  // make a collision impossible today, but if that ever changed (a prefix
+  // constant edited, or the two prefixes' derivation ever produced the
+  // same string), the SECOND `resolveSession` call would silently REBIND
+  // `setPermissionRequestHandler`/`setPermissionCheckHandler` on the
+  // shared session — Electron only keeps the last-registered handler — so
+  // whichever cache resolved second would silently downgrade or upgrade
+  // the OTHER cache's permission posture on what both believed was their
+  // own isolated session, with no error. Guarded here rather than left as
+  // an invariant nothing enforces: `otherRef` is the sibling cache: if
+  // IT already holds this exact partition, fail loudly instead of
+  // creating a second, handler-clobbering session.
   const resolveSession = (
     ref: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
+    otherRef: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
     scope: string,
     partition: string,
     allowedPermissions: ReadonlySet<string>,
@@ -226,36 +292,50 @@ export const make = Effect.gen(function* BrowserSessionMake() {
     SynchronizedRef.modifyEffect(ref, (sessions) => {
       const existing = sessions.get(partition);
       if (existing) return Effect.succeed([existing, sessions] as const);
-      return Effect.try({
-        try: () => {
-          const browserSession = session.fromPartition(partition);
-          const userAgent = browserSession
-            .getUserAgent()
-            .replace(/Electron\/[\d.]+ /, "")
-            .replace(/\s*t3code\/[\d.]+/, "");
-          browserSession.setUserAgent(userAgent);
-          browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-            callback(allowedPermissions.has(permission));
-          });
-          browserSession.setPermissionCheckHandler((_webContents, permission) =>
-            allowedPermissions.has(permission),
+      return Effect.gen(function* () {
+        const otherSessions = yield* SynchronizedRef.get(otherRef);
+        if (otherSessions.has(partition)) {
+          return yield* Effect.fail(
+            new BrowserSessionPartitionCollisionError({ scope, partition }),
           );
-          const next = new Map(sessions);
-          next.set(partition, browserSession);
-          return [browserSession, next] as const;
-        },
-        catch: (cause) =>
-          new BrowserSessionCreationError({
-            scope,
-            partition,
-            cause,
-          }),
+        }
+        return yield* Effect.try({
+          try: () => {
+            const browserSession = session.fromPartition(partition);
+            const userAgent = browserSession
+              .getUserAgent()
+              .replace(/Electron\/[\d.]+ /, "")
+              .replace(/\s*t3code\/[\d.]+/, "");
+            browserSession.setUserAgent(userAgent);
+            browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+              callback(allowedPermissions.has(permission));
+            });
+            browserSession.setPermissionCheckHandler((_webContents, permission) =>
+              allowedPermissions.has(permission),
+            );
+            const next = new Map(sessions);
+            next.set(partition, browserSession);
+            return [browserSession, next] as const;
+          },
+          catch: (cause) =>
+            new BrowserSessionCreationError({
+              scope,
+              partition,
+              cause,
+            }),
+        });
       });
     });
 
   const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
     const partition = yield* derivePreviewPartition(scope);
-    return yield* resolveSession(sessionsRef, scope, partition, ALLOWED_PREVIEW_PERMISSIONS);
+    return yield* resolveSession(
+      sessionsRef,
+      thirdPartySessionsRef,
+      scope,
+      partition,
+      ALLOWED_PREVIEW_PERMISSIONS,
+    );
   });
 
   // F3 (independent security review, 2026-08-04): `isThirdPartyPartition`
@@ -290,6 +370,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
       const partition = yield* getThirdPartyBrowserPartition();
       return yield* resolveSession(
         thirdPartySessionsRef,
+        sessionsRef,
         THIRD_PARTY_BROWSER_SCOPE,
         partition,
         ALLOWED_THIRD_PARTY_PERMISSIONS,
@@ -302,6 +383,9 @@ export const make = Effect.gen(function* BrowserSessionMake() {
   // the cache API has no origin filter and the third-party partition is
   // shared between Figma and Notion; calling it here would clear the
   // OTHER product's cache too, which is not what "sign out of Figma" means.
+  // Credentials are cleared; cached response bodies for this origin are
+  // NOT — see the interface doc above, VERIFIED BY EXECUTION, for the
+  // bounded residual this leaves.
   const clearThirdPartySourceData = Effect.fn("BrowserSession.clearThirdPartySourceData")(
     function* (origin: string) {
       const browserSession = yield* getThirdPartyBrowserSession();
@@ -318,7 +402,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
 
   return BrowserSession.of({
     getPartition: derivePreviewPartition,
-    isPartition: (partition) => partition.startsWith(PREVIEW_PARTITION_PREFIX),
+    isPartition: (partition) => derivedPreviewPartitions.has(partition),
     getSession,
     getThirdPartyBrowserPartition,
     getThirdPartyBrowserSession,

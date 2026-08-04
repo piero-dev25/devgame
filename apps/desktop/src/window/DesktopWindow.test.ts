@@ -45,6 +45,10 @@ import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/cha
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
+import {
+  PREVIEW_WEBVIEW_PREFERENCES,
+  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+} from "../preview/WebviewPreferences.ts";
 
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -1015,13 +1019,15 @@ describe("DesktopWindow", () => {
           return yield* Effect.die("will-attach-webview listener was not registered");
         }
         let prevented = false;
-        const webPreferences: Record<string, unknown> = {};
+        const webPreferences: Record<string, unknown> = { partition: "persist:devgame-preview-abc" };
         willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
           partition: "persist:devgame-preview-abc",
+          webpreferences: PREVIEW_WEBVIEW_PREFERENCES,
         });
 
         assert.isFalse(prevented);
         assert.deepEqual(webPreferences, {
+          partition: "persist:devgame-preview-abc",
           sandbox: true,
           nodeIntegration: false,
           nodeIntegrationInSubFrames: false,
@@ -1051,13 +1057,17 @@ describe("DesktopWindow", () => {
             return yield* Effect.die("will-attach-webview listener was not registered");
           }
           let prevented = false;
-          const webPreferences: Record<string, unknown> = {};
+          const webPreferences: Record<string, unknown> = {
+            partition: "persist:devgame-thirdparty-abc",
+          };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
             partition: "persist:devgame-thirdparty-abc",
+            webpreferences: THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
           });
 
           assert.isFalse(prevented);
           assert.deepEqual(webPreferences, {
+            partition: "persist:devgame-thirdparty-abc",
             sandbox: true,
             nodeIntegration: false,
             nodeIntegrationInSubFrames: false,
@@ -1101,6 +1111,7 @@ describe("DesktopWindow", () => {
           // Simulates what `<webview disablewebsecurity preload="file:///evil.js">`
           // hands Electron BEFORE this handler runs.
           const webPreferences: Record<string, unknown> = {
+            partition: "persist:devgame-thirdparty-abc",
             sandbox: false,
             nodeIntegration: true,
             nodeIntegrationInSubFrames: true,
@@ -1111,10 +1122,12 @@ describe("DesktopWindow", () => {
           };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
             partition: "persist:devgame-thirdparty-abc",
+            webpreferences: THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
           });
 
           assert.isFalse(prevented);
           assert.deepEqual(webPreferences, {
+            partition: "persist:devgame-thirdparty-abc",
             sandbox: true,
             nodeIntegration: false,
             nodeIntegrationInSubFrames: false,
@@ -1144,13 +1157,198 @@ describe("DesktopWindow", () => {
             return yield* Effect.die("will-attach-webview listener was not registered");
           }
           let prevented = false;
-          const webPreferences: Record<string, unknown> = {};
+          const webPreferences: Record<string, unknown> = {
+            partition: "persist:some-unrelated-partition",
+          };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
             partition: "persist:some-unrelated-partition",
+            webpreferences: PREVIEW_WEBVIEW_PREFERENCES,
           });
 
           assert.isTrue(prevented);
-          assert.deepEqual(webPreferences, {});
+          assert.deepEqual(webPreferences, { partition: "persist:some-unrelated-partition" });
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // G1 (independent security review, follow-up to F2/F3, 2026-08-04),
+  // SHIP BLOCKER — PROVEN BY EXECUTION against real Electron via the
+  // reviewer's probe (case C, re-run after this fix and confirmed
+  // denied): this handler used to classify from `params.partition` — the
+  // bare `partition="..."` ATTRIBUTE — while Electron actually builds the
+  // guest from `webPreferences.partition`. The `webpreferences="..."`
+  // attribute is parsed with NO key allowlist and applied LAST, silently
+  // overriding `partition` (and `preload`) on the object Electron
+  // actually uses. `<webview partition="persist:devgame-preview-X"
+  // webpreferences="partition=persist:devgame-thirdparty-REAL,preload=/e
+  // vil.js">` used to be ALLOWED as preview (so `delete
+  // webPreferences.preload` was skipped and `contextIsolation` was forced
+  // false), while Electron attached the REAL third-party session with the
+  // attacker's preload running at `contextIsolation:false` — full
+  // `ipcRenderer` access inside the user's live, logged-in Figma/Notion
+  // session. This reproduces the reviewer's case C verbatim (values taken
+  // directly from their probe) and proves it denied outright, not merely
+  // reclassified.
+  it.effect(
+    "denies a webview whose webpreferences attribute smuggles a different partition AND preload (G1 full chain)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          // What Electron hands the handler by the time it runs: the
+          // `webpreferences=` attribute has ALREADY overridden `partition`
+          // and set `preload` on this object — this is the field Electron
+          // actually builds the guest session from.
+          const webPreferences: Record<string, unknown> = {
+            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            preload: "/Users/attacker/evil.js",
+          };
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",
+            webpreferences:
+              "partition=persist:devgame-thirdparty-0123456789abcdef0123,preload=/Users/attacker/evil.js",
+          });
+
+          assert.isTrue(prevented);
+          // Denied means untouched — no security-flag pinning even ran,
+          // and critically `preload` was never stripped (proving this
+          // path never reaches the "classified as preview, leave preload
+          // alone" branch that made the exploit work).
+          assert.deepEqual(webPreferences, {
+            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            preload: "/Users/attacker/evil.js",
+          });
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // G1, the partition-confusion half alone (no preload) — the reviewer's
+  // case B. Denied for the same reason as the full chain above, but
+  // proven independently: even without a malicious preload, letting this
+  // through would force `contextIsolation:false` onto the REAL third-party
+  // session (preview's posture), a real downgrade in its own right.
+  it.effect("denies a webview whose webpreferences attribute smuggles a different partition alone", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+        if (!willAttachWebview) {
+          return yield* Effect.die("will-attach-webview listener was not registered");
+        }
+        let prevented = false;
+        const webPreferences: Record<string, unknown> = {
+          partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+        };
+        willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+          partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",
+          webpreferences: "partition=persist:devgame-thirdparty-0123456789abcdef0123",
+        });
+
+        assert.isTrue(prevented);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  // G6 (independent security review, executed): the forced-flag list was a
+  // denylist by omission — anything NOT in that list of six keys reached
+  // Electron unfiltered. Reproduces the reviewer's case E: `webviewTag=true`
+  // (nested webviews attach via the GUEST's own will-attach-webview, where
+  // this handler isn't registered — no allowlist at all on that path) and
+  // `experimentalFeatures=true` both came through before this fix.
+  // Requiring `params.webpreferences` to be byte-identical to one of the
+  // two known-good constants closes this: neither constant contains ANY
+  // of these keys, so any attempt to add one is, by construction, already
+  // a deviation from the constant and gets denied before it matters which
+  // specific key it was.
+  it.effect(
+    "denies a webview whose webpreferences attribute carries keys outside the known-good constants",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          const webPreferences: Record<string, unknown> = {
+            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            webviewTag: true,
+            experimentalFeatures: true,
+          };
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            webpreferences:
+              "webviewTag=true,nodeIntegrationInWorker=true,experimentalFeatures=true,enableWebSQL=true,javascript=true,images=false,plugins=true",
+          });
+
+          assert.isTrue(prevented);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // Belt-and-braces check, tested directly: even granting that a valid
+  // `webpreferences` string can no longer move `webPreferences.partition`
+  // away from `params.partition` (the check above should already make
+  // that unreachable), decide identity from `webPreferences.partition`
+  // and fail closed if the two ever disagree anyway — don't depend on the
+  // other check being airtight forever. Seeded directly (not derived from
+  // a webpreferences string), matching the F2 test's own pattern of
+  // constructing the hostile shape rather than only the route that
+  // produces it today.
+  it.effect(
+    "denies a webview when webPreferences.partition disagrees with params.partition, independent of webpreferences",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          const webPreferences: Record<string, unknown> = {
+            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+          };
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",
+            webpreferences: PREVIEW_WEBVIEW_PREFERENCES,
+          });
+
+          assert.isTrue(prevented);
         }).pipe(Effect.provide(layer));
       }),
   );
