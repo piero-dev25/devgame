@@ -3599,6 +3599,13 @@ export class PreviewManager extends Context.Service<
     readonly getThirdPartyBrowserSession: () => Effect.Effect<Session, PreviewManagerError>;
     readonly getThirdPartyBrowserPartition: () => Effect.Effect<string, PreviewManagerError>;
     readonly isThirdPartyBrowserPartition: (partition: string) => boolean;
+    /** F4 (owner ruling, relayed 2026-08-04): sign out of ONE third-party
+     * source (`origin`, e.g. `https://www.figma.com`) without touching the
+     * other's login — see BrowserSession.ts's own doc for exactly what this
+     * does and does not clear. */
+    readonly clearThirdPartySourceData: (
+      origin: string,
+    ) => Effect.Effect<void, PreviewManagerError>;
     readonly createTab: (tabId: string) => Effect.Effect<PreviewTabState, PreviewManagerError>;
     readonly closeTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly registerWebview: (
@@ -3737,6 +3744,17 @@ export const make = Effect.gen(function* PreviewManagerMake() {
       },
     ),
     isThirdPartyBrowserPartition: browserSession.isThirdPartyPartition,
+    clearThirdPartySourceData: Effect.fn("PreviewManager.clearThirdPartySourceData")(function* (
+      origin: string,
+    ) {
+      yield* browserSession
+        .clearThirdPartySourceData(origin)
+        .pipe(
+          Effect.mapError(
+            (cause) => new PreviewOperationError({ operation: "clearThirdPartySourceData", cause }),
+          ),
+        );
+    }),
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,

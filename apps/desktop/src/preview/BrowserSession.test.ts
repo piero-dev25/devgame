@@ -298,6 +298,78 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  // F4 sign-out (owner ruling, relayed 2026-08-04): the third-party
+  // partition is persistent — a login survives app restarts indefinitely,
+  // with no user-visible trace and no way to clear it short of a dev tool.
+  // "Prove it by executing it, not by asserting the call was made" — so
+  // this doesn't just assert `clearStorageData` was called; it tracks a
+  // fake per-origin "signed in" flag (mirroring what a real cookie jar
+  // does — state that either is or isn't there afterward) and proves
+  // sign-out for ONE origin actually clears that origin's flag while
+  // leaving the OTHER origin's flag untouched. That selectivity is the
+  // whole point: this is ONE shared partition for both Figma and Notion,
+  // so "sign out of Figma" must not silently sign the user out of Notion
+  // too — only Electron's per-origin `clearStorageData({ origin })` filter
+  // makes that possible; a whole-partition clear would not have been
+  // "per source" as promised.
+  it.effect("signs out of one origin's data without touching the other origin's", () =>
+    Effect.gen(function* () {
+      const signedInOrigins = new Set(["https://www.figma.com", "https://www.notion.so"]);
+      const clearStorageDataCalls: Array<{ origin?: string; storages?: readonly string[] }> = [];
+      fromPartition.mockImplementationOnce((partition: string) => {
+        const browserSession = {
+          clearCache: vi.fn(() => Promise.resolve()),
+          clearStorageData: vi.fn((options: { origin?: string; storages?: readonly string[] }) => {
+            clearStorageDataCalls.push(options);
+            if (options.origin) signedInOrigins.delete(options.origin);
+            return Promise.resolve();
+          }),
+          getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/0.0.27"),
+          setPermissionRequestHandler: vi.fn(),
+          setPermissionCheckHandler: vi.fn(),
+          setUserAgent: vi.fn(),
+        };
+        sessions.set(partition, browserSession);
+        return browserSession;
+      });
+
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      assert.isTrue(signedInOrigins.has("https://www.figma.com"));
+      assert.isTrue(signedInOrigins.has("https://www.notion.so"));
+
+      yield* browserSessions.clearThirdPartySourceData("https://www.figma.com");
+
+      assert.isFalse(signedInOrigins.has("https://www.figma.com"));
+      assert.isTrue(
+        signedInOrigins.has("https://www.notion.so"),
+        "clearing Figma's origin must not clear Notion's",
+      );
+      assert.strictEqual(clearStorageDataCalls.length, 1);
+      assert.deepEqual(clearStorageDataCalls[0]?.origin, "https://www.figma.com");
+      assert.deepEqual(
+        [...(clearStorageDataCalls[0]?.storages ?? [])].toSorted(),
+        ["cookies", "indexdb", "localstorage", "serviceworkers", "websql"].toSorted(),
+      );
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect(
+    "clearThirdPartySourceData does not touch preview sessions or the whole-partition clear methods",
+    () =>
+      Effect.gen(function* () {
+        const browserSessions = yield* BrowserSession.BrowserSession;
+        yield* browserSessions.getSession("scope-a");
+        const previewPartition = yield* browserSessions.getPartition("scope-a");
+        const previewSession = sessions.get(previewPartition);
+        assert.isDefined(previewSession);
+
+        yield* browserSessions.clearThirdPartySourceData("https://www.figma.com");
+
+        assert.strictEqual(previewSession.clearStorageData.mock.calls.length, 0);
+        assert.strictEqual(previewSession.clearCache.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("memoizes the third-party session the same way preview sessions are memoized", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;

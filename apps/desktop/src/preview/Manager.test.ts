@@ -78,18 +78,21 @@ vi.mock("electron", () => ({
   },
 }));
 
+const baseBrowserSessionMock: BrowserSession.BrowserSession["Service"] = {
+  getPartition: () => Effect.succeed("persist:devgame-preview-test"),
+  isPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
+  getSession: () => Effect.die("unexpected getSession"),
+  clearCookies: () => Effect.void,
+  clearCache: () => Effect.void,
+  getThirdPartyBrowserPartition: () => Effect.succeed("persist:devgame-thirdparty-test"),
+  getThirdPartyBrowserSession: () => Effect.die("unexpected getThirdPartyBrowserSession"),
+  isThirdPartyPartition: (partition) => partition.startsWith("persist:devgame-thirdparty-"),
+  clearThirdPartySourceData: () => Effect.die("unexpected clearThirdPartySourceData"),
+};
+
 const browserSessionLayer = Layer.succeed(
   BrowserSession.BrowserSession,
-  BrowserSession.BrowserSession.of({
-    getPartition: () => Effect.succeed("persist:devgame-preview-test"),
-    isPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
-    getSession: () => Effect.die("unexpected getSession"),
-    clearCookies: () => Effect.void,
-    clearCache: () => Effect.void,
-    getThirdPartyBrowserPartition: () => Effect.succeed("persist:devgame-thirdparty-test"),
-    getThirdPartyBrowserSession: () => Effect.die("unexpected getThirdPartyBrowserSession"),
-    isThirdPartyPartition: (partition) => partition.startsWith("persist:devgame-thirdparty-"),
-  }),
+  BrowserSession.BrowserSession.of(baseBrowserSessionMock),
 );
 
 const environmentLayer = Layer.succeed(
@@ -132,6 +135,34 @@ const withManager = <A>(
     const manager = yield* PreviewManager.PreviewManager;
     return yield* use(manager);
   }).pipe(Effect.provide(layer), Effect.scoped);
+
+// Like withManager, but with a caller-supplied BrowserSession mock — needed
+// wherever a test must observe what PreviewManager passes THROUGH to
+// BrowserSession (e.g. F4's per-origin sign-out), not just what
+// PreviewManager returns.
+const withManagerUsingBrowserSession = <A>(
+  browserSessionOverrides: Partial<BrowserSession.BrowserSession["Service"]>,
+  use: (
+    manager: PreviewManager.PreviewManager["Service"],
+  ) => Effect.Effect<A, PreviewManager.PreviewManagerError, Scope.Scope>,
+) => {
+  const customLayer = PreviewManager.layer.pipe(
+    Layer.provideMerge(
+      Layer.succeed(
+        BrowserSession.BrowserSession,
+        BrowserSession.BrowserSession.of({ ...baseBrowserSessionMock, ...browserSessionOverrides }),
+      ),
+    ),
+    Layer.provideMerge(environmentLayer),
+    Layer.provideMerge(fileSystemLayer),
+    Layer.provideMerge(Path.layer),
+    Layer.provideMerge(Layer.succeed(HostProcessPlatform, "darwin")),
+  );
+  return Effect.gen(function* () {
+    const manager = yield* PreviewManager.PreviewManager;
+    return yield* use(manager);
+  }).pipe(Effect.provide(customLayer), Effect.scoped);
+};
 
 interface TestCapturedPreviewImage {
   readonly toJPEG: () => Buffer;
@@ -460,6 +491,59 @@ describe("PreviewManager", () => {
         expect(loadURL).not.toHaveBeenCalled();
       }),
     ),
+  );
+
+  // F4 (owner ruling, relayed 2026-08-04): PreviewManager.clearThirdPartySourceData
+  // is a thin pass-through to BrowserSession — this proves it actually forwards
+  // the caller's origin (not, say, always the same hardcoded one, and not
+  // swallowed) by observing a fake per-origin "signed in" flag change through
+  // it, the same execution-not-assertion proof used at the BrowserSession layer.
+  effectIt.effect(
+    "clearThirdPartySourceData forwards the exact origin through to BrowserSession",
+    () => {
+      const signedInOrigins = new Set(["https://www.figma.com", "https://www.notion.so"]);
+      return withManagerUsingBrowserSession(
+        {
+          clearThirdPartySourceData: (origin) =>
+            Effect.sync(() => {
+              signedInOrigins.delete(origin);
+            }),
+        },
+        (manager) =>
+          Effect.gen(function* () {
+            yield* manager.clearThirdPartySourceData("https://www.notion.so");
+
+            expect(signedInOrigins.has("https://www.notion.so")).toBe(false);
+            expect(signedInOrigins.has("https://www.figma.com")).toBe(true);
+          }),
+      );
+    },
+  );
+
+  effectIt.effect(
+    "clearThirdPartySourceData wraps a BrowserSession failure as a PreviewOperationError",
+    () =>
+      withManagerUsingBrowserSession(
+        {
+          clearThirdPartySourceData: (origin) =>
+            Effect.fail(
+              new BrowserSession.BrowserSessionThirdPartySignOutError({
+                origin,
+                cause: new Error("clearStorageData rejected"),
+              }),
+            ),
+        },
+        (manager) =>
+          Effect.gen(function* () {
+            const exit = yield* Effect.exit(manager.clearThirdPartySourceData("https://www.figma.com"));
+            expect(Exit.isFailure(exit)).toBe(true);
+            const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : null;
+            expect(error).toBeInstanceOf(PreviewManager.PreviewOperationError);
+            expect((error as PreviewManager.PreviewOperationError).operation).toBe(
+              "clearThirdPartySourceData",
+            );
+          }),
+      ),
   );
 
   effectIt.effect("mirrors Electron's effective zoom across registration and navigation", () =>

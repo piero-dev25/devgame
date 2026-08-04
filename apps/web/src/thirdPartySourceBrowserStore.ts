@@ -52,6 +52,13 @@ interface ThirdPartySourceBrowserStoreState {
    * closing the panel is not the same as closing a tab. */
   readonly close: () => void;
   readonly setTabState: (source: ThirdPartySourceKind, state: ThirdPartySourceTabState) => void;
+  /** F4 (owner ruling, relayed 2026-08-04): clears a source's remembered
+   * tab state back to `null` after signing out of it, so the next `open`
+   * re-seeds it at the default URL instead of reloading a stale one that
+   * assumed a now-cleared login. Does NOT close the panel or change
+   * `activeSource` — signing out of the tab you're looking at should not
+   * also yank the panel shut. */
+  readonly resetTab: (source: ThirdPartySourceKind) => void;
 }
 
 export const useThirdPartySourceBrowserStore = create<ThirdPartySourceBrowserStoreState>()(
@@ -69,5 +76,6 @@ export const useThirdPartySourceBrowserStore = create<ThirdPartySourceBrowserSto
     close: () => set({ activeSource: null }),
     setTabState: (source, tabState) =>
       set((state) => ({ tabs: { ...state.tabs, [source]: tabState } })),
+    resetTab: (source) => set((state) => ({ tabs: { ...state.tabs, [source]: null } })),
   }),
 );

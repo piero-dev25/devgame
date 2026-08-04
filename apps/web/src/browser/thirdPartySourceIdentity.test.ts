@@ -4,6 +4,7 @@ import {
   parseFigmaIdentity,
   parseNotionIdentity,
   parseThirdPartySourceIdentity,
+  thirdPartySourceOrigin,
 } from "./thirdPartySourceIdentity";
 
 describe("parseFigmaIdentity", () => {
@@ -122,5 +123,17 @@ describe("parseThirdPartySourceIdentity", () => {
 
   it("returns null for a URL matching neither source", () => {
     expect(parseThirdPartySourceIdentity("https://example.com/whatever")).toBeNull();
+  });
+});
+
+// F4 (owner ruling, relayed 2026-08-04): sign-out needs the ORIGIN a source
+// lives at, to pass through to Electron's origin-scoped `clearStorageData`.
+describe("thirdPartySourceOrigin", () => {
+  it("returns Figma's canonical origin", () => {
+    expect(thirdPartySourceOrigin("figma")).toBe("https://www.figma.com");
+  });
+
+  it("returns Notion's canonical origin", () => {
+    expect(thirdPartySourceOrigin("notion")).toBe("https://www.notion.so");
   });
 });

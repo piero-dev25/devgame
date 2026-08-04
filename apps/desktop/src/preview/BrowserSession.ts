@@ -120,6 +120,18 @@ export class BrowserSessionCacheClearError extends Schema.TaggedErrorClass<Brows
   }
 }
 
+export class BrowserSessionThirdPartySignOutError extends Schema.TaggedErrorClass<BrowserSessionThirdPartySignOutError>()(
+  "BrowserSessionThirdPartySignOutError",
+  {
+    origin: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to sign out of the third-party source at origin ${this.origin}.`;
+  }
+}
+
 export const BrowserSessionGetSessionError = Schema.Union([
   BrowserSessionPartitionDerivationError,
   BrowserSessionCreationError,
@@ -132,6 +144,7 @@ export const BrowserSessionError = Schema.Union([
   BrowserSessionCreationError,
   BrowserSessionStorageClearError,
   BrowserSessionCacheClearError,
+  BrowserSessionThirdPartySignOutError,
 ]);
 export type BrowserSessionError = typeof BrowserSessionError.Type;
 export const isBrowserSessionError = Schema.is(BrowserSessionError);
@@ -159,6 +172,20 @@ export class BrowserSession extends Context.Service<
       BrowserSessionGetSessionError
     >;
     readonly isThirdPartyPartition: (partition: string) => boolean;
+    /** F4 (owner ruling, relayed 2026-08-04): sign a user out of ONE
+     * third-party source without touching the other's login, even though
+     * both share the one partition above. Electron's `clearStorageData`
+     * accepts an `origin` filter, so this clears cookies/storage for
+     * exactly the given origin — NOT `clearCache()`, which has no origin
+     * filter and would touch the shared partition's cache for both
+     * products; cache holds no auth-bearing data, so leaving it is a
+     * deliberate, documented gap, not an oversight. See the module doc
+     * above for why one partition was ruled safe in the first place — the
+     * same per-origin cookie isolation Electron already gives WITHIN a
+     * partition is what makes this selective sign-out possible too. */
+    readonly clearThirdPartySourceData: (
+      origin: string,
+    ) => Effect.Effect<void, BrowserSessionGetSessionError | BrowserSessionThirdPartySignOutError>;
   }
 >()("@t3tools/desktop/preview/BrowserSession") {}
 
@@ -270,6 +297,25 @@ export const make = Effect.gen(function* BrowserSessionMake() {
     },
   );
 
+  // F4: origin-scoped sign-out. Deliberately calls ONLY
+  // `clearStorageData({ origin, ... })` — never `clearCache()` — because
+  // the cache API has no origin filter and the third-party partition is
+  // shared between Figma and Notion; calling it here would clear the
+  // OTHER product's cache too, which is not what "sign out of Figma" means.
+  const clearThirdPartySourceData = Effect.fn("BrowserSession.clearThirdPartySourceData")(
+    function* (origin: string) {
+      const browserSession = yield* getThirdPartyBrowserSession();
+      yield* Effect.tryPromise({
+        try: () =>
+          browserSession.clearStorageData({
+            origin,
+            storages: ["cookies", "localstorage", "indexdb", "websql", "serviceworkers"],
+          }),
+        catch: (cause) => new BrowserSessionThirdPartySignOutError({ origin, cause }),
+      });
+    },
+  );
+
   return BrowserSession.of({
     getPartition: derivePreviewPartition,
     isPartition: (partition) => partition.startsWith(PREVIEW_PARTITION_PREFIX),
@@ -278,6 +324,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
     getThirdPartyBrowserSession,
     isThirdPartyPartition: (partition) =>
       thirdPartyBrowserPartitionCache !== null && partition === thirdPartyBrowserPartitionCache,
+    clearThirdPartySourceData,
     clearCookies: Effect.fn("BrowserSession.clearCookies")(function* () {
       const sessions = yield* SynchronizedRef.get(sessionsRef);
       yield* Effect.all(

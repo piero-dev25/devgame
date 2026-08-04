@@ -71,4 +71,44 @@ describe("useThirdPartySourceBrowserStore", () => {
     expect(state.activeSource).toBeNull();
     expect(state.tabs.figma).not.toBeNull();
   });
+
+  // F4 (owner ruling, relayed 2026-08-04): after a sign-out clears the
+  // partition's storage for a source, its remembered URL/title must not
+  // survive — a stale `tabs.figma.url` pointing at a page that required the
+  // now-cleared login would just reload back into the logged-out state
+  // looking like nothing happened. Resetting to `null` re-seeds the tab at
+  // its default URL next time `open` runs (same mechanism a first-ever
+  // `open` uses), which is exactly what a freshly signed-out tab should do.
+  it("resetTab clears the named source's remembered tab state", () => {
+    useThirdPartySourceBrowserStore.getState().open("figma");
+    useThirdPartySourceBrowserStore
+      .getState()
+      .setTabState("figma", { url: "https://www.figma.com/design/abc/My-File", title: "My File" });
+
+    useThirdPartySourceBrowserStore.getState().resetTab("figma");
+
+    expect(useThirdPartySourceBrowserStore.getState().tabs.figma).toBeNull();
+  });
+
+  it("resetTab does not touch the other source's tab state", () => {
+    useThirdPartySourceBrowserStore.getState().open("figma");
+    useThirdPartySourceBrowserStore.getState().open("notion");
+    useThirdPartySourceBrowserStore
+      .getState()
+      .setTabState("notion", { url: "https://www.notion.so/My-Page-abc123", title: "My Page" });
+
+    useThirdPartySourceBrowserStore.getState().resetTab("figma");
+
+    expect(useThirdPartySourceBrowserStore.getState().tabs.notion).toEqual({
+      url: "https://www.notion.so/My-Page-abc123",
+      title: "My Page",
+    });
+  });
+
+  it("resetTab leaves activeSource untouched — resetting is not closing", () => {
+    useThirdPartySourceBrowserStore.getState().open("figma");
+    useThirdPartySourceBrowserStore.getState().resetTab("figma");
+
+    expect(useThirdPartySourceBrowserStore.getState().activeSource).toBe("figma");
+  });
 });

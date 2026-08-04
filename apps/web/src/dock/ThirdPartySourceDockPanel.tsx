@@ -34,13 +34,21 @@
  * has. No active route at all → the action is unavailable with a stated
  * reason, not a silent no-op.
  *
- * NOT YET LIVE — corrected 2026-08-04, the reason changed: the
- * `will-attach-webview` allowlist gate is fixed (an independent security
- * review found real issues in it — F1/F2/F3/F5 — since resolved and
- * pending their own review pass, see `WebviewPreferences.ts`'s own note).
- * What's still pending is this panel's OWN registration into
- * `ChatDock.tsx` — the dock-migration lane's active territory, sequenced
- * separately. Nothing walks through any of this until that lands.
+ * REGISTERED (task #55) — `ChatDock.tsx` registers this panel now, so the
+ * code path this file describes is reachable. Read `ChatDock.tsx`'s own
+ * registration comment before treating that as "shippable": as of
+ * registration, `#75`'s F1/F2/F3/F5/F7 findings against the
+ * `will-attach-webview` allowlist are fixed (`f425a8ebd`), and an
+ * INDEPENDENT REVIEW of the fix commit is still running and may land
+ * further findings.
+ *
+ * F4 SIGN-OUT (owner ruling, relayed 2026-08-04): "Sign out" clears the
+ * ACTIVE source's cookies/storage only — see `onSignOut` below and
+ * `BrowserSession.ts`'s `clearThirdPartySourceData` for what it does and
+ * does not clear (notably: not the shared partition's cache, which isn't
+ * origin-scoped in Electron). Deliberately kept SMALL per the ruling:
+ * `will-navigate` visibility and an origin indicator in the UI are tracked
+ * but explicitly NOT built in this slice.
  */
 import { useContext, useState } from "react";
 
@@ -53,7 +61,10 @@ import {
   buildThirdPartySourceChip,
   thirdPartySourceScreenshotFile,
 } from "../browser/thirdPartySourceAnnotation";
-import { parseThirdPartySourceIdentity } from "../browser/thirdPartySourceIdentity";
+import {
+  parseThirdPartySourceIdentity,
+  thirdPartySourceOrigin,
+} from "../browser/thirdPartySourceIdentity";
 import { ThirdPartySourceWebview, thirdPartySourceTabId } from "../browser/ThirdPartySourceWebview";
 import type { ThirdPartySourceKind } from "../thirdPartySourceBrowserStore";
 import { useThirdPartySourceBrowserStore } from "../thirdPartySourceBrowserStore";
@@ -109,6 +120,7 @@ export default function ThirdPartySourceDockPanel(_props: PanelProps) {
   );
   const routeContext = useContext(ThreadRouteContext);
   const [addingToChat, setAddingToChat] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
 
   const composerTarget =
     routeContext === null
@@ -169,6 +181,25 @@ export default function ThirdPartySourceDockPanel(_props: PanelProps) {
     }
   };
 
+  // F4 (owner ruling, relayed 2026-08-04): sign out of the ACTIVE source
+  // only — not "sign out of everything," per the ruling's "per source"
+  // framing. `previewBridge.signOutOfThirdPartySource` clears that origin's
+  // cookies/storage in the (shared) third-party partition without touching
+  // the other product's login; see BrowserSession.ts for exactly what it
+  // does and does not clear. `resetTab` then drops the remembered URL/title
+  // so the panel's `key={activeSource}` remount (below) reloads the webview
+  // at the default URL instead of a stale, now-logged-out page.
+  const onSignOut = async () => {
+    if (activeSource === null) return;
+    setSigningOut(true);
+    try {
+      await previewBridge?.signOutOfThirdPartySource(thirdPartySourceOrigin(activeSource));
+      useThirdPartySourceBrowserStore.getState().resetTab(activeSource);
+    } finally {
+      setSigningOut(false);
+    }
+  };
+
   const activeIdentity = activeTab ? parseThirdPartySourceIdentity(activeTab.url) : null;
   const chip = activeIdentity ? buildThirdPartySourceChip(activeIdentity) : null;
 
@@ -176,20 +207,40 @@ export default function ThirdPartySourceDockPanel(_props: PanelProps) {
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex min-h-0 shrink-0 items-center justify-between border-b border-border/60">
         <ThirdPartySourceTabStrip activeSource={activeSource} onSelect={onSelect} />
-        <button
-          type="button"
-          disabled={addToChatDisabledReason !== null || addingToChat}
-          title={addToChatDisabledReason ?? (chip ? `Add ${chip.label} to chat` : undefined)}
-          onClick={() => void onAddToChat()}
-          className={cn(
-            "mr-1 shrink-0 rounded px-2 py-1 text-xs",
-            addToChatDisabledReason !== null || addingToChat
-              ? "cursor-not-allowed text-muted-foreground/50"
-              : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
-          )}
-        >
-          {addingToChat ? "Adding…" : "Add to chat"}
-        </button>
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            disabled={activeSource === null || signingOut}
+            title={
+              activeSource === null
+                ? "Pick Figma or Notion above first."
+                : `Sign out of ${SOURCE_TAB_LABELS[activeSource]}`
+            }
+            onClick={() => void onSignOut()}
+            className={cn(
+              "shrink-0 rounded px-2 py-1 text-xs",
+              activeSource === null || signingOut
+                ? "cursor-not-allowed text-muted-foreground/50"
+                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+            )}
+          >
+            {signingOut ? "Signing out…" : "Sign out"}
+          </button>
+          <button
+            type="button"
+            disabled={addToChatDisabledReason !== null || addingToChat}
+            title={addToChatDisabledReason ?? (chip ? `Add ${chip.label} to chat` : undefined)}
+            onClick={() => void onAddToChat()}
+            className={cn(
+              "mr-1 shrink-0 rounded px-2 py-1 text-xs",
+              addToChatDisabledReason !== null || addingToChat
+                ? "cursor-not-allowed text-muted-foreground/50"
+                : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+            )}
+          >
+            {addingToChat ? "Adding…" : "Add to chat"}
+          </button>
+        </div>
       </div>
       <div className="min-h-0 flex-1">
         {activeSource ? (

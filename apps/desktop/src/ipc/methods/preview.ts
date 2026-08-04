@@ -16,6 +16,7 @@ import {
   DesktopPreviewSetColorSchemeInputSchema,
   DesktopPreviewTabInputSchema,
   DesktopPreviewWebviewConfigSchema,
+  DesktopThirdPartySourceSignOutInputSchema,
   PreviewAnnotationPayloadSchema,
   PreviewAnnotationScreenshotSchema,
   PreviewAutomationSnapshot,
@@ -233,6 +234,16 @@ export const getThirdPartyBrowserConfig = DesktopIpc.makeIpcMethod({
   }),
 });
 
+export const signOutOfThirdPartySource = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.THIRD_PARTY_BROWSER_SIGN_OUT_CHANNEL,
+  payload: DesktopThirdPartySourceSignOutInputSchema,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.preview.signOutOfThirdPartySource")(function* ({ origin }) {
+    const manager = yield* PreviewManager.PreviewManager;
+    yield* manager.clearThirdPartySourceData(origin);
+  }),
+});
+
 export const setAnnotationTheme = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_SET_ANNOTATION_THEME_CHANNEL,
   payload: DesktopPreviewAnnotationThemeInputSchema,
@@ -405,6 +416,7 @@ export const methods = [
   clearCache,
   getPreviewConfig,
   getThirdPartyBrowserConfig,
+  signOutOfThirdPartySource,
   setAnnotationTheme,
   pickElement,
   cancelPickElement,

@@ -38,6 +38,20 @@ export interface NotionIdentity {
 
 export type ThirdPartySourceIdentity = FigmaIdentity | NotionIdentity;
 
+// F4 (owner ruling, relayed 2026-08-04): the ORIGIN each source lives at,
+// for Electron's origin-scoped `clearStorageData` sign-out call — the same
+// canonical `www.` host `thirdPartySourceBrowserStore.ts`'s DEFAULT_TAB_URL
+// already opens a fresh tab at, so "sign out" and "default URL" always agree
+// on what a source's home origin is.
+const THIRD_PARTY_SOURCE_ORIGIN: Readonly<Record<"figma" | "notion", string>> = {
+  figma: "https://www.figma.com",
+  notion: "https://www.notion.so",
+};
+
+export function thirdPartySourceOrigin(source: "figma" | "notion"): string {
+  return THIRD_PARTY_SOURCE_ORIGIN[source];
+}
+
 const FIGMA_HOSTS: ReadonlySet<string> = new Set(["figma.com", "www.figma.com"]);
 const FIGMA_FILE_PATH_PATTERN = /^\/(?:file|design)\/([^/]+)(?:\/([^/]+))?/;
 

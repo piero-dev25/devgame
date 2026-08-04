@@ -922,6 +922,12 @@ export const DesktopPreviewArtifactInputSchema = Schema.Struct({
   path: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
 });
 
+// F4 (owner ruling, relayed 2026-08-04): sign a user out of ONE third-party
+// source (e.g. `https://www.figma.com`) without touching the other's login.
+export const DesktopThirdPartySourceSignOutInputSchema = Schema.Struct({
+  origin: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
+});
+
 export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   mimeType: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
@@ -1065,6 +1071,14 @@ export interface DesktopPreviewBridge {
    * third-party page and is not attached.
    */
   getThirdPartyBrowserConfig: () => Promise<DesktopPreviewWebviewConfig>;
+  /**
+   * F4 (owner ruling, relayed 2026-08-04): sign the user out of ONE
+   * third-party source (`origin`, e.g. `https://www.figma.com`) — clears
+   * that origin's cookies/storage within the shared third-party partition
+   * WITHOUT touching the other product's login. Does not clear the
+   * partition's cache (not origin-scoped in Electron; see BrowserSession.ts).
+   */
+  signOutOfThirdPartySource: (origin: string) => Promise<void>;
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
   /**
    * Activate the in-page element picker for the given tab. Resolves with
