@@ -42,6 +42,14 @@ export default defineConfig({
       "apps/web/src/lib/vendor/qrcodegen.ts",
       "apps/mobile/uniwind-types.d.ts",
       "*.icon/**",
+      // GDScript/Godot project files (.gd, .gd.uid, .tscn, .godot's
+      // config-format .tres, project.godot) — not JS/TS, same reasoning as
+      // the mobile native trees above: `vp fmt`'s formatter has no
+      // business touching them, and staging a Godot-only changeset (task
+      // #48, the editor-presence addon) previously failed the commit hook
+      // outright with "Expected at least one target file" once every
+      // staged file fell outside every OTHER ignore pattern here.
+      "godot/**",
     ],
     sortPackageJson: {},
     overrides: [
