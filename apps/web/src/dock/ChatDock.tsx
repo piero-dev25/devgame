@@ -38,7 +38,15 @@ import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
+import {
+  AppWindow,
+  FileDiff,
+  Files,
+  Globe2,
+  MessageCircle,
+  PanelLeft,
+  TerminalSquare,
+} from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -54,6 +62,7 @@ import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import FilesDockPanel from "./FilesDockPanel";
 import TerminalDockPanel from "./TerminalDockPanel";
+import ThirdPartySourceDockPanel from "./ThirdPartySourceDockPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -66,6 +75,13 @@ import { SidebarPanel } from "./SidebarPanel";
 
 const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
+/** Task #55 (Section C precondition). No `chatDockHandle.ts` promotion —
+ * unlike Diff/Files/Terminal/Browser, nothing today needs to open this
+ * panel PROGRAMMATICALLY (no chat-markdown-link/script-auto-open-shaped
+ * entry point exists for it); "Add tab" is its only open path, same as
+ * Sidebar/Chat's own local-only ids below. Promote it to `chatDockHandle.ts`
+ * if/when a caller needs `openChatDockPanel("third-party-source")`. */
+export const THIRD_PARTY_SOURCE_PANEL_ID = "third-party-source";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
@@ -308,12 +324,63 @@ chatDockPanelRegistry.register({
 });
 
 /**
+ * Figma/Notion, registered (task #55's Section C precondition) —
+ * `ThirdPartySourceDockPanel.tsx`'s own doc comment carries the full
+ * feature-shape reasoning; this is the "make it reachable" half team-lead
+ * asked for after the QA plan named registration as the gate.
+ *
+ * DELIBERATELY ABSENT FROM `buildChatDockPreset()` BELOW — not an oversight,
+ * a decision made with evidence, not assumption. This panel models
+ * Figma-in-Google-Meet: something a user SUMMONS while working, not a
+ * fifth column permanently occupying screen space the way Diff/Files/
+ * Terminal/Browser earned by being about THIS thread. Verified the "how
+ * would someone open it" question before committing to this rather than
+ * assuming an omission is safe: `tabContextMenu.ts`'s "Add tab" builds its
+ * menu from `registry.list().filter(... !api.getPanel(id))` — EVERY
+ * registered panel not currently open, not just ones the active preset
+ * happened to include. So right-clicking any open tab and choosing
+ * "Add tab: Figma / Notion" already works today, with no new UI needed —
+ * the same sole discovery path this dock uses for reopening anything else
+ * that isn't pinned open (see this file's own preset-builder comment on
+ * why there's no "+"/catalog UI yet).
+ *
+ * `singleton: true`: `thirdPartySourceBrowserStore.ts` is deliberately ONE
+ * global Figma tab and ONE global Notion tab for the whole app (its own
+ * doc comment explains why — not per-thread), so a second panel instance
+ * would just be two views onto the identical store, never a case with any
+ * use.
+ *
+ * `closeable: true` (default, no override): same reasoning as
+ * Diff/Files/Terminal/Browser — nothing depends on this panel staying
+ * mounted.
+ *
+ * SECURITY STATUS AT REGISTRATION TIME (`#75`) — read before assuming this
+ * is shippable: F1/F2/F3/F5/F7 are fixed (`f425a8ebd`); F4 (no sign-out
+ * path) is still being built; an INDEPENDENT REVIEW of the fix commit is
+ * still running as of this registration and may land further findings.
+ * Registering the panel makes the code PATH reachable for that review and
+ * for the QA plan's Section C to actually run against — it does not by
+ * itself mean the feature is cleared to ship. Do not remove this note
+ * without confirming the review has closed.
+ */
+chatDockPanelRegistry.register({
+  id: THIRD_PARTY_SOURCE_PANEL_ID,
+  title: "Figma / Notion",
+  icon: AppWindow,
+  component: ThirdPartySourceDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
  * Terminal and Browser further right — the same third-column slot Files
  * occupied before Part A deleted our own version of it, now occupied by
  * T3's own Diff, Files, Terminal AND Browser surfaces instead of a
  * re-filled stand-in. This preset now covers every surface
- * spec-surfaces-as-dock-panels.md set out to promote.
+ * spec-surfaces-as-dock-panels.md set out to promote. Figma/Notion is
+ * registered above but intentionally NOT part of this preset — see that
+ * registration's own comment for why "open on demand" is correct here.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant

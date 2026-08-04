@@ -3,6 +3,7 @@
 // no app coupling.
 import type { ITabRenderer, TabPartInitParameters } from "dockview";
 import {
+  AppWindow,
   ClipboardList,
   FileDiff,
   Files,
@@ -58,6 +59,18 @@ import { createRoot, type Root } from "react-dom/client";
  * per-surface state, which is exactly what a tab cannot reach from its own
  * React root. `Globe2` here is the honest static floor, not the finished
  * treatment; the favicon needs the icon resolved outside and passed in.
+ *
+ * `third-party-source` (task #55): FIXED, not per-`activeSource` (Figma vs
+ * Notion) — a deliberate choice, not a deferred one like the browser
+ * favicon above. Making it dynamic would need the exact same live-state
+ * wiring this file's own module doc says a tab CANNOT do (this tab's
+ * `TabContent` is rendered once, in `init()`, from static
+ * `params`/`params.api.id` alone — no subscription to
+ * `thirdPartySourceBrowserStore`'s `activeSource` exists here, and adding
+ * one is the portal refactor this file already flags as a real, undone
+ * design question, not a one-line addition). `AppWindow` is a neutral
+ * "embedded external app" glyph rather than borrowing Figma's or Notion's
+ * mark for a tab that can be either.
  */
 const PANEL_TAB_ICONS: Readonly<Record<string, LucideIcon>> = {
   sidebar: PanelLeft,
@@ -67,6 +80,7 @@ const PANEL_TAB_ICONS: Readonly<Record<string, LucideIcon>> = {
   terminal: TerminalSquare,
   preview: Globe2,
   plan: ClipboardList,
+  "third-party-source": AppWindow,
 };
 
 interface TabContentProps {
