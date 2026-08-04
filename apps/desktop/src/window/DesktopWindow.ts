@@ -568,28 +568,108 @@ export const make = Effect.gen(function* () {
 
     // G3/#80 (independent security review, 2026-08-04) built a
     // same-origin-allow/cross-origin-deflect navigation guard, plus a guest
-    // context menu, for `did-attach-webview` guests — scoped by session
-    // identity to the third-party (Figma/Notion) panel specifically,
-    // because the two listeners above are scoped to `window.webContents`
-    // (the main window's OWN content) and Electron never applies them to a
-    // `<webview>` guest's separate WebContents.
+    // context menu, for `did-attach-webview` guests, because the two
+    // listeners above are scoped to `window.webContents` — the main
+    // window's OWN content — and Electron never applies them to a
+    // `<webview>` guest's separate WebContents. Originally scoped by
+    // session identity to the third-party (Figma/Notion) panel, with
+    // preview explicitly carved OUT: "preview's guest loads the user's OWN,
+    // fully-trusted dev server."
     //
-    // FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this guard was
-    // inert for every OTHER guest already (it bailed immediately unless
-    // `guestWebContents.session === thirdPartySession`), so removing it
-    // changes nothing about preview's behavior today. It is NOT reused for
-    // preview here rather than left in place: `#88` (open, live today) is
-    // that this exact class of exposure — an unguarded `window.open` →
-    // `loadURL` fallback bypassing `will-navigate`, and no guest navigation
-    // guard at all — applies to preview's `<webview>` too, and re-scoping
-    // this mechanism from third-party identity to preview identity is a
-    // real security decision for whoever picks up `#88`, not a mechanical
-    // rename to make while deleting an unrelated feature. The proven,
-    // tested design (same-origin-allow, cross-origin-deny-and-deflect via
-    // `ElectronShell.shouldAllowExternalDeflect`/`parseSafeExternalUrl`,
-    // `will-redirect` alongside `will-navigate` per H2, a minimal guest
-    // context menu) is fully recoverable at commit 630eeb5e9 — `#88` should
-    // restore it against preview's session, not invent a new one.
+    // #88 (2026-08-04): that carve-out reasoning does not survive contact
+    // with what preview actually loads. A running game build routinely
+    // pulls npm packages, CDN scripts, and remote asset hosts — it is not
+    // "the user's own trusted dev server" in the sense the original
+    // exemption assumed. The webview sandbox forces means a hostile page
+    // in the panel cannot ESCALATE, but the sandbox says nothing about
+    // NAVIGATION: with no guard here, any page inside the preview panel —
+    // including a same-origin script the game itself loaded, or a
+    // cross-origin iframe it embedded — could repaint the whole panel to
+    // an arbitrary `https` URL. F5's window-open handler (`Manager.ts`'s
+    // `handlePopupNavigation`) already funnels a denied `window.open()`
+    // into a same-webview `loadURL`, so this was never just a popup-only
+    // risk (H1) — and `will-navigate` alone misses a same-origin request
+    // that then 302-redirects cross-origin (H2, `will-redirect` below).
+    //
+    // FIGMA/NOTION DELETED (owner ruling, 2026-08-04) removed this guard
+    // entirely rather than reusing it for preview, because re-scoping it
+    // from third-party identity to preview identity was flagged as a real
+    // security decision for whoever picked up `#88`, not a mechanical
+    // rename to make while deleting an unrelated feature. That decision:
+    // preview is now the ONLY guest type left, so this applies
+    // UNCONDITIONALLY to every `did-attach-webview` guest — no session
+    // check, no identity branch, nothing left to carve preview out of.
+    // Policy unchanged from the original: allow navigation that stays on
+    // the guest's CURRENT origin (a real game build is a real SPA/app that
+    // legitimately navigates within itself); DEFLECT anything cross-origin
+    // to the user's real external browser via `ElectronShell.openExternal`
+    // rather than silently blocking it, rate-limited by
+    // `ElectronShell.shouldAllowExternalDeflect` (F-3) so a hostile page
+    // can't spam external tabs by looping a navigation.
+    window.webContents.on("did-attach-webview", (_event, guestWebContents) => {
+      guestWebContents.on("will-navigate", (event, url) => {
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+        ) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // H2 (independent security review, 2026-08-04, merge-gate): `will-
+      // navigate` only fires for the INITIAL navigation of a load — a
+      // same-origin navigation that then 302-redirects cross-origin fires
+      // `will-redirect` instead, which nothing was listening to. On its
+      // own this needs an open redirect on the guest's current origin, but
+      // it composes directly with H1/G4 — either of which can already hand
+      // an attacker that origin — so it's not an independent precondition
+      // in practice. Same policy as `will-navigate` above, not a new one:
+      // same-origin redirect target is allowed silently, cross-origin is
+      // denied and deflected, same rate limit.
+      guestWebContents.on("will-redirect", (event, url) => {
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+        ) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // Minimal Cut/Copy/Paste/Select All, matching the main window's own
+      // template above. Deliberately NOT the fuller "Copy Link"/"Copy
+      // Image" affordances that template also has: nothing here closes G4
+      // (the automation-tabId issue), so adding more surface to guest
+      // content ahead of that landing would only grow the problem, not
+      // shrink it.
+      guestWebContents.on("context-menu", (event, params) => {
+        event.preventDefault();
+        const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+          { role: "cut", enabled: params.editFlags.canCut },
+          { role: "copy", enabled: params.editFlags.canCopy },
+          { role: "paste", enabled: params.editFlags.canPaste },
+          { role: "selectAll", enabled: params.editFlags.canSelectAll },
+        ];
+        void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
+      });
+    });
 
     window.on("page-title-updated", (event) => {
       event.preventDefault();

@@ -415,7 +415,13 @@ describe("PreviewManager", () => {
           id: 44,
           isDestroyed: () => false,
           getType: () => "webview",
-          getURL: () => "about:blank",
+          // #88's restored origin policy (see the `describe` block near the
+          // end of this file) means the popup target's origin now matters
+          // here too — same-origin with the guest's CURRENT url, so this
+          // test stays about F5's own concern (does a valid http(s) URL
+          // still get validated and loaded) rather than accidentally
+          // exercising the cross-origin deflect path instead.
+          getURL: () => "https://www.figma.com/files",
           getTitle: () => "",
           isLoading: () => false,
           getZoomFactor: () => 1,
@@ -2151,6 +2157,12 @@ describe("G2 — early main-process window-open guard", () => {
           const guestWc = {
             id: 777,
             getType: () => "webview",
+            // Same-origin with the popup target below — this test's own
+            // purpose (per its name) is proving the EARLY guard installs
+            // and routes correctly before any tab registers, not exercising
+            // #88's origin policy (covered separately, near the end of this
+            // file); a same-origin pair keeps those two concerns apart.
+            getURL: () => "https://evil.example.com/",
             loadURL,
             setWindowOpenHandler,
           };
@@ -2185,9 +2197,9 @@ describe("G2 — early main-process window-open guard", () => {
           {},
           { id: 778, getType: () => "webview", loadURL, setWindowOpenHandler },
         );
-        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-          url: string;
-        }) => { action: string };
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: { url: string }) => {
+          action: string;
+        };
 
         expect(openHandler({ url: "javascript:alert(1)" })).toEqual({ action: "deny" });
         yield* Effect.yieldNow;
@@ -2205,10 +2217,7 @@ describe("G2 — early main-process window-open guard", () => {
         )?.[1] as (event: unknown, wc: unknown) => void;
 
         const setWindowOpenHandler = vi.fn();
-        webContentsCreatedHandler(
-          {},
-          { id: 779, getType: () => "window", setWindowOpenHandler },
-        );
+        webContentsCreatedHandler({}, { id: 779, getType: () => "window", setWindowOpenHandler });
 
         expect(setWindowOpenHandler).not.toHaveBeenCalled();
       }),
@@ -2216,21 +2225,20 @@ describe("G2 — early main-process window-open guard", () => {
   );
 });
 
-// G2/H1/F-3's session-identity-scoped popup policy (deny-and-navigate,
-// same-origin-allow, cross-origin-deny-and-deflect, rate limited) is gone
-// with the third-party feature it protected (owner ruling, 2026-08-04) —
-// see Manager.ts's own comment at the collapse site, and git history at
-// commit 630eeb5e9 for the removed mechanism, fully recoverable for `#88`
-// (open, live today: this same navigation-spoofing class applies to
-// preview's `<webview>` too) to restore against preview's session rather
-// than reinvent. What remains — and what `handlePopupNavigation` still
-// exists to do — is G2's own original fix: a window-open handler
-// installed BEFORE any renderer round trip completes, so a guest calling
-// `window.open` early never falls through to Electron's default,
-// unrestricted popup window. These pin that the collapse to unconditional
-// `loadInPanel` behavior actually happened, not just that the old
-// session-branching code is gone.
-describe("early window-open handler always loads the popup URL in the guest, never opens a new window", () => {
+// #88 (2026-08-04): restores G2/H1/F-3's popup policy — same-origin loads
+// in the guest, cross-origin is denied and deflected to the real external
+// browser, rate limited — recovered from `git show 2d8a9acb6` (NOT
+// `630eeb5e9`, a wrong citation that was sitting in this file's own
+// now-rewritten comment). Applied UNCONDITIONALLY now, not scoped by
+// session identity: preview is the only guest type this handler ever
+// sees, and the old "preview's own trusted dev server" exemption doesn't
+// hold for a running game build that pulls npm packages, CDN scripts, and
+// remote asset hosts — see `handlePopupNavigation`'s own comment in
+// Manager.ts. `window.open` still needs SOME handler regardless (G2's
+// original fix), installed BEFORE any renderer round trip completes, so a
+// guest calling it early never falls through to Electron's default,
+// unrestricted popup window.
+describe("early window-open handler applies the same-origin/deflect policy, never opens a new window", () => {
   // Sibling of `describe("PreviewManager", ...)` — see its own beforeEach
   // for why this block needs its own.
   beforeEach(() => {
@@ -2248,18 +2256,19 @@ describe("early window-open handler always loads the popup URL in the guest, nev
   // `handlePopupNavigation` runs on a separately `runFork`'d fiber (the
   // window-open handler itself is a synchronous Electron callback, not an
   // Effect the test can `yield*`), and it crosses a real Promise boundary
-  // (`attemptPromise` wrapping `wc.loadURL`). `it.live` (real clock) plus a
-  // short real sleep settles it reliably, unlike `it.effect`'s virtual
-  // TestClock, which never advances without an explicit tick.
+  // (`attemptPromise` wrapping `wc.loadURL`/`shell.openExternal`). `it.live`
+  // (real clock) plus a short real sleep settles it reliably, unlike
+  // `it.effect`'s virtual TestClock, which never advances without an
+  // explicit tick.
   const flush = Effect.sleep(50);
 
-  // Mutation-tested (this fix round): reintroducing a deny-only branch, or
-  // any branch on `wc.session`, should redden one of these two — together
-  // they assert `loadURL` fires with the exact URL for a same-origin
-  // request AND a cross-origin request, on two distinct session
-  // identities, so no origin- or session-based conditional can silently
-  // return and still pass both.
-  effectIt.live("loads a same-origin popup URL in the guest, unconditionally", () =>
+  // Mutation-tested (this fix round): removing the origin check, or
+  // reintroducing an unconditional `loadInPanel`, should redden one of
+  // these two — together they assert `loadURL` fires for a same-origin
+  // popup and `shell.openExternal` (never `loadURL`) fires for a
+  // cross-origin one, so neither direction can silently collapse into the
+  // other.
+  effectIt.live("loads a same-origin popup URL in the guest", () =>
     withManager((manager) =>
       Effect.gen(function* () {
         void manager;
@@ -2272,14 +2281,13 @@ describe("early window-open handler always loads the popup URL in the guest, nev
             id: 501,
             getType: () => "webview",
             getURL: () => "http://localhost:5173/",
-            session: { __brand: "session-a" },
             loadURL,
             setWindowOpenHandler,
           },
         );
-        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-          url: string;
-        }) => { action: string };
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: { url: string }) => {
+          action: string;
+        };
 
         const result = openHandler({ url: "http://localhost:5173/popup" });
 
@@ -2291,38 +2299,73 @@ describe("early window-open handler always loads the popup URL in the guest, nev
     ),
   );
 
-  effectIt.live(
-    "loads a cross-origin popup URL in the guest too, unconditionally — no origin branch survives",
-    () =>
-      withManager((manager) =>
-        Effect.gen(function* () {
-          void manager;
-          const webContentsCreatedHandler = getHandler();
-          const loadURL = vi.fn(async () => undefined);
-          const setWindowOpenHandler = vi.fn();
-          webContentsCreatedHandler(
-            {},
-            {
-              id: 502,
-              getType: () => "webview",
-              getURL: () => "http://localhost:5173/",
-              session: { __brand: "session-b" },
-              loadURL,
-              setWindowOpenHandler,
-            },
-          );
-          const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-            url: string;
-          }) => { action: string };
+  effectIt.live("denies a cross-origin popup URL and deflects it externally instead", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = getHandler();
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          {
+            // F-3: the deflect rate limiter is keyed by webContents id — a
+            // unique id here keeps this test's budget separate from every
+            // other test in this describe block.
+            id: 502,
+            getType: () => "webview",
+            getURL: () => "http://localhost:5173/",
+            loadURL,
+            setWindowOpenHandler,
+          },
+        );
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: { url: string }) => {
+          action: string;
+        };
 
-          const result = openHandler({ url: "https://some-other-origin.example/" });
+        const result = openHandler({ url: "https://some-other-origin.example/" });
 
-          expect(result).toEqual({ action: "deny" });
-          yield* flush;
-          expect(loadURL).toHaveBeenCalledWith("https://some-other-origin.example/");
-          expect(shellOpenExternal).not.toHaveBeenCalled();
-        }),
-      ),
+        expect(result).toEqual({ action: "deny" });
+        yield* flush;
+        expect(loadURL).not.toHaveBeenCalled();
+        expect(shellOpenExternal).toHaveBeenCalledWith("https://some-other-origin.example/");
+      }),
+    ),
+  );
+
+  // F-3: the deflect path is rate limited so a hostile page can't spawn
+  // unbounded real browser tabs by looping `window.open` at a cross-origin
+  // URL.
+  effectIt.live("rate-limits repeated cross-origin popup deflects from the same guest", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = getHandler();
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          {
+            id: 503,
+            getType: () => "webview",
+            getURL: () => "http://localhost:5173/",
+            loadURL,
+            setWindowOpenHandler,
+          },
+        );
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: { url: string }) => {
+          action: string;
+        };
+
+        for (let i = 0; i < 3; i++) {
+          openHandler({ url: `https://some-other-origin.example/?n=${i}` });
+        }
+        yield* flush;
+
+        expect(shellOpenExternal).toHaveBeenCalledTimes(1);
+        expect(shellOpenExternal).toHaveBeenCalledWith("https://some-other-origin.example/?n=0");
+      }),
+    ),
   );
 });
 

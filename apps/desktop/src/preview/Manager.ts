@@ -56,7 +56,9 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import { parseSafeExternalUrl, shouldAllowExternalDeflect } from "../electron/ElectronShell.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
+import { isSameOriginRendererNavigation } from "../window/DesktopWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -467,37 +469,47 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // G2/H1/F-3 (independent security review, 2026-08-04) built a
   // session-identity-scoped policy here — same-origin popups load in the
   // guest, cross-origin ones deny-and-deflect to the real external browser,
-  // rate limited — for the third-party (Figma/Notion) panel specifically.
-  // FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this handler collapses
-  // to the ORIGINAL, unconditional `loadInPanel` behavior below, which is
-  // exactly what preview has always gotten from it (the fix's own carve-out
-  // comment said so explicitly: the mechanism applies identically to a
-  // preview guest, the third-party scoping was a scope decision, not a
-  // claim the mechanism doesn't reach preview).
+  // rate limited — for the third-party (Figma/Notion) panel specifically,
+  // with preview explicitly carved OUT: "Preview webviews keep their
+  // original, unconditional loadURL behavior, matching G3's own
+  // preview-out-of-scope carve-out." FIGMA/NOTION DELETED (owner ruling,
+  // 2026-08-04) collapsed this handler down to exactly that carved-out
+  // behavior — unconditional `loadURL`, no origin check at all — which was
+  // correct for what preview got BEFORE, but left #88 open: `window.open`
+  // still needs SOME handler (Electron's default opens a real, unrestricted
+  // `BrowserWindow` at an attacker-chosen URL, outside every check in this
+  // file — G2's original problem), and deny-then-`loadURL`-in-place on the
+  // SAME guest WebContents never fires `will-navigate`, so
+  // `DesktopWindow.ts`'s guest guard (which listens for exactly that event)
+  // never saw this path either (H1).
   //
-  // NOT reduced to nothing: `window.open` still needs SOME handler, or
-  // Electron's default popup behavior opens a real, unrestricted
-  // `BrowserWindow` at an attacker-chosen URL outside every navigation
-  // check in this file (this is what G2 fixed in the first place — see
-  // commit 630eeb5e9's version of this file for the full history and the
-  // probe that proved it). Deny-and-loadURL-in-place is still strictly
-  // safer than Electron's default even with no origin check at all.
-  //
-  // #88 (open, live today): the deny+loadURL fallback below still bypasses
-  // `will-navigate` (H1's own finding), so this handler's own popups have
-  // no origin policy — same exposure preview has always had for this
-  // class, unrelated to today's collapse. The same-origin/deflect/rate-
-  // limited policy that closed this for third-party is proven, tested, and
-  // fully recoverable at commit 630eeb5e9 (`resolvePopupNavigationTarget`'s
-  // and `handlePopupNavigation`'s pre-collapse bodies) — #88 should restore
-  // that design against preview's session, not invent a new one.
+  // #88 (2026-08-04): restores the same-origin/deflect/rate-limited policy
+  // (`git show 2d8a9acb6` for the full history and the probe that proved
+  // it — NOT `630eeb5e9`, an earlier, wrong citation in this comment and in
+  // the ticket both) — but applies it UNCONDITIONALLY, not scoped by
+  // session identity, because preview is now the only guest type this
+  // handler ever sees. See `DesktopWindow.ts`'s `did-attach-webview` guard
+  // for why the old "preview loads the user's own trusted dev server"
+  // carve-out doesn't hold: a running game build pulls npm packages, CDN
+  // scripts, and remote hosts same as any other web content.
   //
   // Kept as a NAMED, dedicated function rather than inlined at both call
-  // sites (this one and `install` inside `attachListeners`, below) so a
-  // future `#88` fix has exactly one place to change, and so the two
-  // install sites' shared behavior (see the H1 note in `install` for why
-  // there are two) is visibly the same function, not two copies that could
-  // drift.
+  // sites (this one and `install` inside `attachListeners`, below) so the
+  // two install sites' shared behavior (see the H1 note in `install` for
+  // why there are two) is visibly the same function, not two copies that
+  // could drift.
+  const resolvePopupNavigationTarget = (
+    wc: Electron.WebContents,
+    normalizedUrl: string,
+  ): { readonly kind: "loadInPanel" | "deflect" } => {
+    const anchor = wc.getURL();
+    const sameOrigin = isSameOriginRendererNavigation({
+      applicationUrl: anchor,
+      navigationUrl: normalizedUrl,
+    });
+    return sameOrigin ? { kind: "loadInPanel" } : { kind: "deflect" };
+  };
+
   const handlePopupNavigation = Effect.fn("PreviewManager.handlePopupNavigation")(function* (
     operation: string,
     wc: Electron.WebContents,
@@ -509,8 +521,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     } catch {
       return;
     }
-    yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
-      wc.loadURL(normalizedUrl),
+    const target = resolvePopupNavigationTarget(wc, normalizedUrl);
+    if (target.kind === "loadInPanel") {
+      yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
+        wc.loadURL(normalizedUrl),
+      ).pipe(Effect.ignore);
+      return;
+    }
+    if (!shouldAllowExternalDeflect(wc.id)) return;
+    if (Option.isNone(parseSafeExternalUrl(normalizedUrl))) return;
+    yield* attemptPromise({ operation: `${operation}.deflect`, webContentsId: wc.id }, () =>
+      shell.openExternal(normalizedUrl),
     ).pipe(Effect.ignore);
   });
 
@@ -1474,11 +1495,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.setWindowOpenHandler(({ url }) => {
           // F5 (independent security review, 2026-08-04): this handler
           // exists to stop uncontrolled new windows from untrusted content
-          // (deny + navigate the same webview instead) — see
-          // `handlePopupNavigation`'s own comment (this file, near the
-          // early `web-contents-created` handler) for what it does and the
-          // #88 exposure it still leaves open. This call site shares that
-          // function rather than re-implementing it.
+          // (deny + navigate the same webview instead), with #88's
+          // same-origin/deflect/rate-limited policy applied inside
+          // `handlePopupNavigation` — see that function's own comment (this
+          // file, near the early `web-contents-created` handler) for the
+          // full history. This call site shares that function rather than
+          // re-implementing it.
           runFork(handlePopupNavigation("openPreviewWindow", wc, url));
           return { action: "deny" };
         });
