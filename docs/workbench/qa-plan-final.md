@@ -137,6 +137,22 @@ give it real weight, not one line.
 Precondition: two (or more) distinct chat threads open in the same project,
 each in a different dock-panel state (see B1–B3 setup steps).
 
+**Verified so far in a browser tab only — this section needs its own pass in
+the desktop app, not just Section A's general "launch the desktop app"
+instruction taken on faith.** All four panels' live verification to date
+(the thread-switch proofs B1.1–B1.4 draw on, `#33`'s layout-survival proof)
+ran in a browser tab. `PreviewPanel.tsx`'s own runtime gate
+(`isPreviewSupportedInRuntime()` — the same one A1.4 exercises for three.js)
+means the Browser panel (B1.4) **specifically** takes a different code path
+on desktop than in a browser tab: a browser-tab pass exercises the "preview
+only available in the desktop app" fallback message, not the real embedded
+preview a desktop user actually sees. Files/Diff/Terminal (B1.1–B1.3) aren't
+gated the same way, but haven't been re-confirmed on desktop either — don't
+assume they transfer just because they aren't runtime-gated. Running this
+whole plan against the desktop app (per "Launching the app under test"
+above) is what closes this gap; prior browser-tab verification does not
+already cover it.
+
 | #                                                      | Check                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | B1.1 (Files)                                           | In thread A, open two files in the Files panel (different from thread B's). Switch to thread B, open a different file. Switch back to thread A.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            | Thread A's Files panel shows exactly the two files it had open, not thread B's, not a union, not empty. 📸 before-switch and after-switch-back, side by side.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -217,6 +233,47 @@ Once both preconditions are confirmed:
 | C3                                                                     | From a Figma or Notion tab, use "Add to chat."                                                                                                                                                                                             | The referenced content (page/frame identity, not a screenshot-only blob, unless that's the deliberate design) lands in the composer/thread in a form the agent can actually use — confirm by asking the agent a question that requires the added content and checking its answer references it correctly. 📸 both the "Add to chat" action and the resulting composer state. |
 | C4 (negative)                                                          | Attempt "Add to chat" before the tab has finished loading, or on a page that failed to load.                                                                                                                                               | Fails visibly and specifically (not a silent no-op, not a broken/blank attachment sent to the thread).                                                                                                                                                                                                                                                                       |
 | C5 (security spot-check, not a full re-audit — `#75` already did that) | With the browser devtools reachable for the third-party webview (or via the same probe method `#75`'s review used), confirm the third-party session does **not** silently grant geolocation/clipboard permissions (F1's exact regression). | No unprompted "granted" result for either permission against the third-party partition.                                                                                                                                                                                                                                                                                      |
+
+### Known Electron permission-set behaviors — read before running C1–C5
+
+Two independent Electron probes (separate from `#75`'s own review) established
+what the third-party webview's empty permission set actually does at
+runtime — one of these changes **how** this section gets run, not just what
+it finds, so read it before starting rather than after being surprised:
+
+- **A denied `requestFullscreen()` never settles — it hangs, it does not
+  reject.** Measured past a 4-second timeout with no rejection. A denied
+  fullscreen therefore presents to a runner as **the app freezing**, not as
+  an error message or a visible "permission denied" state — the worst
+  possible shape to hit live. If anything in C1–C3 can trigger fullscreen (a
+  Figma prototype's "Present" mode is the likely trigger) and the panel
+  appears to hang, **that is the deliberate empty permission set working as
+  designed, not a defect** — record it as the expected behavior and move on;
+  don't spend time chasing it as a crash or a deadlock.
+- **`pointerLock` is also denied, but rejects rather than hanging** — its
+  end-user-visible behavior isn't as clearly established as fullscreen's, so
+  don't assert a specific UI symptom for it with the same confidence. If
+  encountered, describe what was actually observed rather than assuming it
+  matches the fullscreen shape.
+- **Ordinary user-driven copy/paste works fine and never reaches the
+  permission handler at all** — keyboard shortcut, right-click menu, and
+  `execCommand` under a real user gesture all succeed. What's denied is the
+  **async Clipboard API** (`navigator.clipboard.*`), i.e. scripted access.
+  By inference — **unconfirmed, needs a real logged-in session to check** —
+  product features built on that API (Figma/Notion's own "Copy link," "Copy
+  as PNG/SVG," and similar) may be blocked even though manual copy/paste
+  isn't. Treat that as an open observation for whoever runs C1–C3 with real
+  credentials, not as an established limitation to report either way without
+  checking.
+- **Methodology caution, not just a finding — this changes how C5 (and any
+  manual clipboard spot-check) must be run.** Synthesized keystrokes
+  (`sendInputEvent`-style key simulation) do **not** exercise copy/paste on
+  macOS — native edit commands route outside the renderer's key handling
+  entirely, so a simulated Cmd+C/Cmd+V silently does nothing. Both probes
+  hit this and got a false "denied" reading before realizing the input
+  itself never landed. **Any clipboard check in this section must be driven
+  by a real human pressing the keys or using the menu item** — a
+  computer-use driver simulating the keystroke proves nothing, pass or fail.
 
 ---
 
