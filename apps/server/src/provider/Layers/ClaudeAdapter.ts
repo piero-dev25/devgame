@@ -1089,6 +1089,46 @@ function extractTextContent(value: unknown): string {
   return extractTextContent(record.content);
 }
 
+/**
+ * Task #81: `extractTextContent`'s sibling for the image variant of a tool
+ * result's content — e.g. the devgame MCP server's `preview_snapshot`
+ * screenshot tool (apps/server/src/mcp/McpHttpServer.ts), wired into every
+ * provider's session including this one. Claude's tool_result content is an
+ * `Array<TextBlockParam | ImageBlockParam | ...>` (the Anthropic Messages
+ * API shape) rather than ACP's flat `{type,data,mimeType}` — the nested
+ * `source.type === "base64"` is the only encoding this reads; Claude's SDK
+ * does not emit URL-sourced images in tool results.
+ */
+function extractImageContentFromClaudeToolResult(
+  content: unknown,
+): ReadonlyArray<{ readonly data: string; readonly mimeType: string }> {
+  if (!Array.isArray(content)) {
+    return [];
+  }
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const entry of content) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const block = entry as { type?: unknown; source?: unknown };
+    if (block.type !== "image" || !block.source || typeof block.source !== "object") {
+      continue;
+    }
+    const source = block.source as { type?: unknown; media_type?: unknown; data?: unknown };
+    if (
+      source.type !== "base64" ||
+      typeof source.data !== "string" ||
+      source.data.length === 0 ||
+      typeof source.media_type !== "string" ||
+      source.media_type.length === 0
+    ) {
+      continue;
+    }
+    images.push({ data: source.data, mimeType: source.media_type });
+  }
+  return images;
+}
+
 function extractExitPlanModePlan(value: unknown): string | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
@@ -2414,6 +2454,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             payload: message,
           },
         });
+      }
+
+      // Task #81: not gated by toolResultStreamKind — that mapping is
+      // itemType-specific and text-only (command output / file-change
+      // output), so a screenshot tool's `dynamic_tool_call`/`web_search`
+      // itemType would never qualify. An image belongs in the thread
+      // regardless of what kind of tool produced it, matching how the ACP
+      // tool_call_update path (task #67) doesn't gate on itemType either.
+      // No separate dedup guard: `context.inFlightTools.delete(index)`
+      // below already runs synchronously in this same iteration, and the
+      // lookup above (`Array.from(...).find`) fails closed — a stale
+      // replay of this message finds no matching entry and never reaches
+      // this code at all, unlike ACP's tool_call_update merge, which
+      // reconstructed a fresh, "completed"-looking state from just the new
+      // event. Proven, not assumed — see ClaudeAdapter.test.ts's "does not
+      // double-emit" case.
+      if (context.turnState) {
+        for (const image of extractImageContentFromClaudeToolResult(toolResult.block.content)) {
+          const imageStamp = yield* makeEventStamp();
+          yield* offerRuntimeEvent({
+            type: "content.delta",
+            eventId: imageStamp.eventId,
+            provider: PROVIDER,
+            createdAt: imageStamp.createdAt,
+            threadId: context.session.threadId,
+            turnId: context.turnState.turnId,
+            itemId: asRuntimeItemId(tool.itemId),
+            payload: {
+              streamKind: "assistant_image",
+              delta: "",
+              attachmentData: image.data,
+              attachmentMimeType: image.mimeType,
+            },
+            providerRefs: nativeProviderRefs(context, {
+              providerItemId: tool.itemId,
+            }),
+            raw: {
+              source: "claude.sdk.message",
+              method: "claude/user",
+              payload: message,
+            },
+          });
+        }
       }
 
       const completedStamp = yield* makeEventStamp();

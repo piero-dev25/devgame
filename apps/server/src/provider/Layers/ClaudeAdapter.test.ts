@@ -1219,6 +1219,197 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  // Task #81: ClaudeAdapter's separate SDK path has the identical drop
+  // AcpRuntimeModel.ts had (task #67) — a tool_result content block can
+  // carry an image (e.g. the devgame MCP server's `preview_snapshot`
+  // screenshot tool, wired into every provider's session including Claude's)
+  // and toolResultBlocksFromUserMessage/extractTextContent only ever
+  // extracted the text variant. This proves the destination is exactly the
+  // same shared one ACP's tool-call path uses: "content.delta" /
+  // streamKind "assistant_image" — zero downstream changes needed.
+  it.effect("surfaces an image in a tool result as an assistant_image content delta", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "take a screenshot",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-tool-image",
+        uuid: "stream-tool-start",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-screenshot-1",
+            name: "mcp__devgame__preview_snapshot",
+            input: {},
+          },
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session-tool-image",
+        uuid: "user-tool-result-image",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-screenshot-1",
+              content: [
+                { type: "text", text: '{"width":800,"height":600}' },
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+                },
+              ],
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-tool-image",
+        uuid: "result-tool-image",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const imageDeltas = runtimeEvents.filter(
+        (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_image",
+      );
+      assert.equal(imageDeltas.length, 1);
+      const imageDelta = imageDeltas[0];
+      if (imageDelta?.type === "content.delta") {
+        assert.equal(imageDelta.payload.attachmentData, "iVBORw0KGgo=");
+        assert.equal(imageDelta.payload.attachmentMimeType, "image/png");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  // The hazard carried forward from task #67's ACP dedup work: does
+  // ClaudeAdapter have the same "delete-on-completion, but a stale replay
+  // reconstructs a fresh state" hazard? It does not — `inFlightTools` is
+  // deleted synchronously in the same loop iteration that processes a tool
+  // result, and the lookup that follows a deletion (`Array.from(...).find`)
+  // fails closed rather than rebuilding a valid entry from just the new
+  // message, unlike ACP's `mergeToolCallState(undefined, event.toolCall)`.
+  // This test proves that architecturally-derived claim rather than
+  // asserting it: replaying the identical tool_result message must not
+  // double the attachment.
+  it.effect("does not double-emit an image when the same tool result message repeats", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const runtimeEventsFiber = yield* Stream.takeUntil(
+        adapter.streamEvents,
+        (event) => event.type === "turn.completed",
+      ).pipe(Stream.runCollect, Effect.forkChild);
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "take a screenshot",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session-tool-image-dup",
+        uuid: "stream-tool-start",
+        parent_tool_use_id: null,
+        event: {
+          type: "content_block_start",
+          index: 0,
+          content_block: {
+            type: "tool_use",
+            id: "tool-screenshot-1",
+            name: "mcp__devgame__preview_snapshot",
+            input: {},
+          },
+        },
+      } as unknown as SDKMessage);
+
+      const toolResultMessage = {
+        type: "user",
+        session_id: "sdk-session-tool-image-dup",
+        uuid: "user-tool-result-image",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "tool-screenshot-1",
+              content: [
+                {
+                  type: "image",
+                  source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+                },
+              ],
+            },
+          ],
+        },
+      } as unknown as SDKMessage;
+
+      // A single SDK message delivered a second time — the scenario a
+      // redelivery or replay would produce.
+      harness.query.emit(toolResultMessage);
+      harness.query.emit(toolResultMessage);
+
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session-tool-image-dup",
+        uuid: "result-tool-image-dup",
+      } as unknown as SDKMessage);
+
+      const runtimeEvents = Array.from(yield* Fiber.join(runtimeEventsFiber));
+      const imageDeltas = runtimeEvents.filter(
+        (event) => event.type === "content.delta" && event.payload.streamKind === "assistant_image",
+      );
+      assert.equal(imageDeltas.length, 1);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("falls back to a default plan step label for blank TodoWrite content", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
