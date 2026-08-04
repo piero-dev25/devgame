@@ -548,17 +548,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return { kind: "denyOnly" };
     }
     // NOT third-party — carved out onto the original, unconditional
-    // loadInPanel behavior. Record precisely why: this mechanism (deny +
-    // loadURL bypassing will-navigate) applies IDENTICALLY to a preview
-    // guest — nothing about it is third-party-specific. The carve-out
-    // exists only because preview is assumed trusted (the user's own dev
-    // server), an assumption inherited from G3's own scoping rather than
-    // tested here. That assumption is under separate investigation
-    // (whether preview's contextIsolation=false plus the picker preload
-    // leaks anything privileged onto a page that can itself load
-    // third-party scripts/CDN embeds/remote assets). If it resolves badly,
-    // this carve-out needs revisiting — widening it is a scope decision
-    // for whoever owns that finding, not something to do preemptively here.
+    // loadInPanel behavior. Record precisely why, corrected once already:
+    // this mechanism (deny + loadURL bypassing will-navigate) applies
+    // IDENTICALLY to a preview guest — nothing about it is third-party-
+    // specific; the carve-out is a scope decision, not a claim the
+    // mechanism doesn't reach preview. The escalation question that used
+    // to motivate this carve-out has been answered CLEAN: `sandbox: true`
+    // is forced on every guest regardless of partition, so a hostile
+    // preview page cannot reach ipcRenderer/require/process/Node globals
+    // even with contextIsolation off — sandbox denies Node injection on
+    // its own. So the carve-out holds for a different reason than
+    // originally assumed: preview guests can't escalate, not that preview
+    // is otherwise trusted. Sandbox says nothing about NAVIGATION, though
+    // — preview remains exactly as exposed to this spoofing class as
+    // third-party is without this fix, tracked as its own ticket, live
+    // today regardless of the third-party panel's hold.
     if (wc.session !== thirdPartySessionForPopupPolicy) {
       return { kind: "loadInPanel" };
     }
