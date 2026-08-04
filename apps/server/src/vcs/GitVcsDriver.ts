@@ -818,6 +818,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         ],
         allowNonZeroExit: true,
         maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
+        // Belt-and-suspenders alongside the structured `truncated` flag
+        // below: an inline marker in the patch text itself means even a
+        // raw/unparsed fallback render (getRenderablePatch's "raw" kind)
+        // shows SOMETHING at the cut point, matching
+        // getReviewDiffPreview's precedent for the same cap.
+        appendTruncationMarker: true,
       });
 
       if (result.exitCode !== 0) {
@@ -830,7 +836,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         });
       }
 
-      return result.stdout;
+      // Do NOT drop stdoutTruncated here — that omission is the whole bug
+      // this return shape exists to fix. A patch cut off mid-hunk at
+      // CHECKPOINT_DIFF_MAX_OUTPUT_BYTES is indistinguishable from a
+      // complete one without this flag; see VcsDiffCheckpointsResult's doc
+      // comment in VcsDriver.ts.
+      return { diff: result.stdout, truncated: result.stdoutTruncated };
     }),
 
     deleteCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.deleteCheckpointRefs")(

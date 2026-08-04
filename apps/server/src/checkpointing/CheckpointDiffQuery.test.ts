@@ -66,7 +66,7 @@ describe("CheckpointDiffQuery.layer", () => {
               cwd,
               ignoreWhitespace,
             });
-            return "full thread diff patch";
+            return { diff: "full thread diff patch", truncated: false };
           }),
         deleteCheckpointRefs: () => Effect.void,
       };
@@ -141,7 +141,82 @@ describe("CheckpointDiffQuery.layer", () => {
         fromTurnCount: 0,
         toTurnCount: 4,
         diff: "full thread diff patch",
+        truncated: false,
       });
+    }),
+  );
+
+  it.effect("propagates truncated:true from the driver through to the wire result", () =>
+    Effect.gen(function* () {
+      const projectId = ProjectId.make("project-full-thread-truncated");
+      const threadId = ThreadId.make("thread-full-thread-truncated");
+      const toCheckpointRef = checkpointRefForThreadTurn(threadId, 4);
+
+      const checkpointStore: CheckpointStore.CheckpointStore["Service"] = {
+        isGitRepository: () => Effect.succeed(true),
+        captureCheckpoint: () => Effect.void,
+        hasCheckpointRef: () => Effect.succeed(true),
+        restoreCheckpoint: () => Effect.succeed(true),
+        diffCheckpoints: () => Effect.succeed({ diff: "diff cut off mid-hunk", truncated: true }),
+        deleteCheckpointRefs: () => Effect.void,
+      };
+
+      const layer = CheckpointDiffQuery.layer.pipe(
+        Layer.provideMerge(Layer.succeed(CheckpointStore.CheckpointStore, checkpointStore)),
+        Layer.provideMerge(
+          Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+            getCommandReadModel: () =>
+              Effect.die("CheckpointDiffQuery should not request the command read model"),
+            getSnapshot: () =>
+              Effect.die("CheckpointDiffQuery should not request the full orchestration snapshot"),
+            getShellSnapshot: () =>
+              Effect.die("CheckpointDiffQuery should not request the orchestration shell snapshot"),
+            getArchivedShellSnapshot: () =>
+              Effect.die("CheckpointDiffQuery should not request archived shell snapshots"),
+            getSnapshotSequence: () => Effect.succeed({ snapshotSequence: 0 }),
+            getCounts: () => Effect.succeed({ projectCount: 0, threadCount: 0 }),
+            getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
+            getProjectShellById: () => Effect.succeed(Option.none()),
+            getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getActiveSpacesForProject: () =>
+              Effect.die("CheckpointDiffQuery should not request active spaces for a project"),
+            getSpaceProjectId: () =>
+              Effect.die("CheckpointDiffQuery should not request a space's project id"),
+            getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+            getFullThreadDiffContext: () =>
+              Effect.succeed(
+                Option.some({
+                  threadId,
+                  projectId,
+                  workspaceRoot: "/tmp/workspace",
+                  worktreePath: "/tmp/worktree",
+                  latestCheckpointTurnCount: 4,
+                  toCheckpointRef,
+                }),
+              ),
+            getThreadShellById: () => Effect.succeed(Option.none()),
+            getThreadDetailById: () => Effect.succeed(Option.none()),
+            getThreadDetailSnapshot: () => Effect.succeed(Option.none()),
+            searchThreads: () => Effect.succeed({ matches: [] }),
+          }),
+        ),
+      );
+
+      const result = yield* Effect.gen(function* () {
+        const query = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+        return yield* query.getFullThreadDiff({
+          threadId,
+          toTurnCount: 4,
+          ignoreWhitespace: true,
+        });
+      }).pipe(Effect.provide(layer));
+
+      // The exact bug this proves didn't come back: a driver reporting
+      // truncated:true (real cause: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES hit)
+      // must not be silently dropped on the way to the wire result the
+      // client renders from.
+      expect(result.truncated).toBe(true);
+      expect(result.diff).toBe("diff cut off mid-hunk");
     }),
   );
 
@@ -179,7 +254,7 @@ describe("CheckpointDiffQuery.layer", () => {
               cwd,
               ignoreWhitespace,
             });
-            return "diff patch";
+            return { diff: "diff patch", truncated: false };
           }),
         deleteCheckpointRefs: () => Effect.void,
       };
@@ -239,6 +314,7 @@ describe("CheckpointDiffQuery.layer", () => {
         fromTurnCount: 0,
         toTurnCount: 1,
         diff: "diff patch",
+        truncated: false,
       });
     }),
   );
@@ -267,7 +343,7 @@ describe("CheckpointDiffQuery.layer", () => {
         diffCheckpoints: ({ ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({ ignoreWhitespace });
-            return "diff patch";
+            return { diff: "diff patch", truncated: false };
           }),
         deleteCheckpointRefs: () => Effect.void,
       };
@@ -341,7 +417,7 @@ describe("CheckpointDiffQuery.layer", () => {
             return true;
           }),
         restoreCheckpoint: () => Effect.succeed(true),
-        diffCheckpoints: () => Effect.succeed("diff patch"),
+        diffCheckpoints: () => Effect.succeed({ diff: "diff patch", truncated: false }),
         deleteCheckpointRefs: () => Effect.void,
       };
 
@@ -399,7 +475,7 @@ describe("CheckpointDiffQuery.layer", () => {
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
-        diffCheckpoints: () => Effect.succeed(""),
+        diffCheckpoints: () => Effect.succeed({ diff: "", truncated: false }),
         deleteCheckpointRefs: () => Effect.void,
       };
 

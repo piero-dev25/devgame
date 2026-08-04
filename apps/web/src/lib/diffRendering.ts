@@ -41,6 +41,29 @@ export function buildPatchCacheKey(patch: string, scope = "diff-panel"): string 
   return `${scope}:${normalizedPatch.length}:${primary}:${secondary}`;
 }
 
+/**
+ * Whether the currently-selected patch was cut off by the server's output
+ * cap rather than genuinely ending there. A turn diff and a git-source
+ * (working-tree/branch) diff carry their `truncated` flag on different
+ * result shapes (`OrchestrationGetTurnDiffResult` vs
+ * `ReviewDiffPreviewSource`), so DiffPanel picks the right one by which
+ * selection is active rather than reading a single shared field.
+ *
+ * This used to be inlined as `!selectedTurn && selectedGitSource?.truncated
+ * === true` directly in DiffPanel.tsx — which is exactly the bug: it
+ * EXCLUDED turn diffs by construction, so a turn diff truncated at
+ * CHECKPOINT_DIFF_MAX_OUTPUT_BYTES never showed the truncation banner no
+ * matter what the server returned. See diffRendering.test.ts for a test
+ * shaped to fail against that old condition.
+ */
+export function isPatchTruncated(params: {
+  readonly isTurnDiff: boolean;
+  readonly turnDiffTruncated: boolean | undefined;
+  readonly gitSourceTruncated: boolean | undefined;
+}): boolean {
+  return params.isTurnDiff ? params.turnDiffTruncated === true : params.gitSourceTruncated === true;
+}
+
 export type RenderablePatch =
   | {
       kind: "files";

@@ -115,7 +115,16 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
   });
 
   describe("diffCheckpoints", () => {
-    it.effect("returns full oversized checkpoint diffs without truncation", () =>
+    // Named for what it actually exercises: `buildLargeText()`'s default
+    // 5,000 lines is comfortably under CHECKPOINT_DIFF_MAX_OUTPUT_BYTES
+    // (10,000,000 bytes) — around 60KB, not "oversized" by that cap. This
+    // test proves large-but-under-cap diffs come through complete; it does
+    // NOT exercise truncation at all. See "truncates and reports it,
+    // instead of silently cutting off the diff" below for a diff that
+    // actually crosses the cap — that test would pass just as easily
+    // against the pre-fix code that discarded stdoutTruncated, which is
+    // exactly why this one, despite its old name, never caught task #66.
+    it.effect("returns large under-cap checkpoint diffs without truncation", () =>
       Effect.gen(function* () {
         const tmp = yield* makeTmpDir();
         yield* initRepoWithCommit(tmp);
@@ -134,7 +143,7 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
           checkpointRef: toCheckpointRef,
         });
 
-        const diff = yield* checkpointStore.diffCheckpoints({
+        const { diff, truncated } = yield* checkpointStore.diffCheckpoints({
           cwd: tmp,
           fromCheckpointRef,
           toCheckpointRef,
@@ -144,6 +153,49 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
         expect(diff).toContain("diff --git");
         expect(diff).not.toContain("[truncated]");
         expect(diff).toContain("+line 04999");
+        expect(truncated).toBe(false);
+      }),
+    );
+
+    // The actual task #66 regression proof: a diff that genuinely exceeds
+    // CHECKPOINT_DIFF_MAX_OUTPUT_BYTES (10,000,000 bytes) must come back
+    // with truncated:true, not a bare string that looks complete. Before
+    // the fix, GitVcsDriver.ts's diffCheckpoints discarded
+    // result.stdoutTruncated at the return statement — this is exactly
+    // the case that discard made invisible to every caller.
+    it.effect("truncates and reports it, instead of silently cutting off the diff", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const threadId = ThreadId.make("thread-checkpoint-store-oversized");
+        const fromCheckpointRef = checkpointRefForThreadTurn(threadId, 0);
+        const toCheckpointRef = checkpointRefForThreadTurn(threadId, 1);
+
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: fromCheckpointRef,
+        });
+        // Each line is ~11-13 bytes once diffed ("+line NNNNN\n"); 1M
+        // lines comfortably clears the 10,000,000 byte cap.
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), buildLargeText(1_000_000));
+        yield* checkpointStore.captureCheckpoint({
+          cwd: tmp,
+          checkpointRef: toCheckpointRef,
+        });
+
+        const { diff, truncated } = yield* checkpointStore.diffCheckpoints({
+          cwd: tmp,
+          fromCheckpointRef,
+          toCheckpointRef,
+          ignoreWhitespace: true,
+        });
+
+        expect(truncated).toBe(true);
+        expect(diff.length).toBeLessThanOrEqual(10_000_000 + "\n\n[truncated]".length);
+        // The last line is genuinely absent from the patch — proving this
+        // isn't just a flag that got set independently of the actual cut.
+        expect(diff).not.toContain("+line 999999");
       }),
     );
 
@@ -198,13 +250,13 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
           checkpointRef: toCheckpointRef,
         });
 
-        const normalDiff = yield* checkpointStore.diffCheckpoints({
+        const { diff: normalDiff } = yield* checkpointStore.diffCheckpoints({
           cwd: tmp,
           fromCheckpointRef,
           toCheckpointRef,
           ignoreWhitespace: false,
         });
-        const whitespaceIgnoredDiff = yield* checkpointStore.diffCheckpoints({
+        const { diff: whitespaceIgnoredDiff } = yield* checkpointStore.diffCheckpoints({
           cwd: tmp,
           fromCheckpointRef,
           toCheckpointRef,

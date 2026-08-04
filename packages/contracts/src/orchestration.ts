@@ -1467,6 +1467,17 @@ export const ThreadTurnDiff = TurnCountRange.mapFields(
   Struct.assign({
     threadId: ThreadId,
     diff: Schema.String,
+    /**
+     * True when `diff` was cut off because the underlying `git diff` output
+     * exceeded the server's byte cap (see
+     * `CHECKPOINT_DIFF_MAX_OUTPUT_BYTES` in `apps/server/src/vcs/GitVcsDriver.ts`)
+     * rather than because there were no more changes. Mirrors
+     * `ReviewDiffPreviewSource.truncated` — same shape, same reason: without
+     * this flag a truncated turn diff renders as a complete-looking but
+     * silently incomplete patch, with no way for the client to tell the
+     * difference.
+     */
+    truncated: Schema.Boolean,
   }),
   { unsafePreserveChecks: true },
 );

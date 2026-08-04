@@ -268,8 +268,15 @@ const make = Effect.gen(function* () {
         ignoreWhitespace: false,
       })
       .pipe(
-        Effect.map((diff) =>
-          parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
+        // truncated is intentionally not surfaced here: this is the
+        // per-file additions/deletions summary attached to the checkpoint
+        // row, a different consumer than the diff PATCH the review panel
+        // renders (see CheckpointDiffQuery.ts, which does propagate it).
+        // A truncated diff can undercount the last file's stats, same as
+        // it always could before this diff.truncated field existed —
+        // unchanged behavior, not fixed by this pass.
+        Effect.map((diffResult) =>
+          parseTurnDiffFilesFromUnifiedDiff(diffResult.diff).map((file) => ({
             path: file.path,
             kind: "modified" as const,
             additions: file.additions,

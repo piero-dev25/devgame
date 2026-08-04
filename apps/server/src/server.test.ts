@@ -755,6 +755,7 @@ const buildAppUnderTest = (options?: {
               fromTurnCount: 0,
               toTurnCount: 0,
               diff: "",
+              truncated: false,
             }),
           getFullThreadDiff: () =>
             Effect.succeed({
@@ -762,6 +763,7 @@ const buildAppUnderTest = (options?: {
               fromTurnCount: 0,
               toTurnCount: 0,
               diff: "",
+              truncated: false,
             }),
           ...options?.layers?.checkpointDiffQuery,
         }),
@@ -5781,6 +5783,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 fromTurnCount: 0,
                 toTurnCount: 1,
                 diff: "turn-diff",
+                truncated: false,
               }),
             getFullThreadDiff: () =>
               Effect.succeed({
@@ -5788,6 +5791,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 fromTurnCount: 0,
                 toTurnCount: 1,
                 diff: "full-diff",
+                truncated: false,
               }),
           },
         },
@@ -5816,6 +5820,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(turnDiffResult.diff, "turn-diff");
+      assert.equal(turnDiffResult.truncated, false);
 
       const fullDiffResult = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
@@ -5826,6 +5831,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ),
       );
       assert.equal(fullDiffResult.diff, "full-diff");
+      assert.equal(fullDiffResult.truncated, false);
 
       const searchResult = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>

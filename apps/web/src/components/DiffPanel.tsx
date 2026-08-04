@@ -32,6 +32,7 @@ import {
   getDiffCollapseIconClassName,
   getDiffLineStat,
   getRenderablePatch,
+  isPatchTruncated,
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../lib/diffRendering";
@@ -414,7 +415,11 @@ export default function DiffPanel({
   const gitDiff = selectedGitSource?.diff;
 
   const selectedPatch = selectedTurn ? activeCheckpointDiff.data?.diff : gitDiff;
-  const isSelectedPatchTruncated = !selectedTurn && selectedGitSource?.truncated === true;
+  const isSelectedPatchTruncated = isPatchTruncated({
+    isTurnDiff: Boolean(selectedTurn),
+    turnDiffTruncated: activeCheckpointDiff.data?.truncated,
+    gitSourceTruncated: selectedGitSource?.truncated,
+  });
   const isLoadingSelectedPatch = selectedTurn
     ? activeCheckpointDiff.isPending
     : branchDiffPreview.isPending;
