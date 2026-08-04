@@ -56,12 +56,6 @@ function readyFacts(overrides: Partial<UnitySetupFacts> = {}): UnitySetupFacts {
   };
 }
 
-/** Wraps `readyFacts` (or an explicit override) with a `primary` — the
- * `state`/`message` combination is only load-bearing for the tests that
- * check `disabledReason`; tests only asserting `availableActions`/readiness
- * can pass a placeholder that doesn't need to agree with the facts (the two
- * are deliberately independently computed — see `isUnityPlayReady`'s doc
- * comment — so a test proving readiness never depends on `primary` at all). */
 /** `readyFacts()` minus the `pipelineList` key entirely — represents
  * "hasn't run this cycle" (S4′'s window). `exactOptionalPropertyTypes`
  * rejects `pipelineList: undefined` as an override value for an optional
@@ -74,6 +68,12 @@ function factsWithNoListRun(
   return { ...base, ...overrides };
 }
 
+/** Wraps `readyFacts` (or an explicit override) with a `primary` — the
+ * `state`/`message` combination is only load-bearing for the tests that
+ * check `disabledReason`; tests only asserting `availableActions`/readiness
+ * can pass a placeholder that doesn't need to agree with the facts (the two
+ * are deliberately independently computed — see `isUnityPlayReady`'s doc
+ * comment — so a test proving readiness never depends on `primary` at all). */
 function probeResult(
   facts: UnitySetupFacts,
   primary: UnitySetupProbeResult["primary"],
