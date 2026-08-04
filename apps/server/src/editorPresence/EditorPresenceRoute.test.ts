@@ -1157,7 +1157,7 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
     };
 
   it.effect(
-    "a session-id takeover by a DIFFERENT authenticated subject must not let the impostor intercept a command meant for the original publisher (task #60)",
+    "a session-id takeover by a DIFFERENT authenticated identity must not let the impostor intercept a command meant for the original publisher (task #60)",
     () =>
       Effect.gen(function* () {
         yield* HttpRouter.serve(editorPresenceRouteLayer, {
@@ -1172,13 +1172,27 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         // attacker who read a victim's session.id off the (already
         // scope-authorized) presence feed and opens a SECOND publisher
         // connection claiming that same id for itself.
+        //
+        // SAME `subject` for both, DELIBERATELY (task #60 fix-round 2):
+        // this is the exact shape an independent security review
+        // reproduced the takeover with against fix-round 1's subject-based
+        // guard — every REAL provisioning path in this codebase (`t3
+        // pair`, the RPC pairing route) hardcodes `subject:
+        // "one-time-token"`, so a real victim and a real attacker,
+        // independently paired through the actual documented flow, end up
+        // with an IDENTICAL subject. `issueSession` still mints a fresh,
+        // unique `sessionId` for each call regardless of subject — this
+        // is what the guard actually keys on now — so reusing one subject
+        // here isn't a simplification, it's the whole point: proving the
+        // fix doesn't quietly depend on subjects differing.
+        const sharedSubject = "one-time-token";
         const victimIssued = yield* serverAuth.issueSession({
           scopes: [AuthOrchestrationOperateScope],
-          subject: "victim-editor-owner",
+          subject: sharedSubject,
         });
         const attackerIssued = yield* serverAuth.issueSession({
           scopes: [AuthOrchestrationOperateScope],
-          subject: "attacker",
+          subject: sharedSubject,
         });
         const dispatcherSession = makeFakeAuthenticatedSession([AuthPresenceCommandScope]);
         const publisherUrl = yield* getPublisherWsUrl();
@@ -1216,16 +1230,25 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
           attackerIssued.token,
           helloFrameText(sharedSessionId),
         );
-        // THE property this test exists for: the impostor's connection
-        // must be refused with a credential-class close, not silently
-        // ignored and not superseded — not "some check rejected the
-        // takeover", the actual bytes on the actual wire. Assert the
-        // EFFECT, not a precondition. 4401, not 4402: 4402
-        // (sessionSuperseded) would claim the impostor was LEGITIMATELY
-        // superseded, the opposite of what happened; see
-        // EditorPresenceRegistry.ts's own doc on why 4401 is the deliberate
-        // reuse here, not a new code.
-        assert.strictEqual(attackerOutcome.closeCode, 4401);
+        // THE property this test exists for: the refused connection must
+        // be closed, not silently ignored and not left believing it
+        // registered — not "some check rejected the takeover", the actual
+        // bytes on the actual wire. Assert the EFFECT, not a precondition.
+        //
+        // 4402 (sessionSuperseded), NOT 4401 (invalidCredential) — a
+        // fix-round-1 mistake, corrected by the SAME independent review:
+        // this registration-time guard is first-claim-wins, so the party
+        // refused here could be a genuine impostor OR a legitimate editor
+        // that lost a race to squat an unclaimed id (see
+        // EditorPresenceRegistry.ts's SESSION TAKEOVER doc, "WHAT THIS
+        // DOES NOT CLOSE") — the server cannot tell which from here. 4401
+        // is credential-class (permanent, human-must-click-retry per
+        // epp_client.gd); sending it to whichever party is refused would
+        // PERMANENTLY strand a legitimate editor in the squat case. 4402
+        // is not credential-class, so a refused party keeps retrying with
+        // normal backoff — self-healing once the current holder
+        // eventually disconnects, in either scenario.
+        assert.strictEqual(attackerOutcome.closeCode, 4402);
         assert.isTrue(attackerOutcome.closeReason.length > 0);
 
         const outcome = yield* dispatchEditorCommand(dispatcherSession, sharedSessionId, "play");
@@ -1266,7 +1289,7 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
   );
 
   it.effect(
-    "a session-id reconnect by the SAME authenticated subject still succeeds and supersedes cleanly — the takeover guard must not over-tighten (task #60 regression guard)",
+    "a session-id reconnect with the SAME token (same auth sessionId) still succeeds and supersedes cleanly — the takeover guard must not over-tighten (task #60 regression guard)",
     () =>
       Effect.gen(function* () {
         yield* HttpRouter.serve(editorPresenceRouteLayer, {
@@ -1275,13 +1298,20 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         }).pipe(Layer.build);
 
         const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-        // The case the takeover guard above must NOT break: Unity's domain
-        // reload, or a Godot reconnect, re-`hello`s with the SAME session
-        // id from the SAME authenticated identity. `issueSession` with no
+        // The case the takeover guard above must NOT break: a real
+        // editor's WebSocket dropping and reconnecting with the SAME
+        // persisted, still-valid bearer token (e.g. Godot's addon, which
+        // stores its token in EditorSettings and reuses it across
+        // reconnects and restarts — see EditorPresenceRegistry.ts's
+        // `claimantSessionId` doc for why this is verified, not assumed).
+        // `sessions.verify` resolves the SAME token to the SAME persisted
+        // session record every time, so this ONE issued token, presented
+        // twice, authenticates to the SAME `sessionId` both times — the
+        // guard's actual anchor now, not `subject`. `issueSession` with no
         // `scopes` gets the broad default (used elsewhere in this file for
         // both roles off one token) — this test isn't exercising scopes,
         // only identity, so there's no reason to narrow them here.
-        const issued = yield* serverAuth.issueSession({ subject: "same-subject-owner" });
+        const issued = yield* serverAuth.issueSession({ subject: "reconnect-owner" });
         const publisherUrl = yield* getPublisherWsUrl();
         const subscriberUrl = yield* getSubscriberWsUrl();
         const sharedSessionId = "reconnect-same-subject-repro";
@@ -1296,14 +1326,15 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         yield* Effect.addFinalizer(() => Effect.sync(() => firstSocket.close()));
 
         // THE assertion this test exists for: reconnecting with the SAME
-        // subject must complete hello -> ping -> pong normally — i.e. NOT
-        // be refused and closed the way the sibling test above's
-        // different-subject takeover is. If the guard were ever
-        // over-tightened to treat ANY known claimant as a mismatch
-        // (same-subject included), this would hang instead of resolving,
-        // since the server would close the connection instead of ever
-        // replying to `ping` — which is exactly why this test also carries
-        // the short explicit timeout below, not the 60s default.
+        // token (hence the SAME auth sessionId) must complete
+        // hello -> ping -> pong normally — i.e. NOT be refused and closed
+        // the way the sibling test above's different-identity takeover is.
+        // If the guard were ever over-tightened to treat ANY known
+        // claimant as a mismatch (same-identity included), this would
+        // hang instead of resolving, since the server would close the
+        // connection instead of ever replying to `ping` — which is
+        // exactly why this test also carries the short explicit timeout
+        // below, not the 60s default.
         const secondSocket = yield* connectPublisherAndConfirmRegistered(
           publisherUrl,
           issued.token,
@@ -1318,7 +1349,7 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         // session id, not two — the same ghost-entry regression this
         // file's very first takeover-adjacent test (`capabilities-default`
         // above) was written to catch via `connectSubscriberAndReadFirstFrame`,
-        // re-proven here specifically through the NEW subject-aware code
+        // re-proven here specifically through the NEW identity-aware code
         // path so a duplicate-entry regression in THAT path doesn't slip
         // through unnoticed.
         const frame = yield* connectSubscriberAndReadFirstFrame(subscriberUrl, issued.token);

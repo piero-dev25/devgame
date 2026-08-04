@@ -118,18 +118,39 @@ interface PublisherRecord extends EditorPresenceEntry {
    * THIS record, pruned to the rate-limit window on every check — see
    * `COMMAND_RATE_LIMIT_MAX`/`COMMAND_RATE_LIMIT_WINDOW_MS` above. */
   readonly commandTimestamps: ReadonlyArray<number>;
-  /** The authenticated session's `subject` at the moment THIS record was
-   * FIRST claimed (never updated by a later same-subject reconnect — see
-   * `registerPublisher`'s SESSION TAKEOVER doc below for why a claim from a
-   * DIFFERENT subject is refused rather than silently allowed to supersede
-   * it). `undefined` when the caller didn't supply one — every REAL
+  /** The connecting client's own `AuthenticatedSession.sessionId` at the
+   * moment THIS record was FIRST claimed (never updated by a later
+   * same-identity reconnect — see `registerPublisher`'s SESSION TAKEOVER
+   * doc below). `undefined` when the caller didn't supply one — every REAL
    * connection always does (see `EditorPresenceRoute.ts`'s
-   * `runPublisherConnection`, which threads it from the connection's own
-   * auth); `undefined` only shows up from a test that doesn't care about
-   * identity, and a record with no known subject imposes no identity
-   * check on takeover, matching this parameter's existing optional/no-op
-   * defaults for `close`/`send` above. */
-  readonly claimantSubject: string | undefined;
+   * `runPublisherConnection`); `undefined` only shows up from a test that
+   * doesn't care about identity, and a record with no known claimant
+   * imposes no identity check on takeover.
+   *
+   * DELIBERATELY `sessionId`, NOT `subject` (task #60 fix-round 2, an
+   * independent security review reproduced the takeover against the
+   * subject-based version of this fix): every client-facing provisioning
+   * path in this codebase — `t3 pair`, `t3 auth issue-session-credential`,
+   * the RPC pairing route — mints its bootstrap credential with the SAME
+   * hardcoded `subject: "one-time-token"`, so two INDEPENDENTLY paired
+   * clients (a real editor and a real attacker, both going through the
+   * real, documented pairing flow — no administrative shortcut) end up
+   * with an IDENTICAL subject and an equality check on it is vacuous —
+   * verified by executing the real flow and reading the resulting bearer
+   * tokens' claims. `AuthenticatedSession.sessionId` doesn't have this
+   * problem: `EnvironmentAuth`'s `sessions.issue()` mints a fresh, unique
+   * session record — and therefore a unique `sessionId` — on every
+   * credential exchange, REGARDLESS of subject collision, so it's the
+   * cheapest anchor that actually discriminates two real, independently
+   * paired clients. Confirmed safe for the legitimate-reconnect case this
+   * MUST NOT break: Godot's addon persists its bearer token in
+   * EditorSettings (editor-global, survives restarts) and
+   * `EnvironmentAuth`'s token verification resolves a token to its
+   * PERSISTED session record's `sessionId` every time — so the SAME
+   * editor, reconnecting with its SAME stored token (a WS drop, or a
+   * fresh editor process reusing the same paired token), authenticates to
+   * the SAME `sessionId` every time, not a fresh one. */
+  readonly claimantSessionId: string | undefined;
 }
 
 /** One `sendCommand` call awaiting its `commandResult` (or a timeout, or a
@@ -166,10 +187,10 @@ function toEntry(record: PublisherRecord): EditorPresenceEntry {
  * infer, since a bare `{ refused: true, reason }` vs `{ refused: false,
  * frame, subscribers, supersededClose }` have structurally different keys.
  * `reason` distinguishes the two ways a claim can be refused (task #60
- * added `subject_mismatch` alongside the pre-existing `at_capacity`) so the
+ * added `identity_mismatch` alongside the pre-existing `at_capacity`) so the
  * logging below can say which, without a second boolean tacked on. */
 type RegisterPublisherResult =
-  | { readonly refused: true; readonly reason: "at_capacity" | "subject_mismatch" }
+  | { readonly refused: true; readonly reason: "at_capacity" | "identity_mismatch" }
   | {
       readonly refused: false;
       readonly frame: string;
@@ -196,16 +217,24 @@ export class EditorPresenceRegistry extends Context.Service<
      * connection later, if some OTHER connection ever claims the same
      * `sessionId` — see the SESSION TAKEOVER doc below. `send` writes a
      * `command` frame to THIS connection later, for `sendCommand` below.
-     * Both are optional and default to a no-op so existing single-connection
-     * callers/tests that only care about presence, not commands, don't need
-     * to thread either through.
+     * Both are optional keys and default to a no-op so existing
+     * single-connection callers/tests that only care about presence, not
+     * commands, don't need to thread either through.
      *
-     * `subject` is the caller's authenticated identity (task #60) — pass
-     * the real `AuthenticatedSession.subject` from `EditorPresenceRoute.ts`
-     * so a takeover attempt from a DIFFERENT subject than whoever currently
-     * holds `sessionId` is refused instead of silently allowed. Optional,
-     * defaulting to no identity check, so existing callers/tests that only
-     * care about presence, not identity, keep working unchanged.
+     * `claimantSessionId` is the caller's own `AuthenticatedSession.sessionId`
+     * (task #60) — pass it from `EditorPresenceRoute.ts` so a takeover
+     * attempt from a DIFFERENT identity than whoever currently holds
+     * `sessionId` is refused instead of silently allowed. Its value may be
+     * `undefined` (no identity check, for callers/tests that only care
+     * about presence), but the KEY ITSELF IS MANDATORY — options is a
+     * required 4th argument, and `claimantSessionId` is a required key
+     * within it, DELIBERATELY not an optional trailing positional
+     * parameter: fix-round 2 of task #60 found that shape lets a caller
+     * silently omit identity forever with no compile error (the exact
+     * mistake the ORIGINAL version of this fix made — every real call site
+     * happened to pass it, but nothing forced the next one to). Writing
+     * `claimantSessionId: undefined` is still allowed and still opts out
+     * of the check — the hardening is "you must say so," not "you can't."
      */
     readonly registerPublisher: (
       sessionId: string,
@@ -215,9 +244,11 @@ export class EditorPresenceRegistry extends Context.Service<
         readonly workspace: { readonly root: string };
         readonly capabilities?: ReadonlyArray<EditorPresenceCapability>;
       },
-      close?: EditorPresenceCloseConnection,
-      send?: EditorPresencePublisherSend,
-      subject?: string,
+      options: {
+        readonly close?: EditorPresenceCloseConnection;
+        readonly send?: EditorPresencePublisherSend;
+        readonly claimantSessionId: string | undefined;
+      },
     ) => Effect.Effect<void>;
     readonly updatePublisherSelection: (
       sessionId: string,
@@ -333,39 +364,62 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
    * `PublisherRecord` carries a `close` callback — the registry doesn't own
    * a socket, only a way to ask the route to close the one it superseded.
    *
-   * TASK #60 — TAKEOVER BY A DIFFERENT SUBJECT IS REFUSED, NOT ALLOWED.
+   * TASK #60 — TAKEOVER BY A DIFFERENT IDENTITY IS REFUSED, NOT ALLOWED.
    * A red test proved the pre-fix behavior: `sendCommand` looks up
    * whoever CURRENTLY holds `sessionId` with zero check tying that claim
    * to the client the command was actually meant for, so any
    * operate-scoped client that learns (or guesses) another session's id
    * could re-`hello` with it and silently start receiving commands
-   * addressed to the original publisher. `claimantSubject` on
-   * `PublisherRecord` is the authenticated identity that FIRST claimed a
-   * given `sessionId`; a later claim from a KNOWN, DIFFERENT subject is
-   * refused outright (`reason: "subject_mismatch"`, logged, no
-   * `supersededClose` — nothing was superseded — but the IMPOSTOR's own
-   * connection is closed with `invalidCredential`, 4401, reusing the
-   * existing credential-class code rather than minting a new one; see the
-   * close call below for why) rather than reaching the takeover path at
-   * all. A claim with no subject, or a claim whose subject matches the
-   * existing record's, is unaffected — that is exactly the legitimate
-   * reconnect case above (Unity domain-reload, Godot reconnect), plus
-   * every existing test/caller that never threads a subject through. This
-   * is load-bearing in the OTHER direction too: over-tightening this check
-   * to refuse a SAME-subject reconnect would permanently disconnect the
-   * editor on every ordinary Play press — see EditorPresenceRoute.test.ts's
+   * addressed to the original publisher. `claimantSessionId` on
+   * `PublisherRecord` is the connecting client's OWN authenticated
+   * `sessionId` (see its doc above for why NOT `subject` — fix-round 1
+   * used `subject` and an independent review reproduced the takeover
+   * anyway, because every real pairing path shares one hardcoded subject)
+   * at the moment it FIRST claimed a given `sessionId`; a later claim from
+   * a KNOWN, DIFFERENT `sessionId` is refused outright
+   * (`reason: "identity_mismatch"`, logged, no `supersededClose` —
+   * nothing was superseded — but the REFUSED connection is closed with
+   * `sessionSuperseded`, 4402, NOT `invalidCredential`; see the close call
+   * below for why the credential-class code was wrong here specifically).
+   * A claim with no known identity, or a claim whose `sessionId` matches
+   * the existing record's, is unaffected — that is exactly the legitimate
+   * reconnect case above (a real editor's WS dropping and reconnecting
+   * with its same persisted, still-valid token), plus every existing
+   * test/caller that never threads identity through. This is load-bearing
+   * in the OTHER direction too: over-tightening this check to refuse a
+   * SAME-identity reconnect would permanently disconnect the editor on
+   * every ordinary Play press — see EditorPresenceRoute.test.ts's
    * "reconnect by the SAME authenticated subject" test, which exists
    * specifically to catch that regression, not just the takeover itself.
+   *
+   * WHAT THIS DOES NOT CLOSE (fix-round 2's F2, HIGH, named explicitly so
+   * it isn't silently swept into "done"): `session.id` is still entirely
+   * caller-asserted and readable by anyone with `orchestration:read` (any
+   * standard client) off the presence feed. If an ATTACKER's `hello` wins
+   * the race to claim a given `sessionId` FIRST — before the legitimate
+   * editor ever does — this guard protects THAT ATTACKER's claim from
+   * being displaced exactly the same way it would protect a legitimate
+   * editor's: the attacker becomes "the first known claimant," the real
+   * editor's later attempt is refused, and the attacker goes on receiving
+   * commands meant for it. Closing that requires binding a `sessionId` to
+   * an expected identity or `workspace.root` BEFORE the race can happen at
+   * all (at pairing/provisioning time) or having the DISPATCHER supply an
+   * expected identity that `sendCommand` verifies fresh at send time —
+   * both cut across `EditorPresenceDispatchCommandInput`'s contract and
+   * the web client that populates it, outside this file's own surface.
+   * Tracked in docs/workbench/OPEN-GATE-presence-authz.md alongside the
+   * sibling `workspace.root` scoping gap this shares a root cause with.
    */
   const registerPublisher: EditorPresenceRegistry["Service"]["registerPublisher"] = (
     sessionId,
     connectionToken,
     hello,
-    close = noopClose,
-    send = noopSend,
-    subject,
+    options,
   ) =>
     Effect.gen(function* () {
+      const close = options.close ?? noopClose;
+      const send = options.send ?? noopSend;
+      const claimantSessionId = options.claimantSessionId;
       const lastSeenAt = yield* nowIso;
       const result = yield* Ref.modify(
         stateRef,
@@ -374,19 +428,19 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
           const isNewSession = existing === undefined;
 
           // TASK #60: refuse a takeover claimed by a KNOWN, DIFFERENT
-          // subject than whoever currently holds this sessionId — see the
-          // SESSION TAKEOVER doc above. `existing.claimantSubject ===
+          // identity than whoever currently holds this sessionId — see the
+          // SESSION TAKEOVER doc above. `existing.claimantSessionId ===
           // undefined` (no prior claimant recorded an identity) and
-          // `subject === undefined` (this caller didn't supply one) both
-          // impose no check, matching every existing caller/test that
-          // never threads identity through.
+          // `claimantSessionId === undefined` (this caller didn't supply
+          // one) both impose no check, matching every existing
+          // caller/test that never threads identity through.
           if (
             existing !== undefined &&
-            existing.claimantSubject !== undefined &&
-            subject !== undefined &&
-            existing.claimantSubject !== subject
+            existing.claimantSessionId !== undefined &&
+            claimantSessionId !== undefined &&
+            existing.claimantSessionId !== claimantSessionId
           ) {
-            return [{ refused: true, reason: "subject_mismatch" }, current];
+            return [{ refused: true, reason: "identity_mismatch" }, current];
           }
 
           if (isNewSession && current.publishers.size >= MAX_PUBLISHERS) {
@@ -414,16 +468,18 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
             // Reset on every (re)registration, including a reconnect that
             // takes over an existing session — same self-healing shape as
             // `selection: null` above. A `playState` frame follows
-            // immediately after `hello` (see EditorPresenceConnection.cs /
-            // plugin.gd), so this null window is momentary, not a lasting
-            // regression to "unknown" on every domain-reload reconnect.
+            // immediately after `hello` (see plugin.gd; Unity no longer
+            // publishes through this registry at all — it's served by
+            // Unity's own official com.unity.pipeline package, see
+            // unity/README.md), so this null window is momentary, not a
+            // lasting regression to "unknown" on every reconnect.
             playState: null,
-            // The FIRST known subject wins and sticks — a same-subject
-            // reconnect doesn't need to "refresh" it (it's already equal),
-            // and this is what lets the mismatch check above compare
-            // against the ORIGINAL claimant rather than whatever the most
-            // recent taker happened to supply.
-            claimantSubject: existing?.claimantSubject ?? subject,
+            // The FIRST known claimant identity wins and sticks — a
+            // same-identity reconnect doesn't need to "refresh" it (it's
+            // already equal), and this is what lets the mismatch check
+            // above compare against the ORIGINAL claimant rather than
+            // whatever the most recent taker happened to supply.
+            claimantSessionId: existing?.claimantSessionId ?? claimantSessionId,
           });
           const next = { ...current, publishers };
           const frame = buildPresenceFrame(Array.from(publishers.values(), toEntry));
@@ -435,31 +491,53 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
       );
 
       if (result.refused) {
-        if (result.reason === "subject_mismatch") {
+        if (result.reason === "identity_mismatch") {
           yield* Effect.logWarning(
-            "editor-presence: refused a publisher takeover claimed by a different authenticated subject",
+            "editor-presence: refused a publisher takeover claimed by a different authenticated identity",
             { sessionId },
           );
-          // Close the IMPOSTOR's own connection (the `close` param above is
-          // always this call's own connection, never someone else's — see
-          // its doc comment) with `invalidCredential` (4401), NOT a new
-          // code. The close-code taxonomy is a named, saturated set —
-          // 4400/4401/4402/4403/4500 — and every engine client treats any
-          // UNRECOGNISED code >= 4000 as keep-retrying, so inventing a new
-          // one here would make a rejected impostor (and, if the taxonomy
-          // ever changed shape, any legitimate client hitting a future new
-          // code) reconnect-loop forever against a server that will never
-          // accept it — a self-inflicted DoS shipped as a security fix.
-          // 4401 is the right REUSE, not 4402 (sessionSuperseded): 4402
-          // means "you were legitimately superseded," the opposite of what
-          // happened here, where "you presented a session id that isn't
-          // yours" genuinely is a credential-class failure — the same
-          // class every engine client already stops retrying on.
+          // Close the REFUSED connection (the `close` param above is
+          // always THIS call's own connection, never someone else's — see
+          // its doc comment) — but with `sessionSuperseded` (4402), NOT
+          // `invalidCredential` (4401), and NOT a new code either. Two
+          // separate constraints, both from independent review:
+          //
+          // 1. NO NEW CODE: the close-code taxonomy is a named, saturated
+          //    set — 4400/4401/4402/4403/4500 — and every engine client
+          //    treats any UNRECOGNISED code >= 4000 as keep-retrying, so
+          //    inventing one here would make a rejected caller (and any
+          //    future legitimate client hitting a hypothetical new code)
+          //    reconnect-loop forever against a server that will never
+          //    accept it — a self-inflicted DoS shipped as a security fix.
+          //
+          // 2. NOT invalidCredential (4401): a fix-round-1 mistake, caught
+          //    by an independent review's own probe. 4401 is
+          //    credential-class — Godot's addon treats it as "stop
+          //    retrying permanently, a human must click retry" (see
+          //    CREDENTIAL_CLOSE_CODES in epp_client.gd). That's correct
+          //    ONLY if the REFUSED party is definitely the impostor — but
+          //    this registration-time guard is first-claim-wins: if an
+          //    ATTACKER's `hello` reaches the server before the
+          //    LEGITIMATE editor's does (a real, currently-open gap — see
+          //    the SESSION TAKEOVER doc's "WHAT THIS DOES NOT CLOSE"
+          //    section), the attacker becomes the recorded claimant and
+          //    it is the LEGITIMATE editor's later, correct reconnect that
+          //    gets refused. The server cannot tell these two cases apart
+          //    from here — both look identical: "a claim from an identity
+          //    that doesn't match the current holder." Sending 4401 in
+          //    that case would PERMANENTLY strand the legitimate editor.
+          //    `sessionSuperseded` is NOT credential-class (absent from
+          //    CREDENTIAL_CLOSE_CODES), so the refused party keeps
+          //    retrying with normal backoff — self-healing once whichever
+          //    party currently holds the id eventually disconnects,
+          //    rather than requiring a human to notice and click retry.
+          //    The reason string below is deliberately neutral (states
+          //    the fact, not who's at fault) for the same reason.
           //
           // EditorPresenceCloseConnection's own type guarantees it never
           // fails (see the doc on that type) — no catch needed here.
           yield* close(
-            EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+            EDITOR_PRESENCE_CLOSE_CODE.sessionSuperseded,
             "session_id already claimed by a different authenticated identity",
           );
         } else {

@@ -169,12 +169,15 @@ export const runPublisherConnection = (
     // moving auth after the upgrade must not widen that surface.
     let connectionToken: EditorPresenceConnectionToken | null = null;
 
-    // The authenticated caller's own identity (task #60), set alongside
-    // `connectionToken` in `onOpen` below and threaded into every
-    // `registerPublisher` call so the registry can refuse a same-sessionId
-    // takeover claimed by a DIFFERENT subject — see
+    // The authenticated caller's own `AuthenticatedSession.sessionId`
+    // (task #60 — DELIBERATELY sessionId, not subject; see
+    // `EditorPresenceRegistry.ts`'s `claimantSessionId` doc for why the
+    // subject-based version of this fix was reproducibly broken), set
+    // alongside `connectionToken` in `onOpen` below and threaded into
+    // every `registerPublisher` call so the registry can refuse a
+    // same-sessionId takeover claimed by a DIFFERENT identity — see
     // `EditorPresenceRegistry.ts`'s SESSION TAKEOVER doc.
-    let claimantSubject: string | null = null;
+    let claimantSessionId: string | null = null;
 
     // EVERY session id this connection has ever registered, not just the
     // most recent one. A publisher can legitimately say `hello` more than
@@ -209,7 +212,7 @@ export const runPublisherConnection = (
             // already on its way out.
             if (connectionToken === null) return;
             const token = connectionToken;
-            const subject = claimantSubject ?? undefined;
+            const claimantSessionIdForHello = claimantSessionId ?? undefined;
 
             const frame = parseEditorPresenceInboundFrame(raw);
             if (!frame) {
@@ -241,9 +244,11 @@ export const runPublisherConnection = (
                     workspace: frame.workspace,
                     capabilities: frame.capabilities,
                   },
-                  (code, reason) => rejectUpgrade(code, reason),
-                  (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
-                  subject,
+                  {
+                    close: (code, reason) => rejectUpgrade(code, reason),
+                    send: (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
+                    claimantSessionId: claimantSessionIdForHello,
+                  },
                 );
                 return;
               }
@@ -316,7 +321,7 @@ export const runPublisherConnection = (
               return;
             }
             connectionToken = registry.newConnectionToken();
-            claimantSubject = session.subject;
+            claimantSessionId = session.sessionId;
           }).pipe(
             Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
               rejectUpgrade(

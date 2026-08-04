@@ -91,21 +91,55 @@ before the scope work above.
   `workspace.root` scoping for commands is at least as urgent as closing it
   for presence, and arguably more so.
 - **Session-id takeover doubles as command interception once commands
-  exist.** The existing "reconnect replaces the stale connection" design
-  (any caller claiming an existing `session.id` supersedes the prior
-  connection, which is closed with 4402) was written for presence, where
-  the worst case is a spoofed/duplicated state broadcast. With commands, the
-  SAME mechanism lets an attacker who reads a victim's `session.id` from the
-  presence feed open a NEW connection claiming that same id: the victim is
-  evicted (4402, and reconnect-loops), and the attacker's connection now
-  RECEIVES that session's command frames and can reply to them
-  (`{ok:true}`) as if it were the real editor. Not fixed in task #47 —
-  flagged by review as needing its own design pass, since a correct fix
-  (binding a `session.id` to its first claimant's credential subject and
-  workspace root, rather than trusting whoever asserts it next) reaches
-  into `EditorPresenceRegistry.ts`'s deliberately auth-agnostic data model,
-  and a workspace-root-only binding would break legitimate multi-session
-  same-workspace setups. Tracked as follow-up work, not closed here.
+  exist — PARTIALLY closed by task #60, one real gap remains.** The
+  existing "reconnect replaces the stale connection" design (any caller
+  claiming an existing `session.id` supersedes the prior connection) was
+  written for presence, where the worst case is a spoofed/duplicated state
+  broadcast. With commands, the SAME mechanism let an attacker who reads a
+  victim's `session.id` from the presence feed open a NEW connection
+  claiming that same id and silently intercept that session's command
+  frames as if it were the real editor.
+
+  **What's closed**: `EditorPresenceRegistry.ts`'s `PublisherRecord` now
+  binds a `session.id` to its FIRST claimant's own authenticated
+  `sessionId` (`AuthenticatedSession.sessionId` — unique per issued
+  credential, from `EnvironmentAuth`'s `sessions.issue()`); a LATER claim
+  from a KNOWN, DIFFERENT `sessionId` is refused and the refused
+  connection is closed with 4402 (deliberately NOT 4401 — see the
+  registry's own doc on why sending a credential-class, permanently-stop
+  code here would risk permanently stranding a LEGITIMATE editor, not
+  just an attacker; see "what's still open" below for why that ambiguity
+  exists at all). Round 1 of this fix bound to `subject` instead and an
+  independent review reproduced the takeover anyway: EVERY client-facing
+  provisioning path (`t3 pair`, the RPC pairing route) hardcodes
+  `subject: "one-time-token"`, so two independently-paired real clients —
+  no administrative shortcut needed — share an identical subject and an
+  equality check on it is vacuous. `sessionId` doesn't have this problem
+  (verified: `sessions.issue()` mints a fresh, unique session record on
+  every credential exchange regardless of subject collision) and is
+  confirmed stable across the legitimate reconnect case that must not
+  break (a real editor's WS dropping/reconnecting with its same
+  persisted, still-valid token resolves to the SAME `sessionId` every
+  time, since token verification looks up the token's persisted session
+  record rather than minting a fresh one per request).
+
+  **What's still open (the F2 gap, named by the same review)**:
+  `session.id` remains entirely caller-asserted and readable by anyone
+  with `orchestration:read` — this fix protects whoever FIRST claims a
+  given id from being displaced, but does nothing to stop an ATTACKER
+  from being the one who claims it first, before the legitimate editor
+  ever does. In that ordering, the attacker becomes "the first known
+  claimant," the legitimate editor's later, correct reconnect is the one
+  refused, and the attacker goes on receiving that session's commands.
+  `sendCommand` still resolves purely by `sessionId` with nothing binding
+  a dispatch to the caller's actually-intended recipient. Closing this
+  requires binding a `session.id` to an expected identity or
+  `workspace.root` BEFORE the race can happen (at pairing/provisioning
+  time) or having the dispatcher supply an expected identity that
+  `sendCommand` verifies fresh at send time — both cut across
+  `EditorPresenceDispatchCommandInput`'s contract and the web client that
+  populates it, i.e. the SAME `workspace.root` scoping problem named
+  below, not a separate one. Tracked as follow-up work, not closed here.
 - **`workspace.root` scoping.** A session with the right role-scope can see
   (subscriber) or publish as (publisher) presence for **every** workspace on
   the machine, not just its own — `AuthOrchestrationReadScope` /
