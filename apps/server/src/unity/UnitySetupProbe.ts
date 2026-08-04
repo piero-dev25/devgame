@@ -40,6 +40,7 @@ import type {
 import * as ServerConfig from "../config.ts";
 import * as EditorPresenceRegistry from "../editorPresence/EditorPresenceRegistry.ts";
 import { probeUnityLockfilePresent } from "../editorPresence/UnityColdStart.ts";
+import * as EngineTypeResolver from "../project/EngineTypeResolver.ts";
 import {
   classifyUnitySetup,
   type UnitySetupClassifierInput,
@@ -85,6 +86,7 @@ export const make = Effect.gen(function* () {
   const unityPipelineClient = yield* UnityPipelineClient.UnityPipelineClient;
   const packageLock = yield* UnityPackageLock.UnityPackageLock;
   const editorPresenceRegistry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
+  const engineTypeResolver = yield* EngineTypeResolver.EngineTypeResolver;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -123,43 +125,60 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const probeCliUnavailable = Effect.fn("UnitySetupProbe.probeCliUnavailable")(
-    function* (): Effect.fn.Return<UnitySetupProbeResult> {
-      const cliDiscoveredPath = yield* findCliCandidatePath();
-      const classifierInput: UnitySetupClassifierInput = {
-        cliAvailable: false,
-        cliDiscoveredPath,
-        // Phase 1 has no install action (§5, increments 4a-4c are Phase
-        // 2) — this is always false until that ships, per this field's
-        // own doc comment in UnitySetupClassifier.ts.
-        justInstalledThisSession: false,
-        lockfilePresent: false,
-        pipelinePackageInstalled: false,
-        selectionPackageInstalled: false,
-        pipelineList: { _tag: "notRun" },
-        selectionPublisherRegistered: false,
-        withinPairingGraceWindow: false,
-      };
-      const facts: UnitySetupFacts = {
-        cliAvailable: false,
-        cliDiscoveredPath,
-        lockfilePresent: false,
-        pipelinePackage: { installed: false, resolvedVersion: null },
-        selectionPackage: { installed: false, resolvedVersion: null },
-        selectionPublisherRegistered: false,
-        withinPairingGraceWindow: false,
-      };
-      return { facts, primary: classifyUnitySetup(classifierInput) };
-    },
-  );
+  const probeCliUnavailable = Effect.fn("UnitySetupProbe.probeCliUnavailable")(function* (
+    isUnityProject: boolean,
+  ): Effect.fn.Return<UnitySetupProbeResult> {
+    const cliDiscoveredPath = yield* findCliCandidatePath();
+    const classifierInput: UnitySetupClassifierInput = {
+      cliAvailable: false,
+      cliDiscoveredPath,
+      // Phase 1 has no install action (§5, increments 4a-4c are Phase
+      // 2) — this is always false until that ships, per this field's
+      // own doc comment in UnitySetupClassifier.ts.
+      justInstalledThisSession: false,
+      lockfilePresent: false,
+      pipelinePackageInstalled: false,
+      selectionPackageInstalled: false,
+      pipelineList: { _tag: "notRun" },
+      selectionPublisherRegistered: false,
+      withinPairingGraceWindow: false,
+    };
+    const facts: UnitySetupFacts = {
+      isUnityProject,
+      cliAvailable: false,
+      cliDiscoveredPath,
+      lockfilePresent: false,
+      pipelinePackage: { installed: false, resolvedVersion: null },
+      selectionPackage: { installed: false, resolvedVersion: null },
+      selectionPublisherRegistered: false,
+      withinPairingGraceWindow: false,
+    };
+    return { facts, primary: classifyUnitySetup(classifierInput) };
+  });
 
   const probe: UnitySetupProbe["Service"]["probe"] = Effect.fn("UnitySetupProbe.probe")(
     function* () {
       const workspaceRoot = serverConfig.cwd;
 
+      // Team-lead's ruling, 2026-08-04: this is a fact, not a classifier
+      // input — it exists so increment 3's settings panel can tell "not
+      // set up" apart from "not a Unity project" without the client
+      // reconstructing engine identity from a second, unrelated concept
+      // (`EngineType`, tracked per-thread in `engineSelectorStore.ts`, not
+      // available where this panel lives). Computed unconditionally,
+      // before the CLI-availability branch, so BOTH outcomes below report
+      // it — a project with no Unity CLI installed is not thereby
+      // "unknown" as to whether it's a Unity project at all; that's a
+      // filesystem fact, independent of whether the CLI is on PATH.
+      // Reuses `EngineTypeResolver` (same cached
+      // `ProjectSettings/ProjectVersion.txt` marker check every other
+      // engine-identity read in this codebase already uses) rather than a
+      // second, bespoke check.
+      const isUnityProject = (yield* engineTypeResolver.detect(workspaceRoot)) === "unity";
+
       const cliAvailable = yield* unityPipelineClient.isAvailable();
       if (!cliAvailable) {
-        return yield* probeCliUnavailable();
+        return yield* probeCliUnavailable(isUnityProject);
       }
 
       const lockfilePresent = yield* probeUnityLockfilePresent(workspaceRoot).pipe(
@@ -230,6 +249,7 @@ export const make = Effect.gen(function* () {
       };
 
       const facts: UnitySetupFacts = {
+        isUnityProject,
         cliAvailable: true,
         cliDiscoveredPath: null,
         lockfilePresent,

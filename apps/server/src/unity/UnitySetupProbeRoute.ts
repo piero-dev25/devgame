@@ -82,7 +82,14 @@ export const unitySetupProbeRouteLayer = HttpRouter.add(
 
     const outcome = yield* dispatchUnitySetupProbe(session);
     if (outcome._tag === "insufficientScope") {
-      return yield* HttpServerResponse.text("Forbidden: insufficient scope", { status: 403 });
+      // `HttpServerResponse.text` returns a bare `HttpServerResponse`, NOT
+      // an Effect — unlike `.json` below, which can fail with
+      // `HttpBodyError` encoding the body and is genuinely an Effect.
+      // `yield*`-ing this one was a real type error (`HttpServerResponse`
+      // has no `Symbol.iterator`), caught by running plain `tsc --noEmit`
+      // on this package rather than only the lint-inclusive `vp run ...
+      // typecheck`.
+      return HttpServerResponse.text("Forbidden: insufficient scope", { status: 403 });
     }
     return yield* HttpServerResponse.json(outcome.value);
   }).pipe(

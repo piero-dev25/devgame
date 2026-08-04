@@ -713,6 +713,14 @@ function makePublisherRegistrySpy(): {
     removeSubscriber: () => Effect.void,
     sendCommand: () => Effect.succeed({ ok: false, error: "not_implemented_in_spy" }),
     resolveCommand: () => Effect.void,
+    // Never exercised by this file's tests (this spy is about whether
+    // `registerPublisher` gets called, not workspace queries) — present
+    // only because the object literal is checked against the full service
+    // interface. A latent gap from #92 increment 1 adding
+    // `hasPublisherForWorkspace` to the interface, surfaced by running
+    // plain `tsc --noEmit` rather than only the lint-inclusive `vp run
+    // ... typecheck`.
+    hasPublisherForWorkspace: () => Effect.succeed(false),
   };
   return { registry, registerPublisherCallCount: () => calls };
 }

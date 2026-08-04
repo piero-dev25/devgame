@@ -339,6 +339,18 @@ const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
   Layer.provide(PlatformServicesLive),
 );
 
+// `EngineTypeResolverLayerLive` is defined here (moved up from its
+// original spot below `ProjectFaviconResolverLayerLive`) so
+// `UnitySetupProbeLayerLive` right after it can reference the same const
+// rather than re-declaring `EngineTypeResolver.layer.pipe(Layer.provide(
+// WorkspacePaths.layer))` a second time — both would memoize to the same
+// underlying instance either way (Effect keys memoization on the layer
+// reference, not the call site), but one definition is one thing to keep
+// in sync, not two.
+const EngineTypeResolverLayerLive = EngineTypeResolver.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+);
+
 // `EditorPresenceRegistry.layer` here is the SAME layer reference
 // `editorPresenceRouteLayer`/`editorPresenceCommandRouteLayer` already
 // compose in elsewhere in `makeRoutesLayer`'s merge below — Effect's own
@@ -355,6 +367,7 @@ const UnitySetupProbeLayerLive = UnitySetupProbe.layer.pipe(
   Layer.provide(UnityPipelineClientLayerLive),
   Layer.provide(UnityPackageLock.layer.pipe(Layer.provide(PlatformServicesLive))),
   Layer.provide(EditorPresenceRegistry.layer),
+  Layer.provide(EngineTypeResolverLayerLive),
   Layer.provide(PlatformServicesLive),
 );
 
@@ -384,10 +397,6 @@ const WorkspaceLayerLive = Layer.mergeAll(
 const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(T3ProjectFileLoader.layer),
-);
-
-const EngineTypeResolverLayerLive = EngineTypeResolver.layer.pipe(
-  Layer.provide(WorkspacePaths.layer),
 );
 
 const AuthLayerLive = EnvironmentAuth.layer.pipe(

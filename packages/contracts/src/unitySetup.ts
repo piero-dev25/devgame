@@ -106,6 +106,22 @@ export type UnitySetupPipelineListOutcome = typeof UnitySetupPipelineListOutcome
  * pick the single sentence a toolbar would.
  */
 export const UnitySetupFacts = Schema.Struct({
+  /** Whether this project looks like a Unity project at all — detected via
+   * `EngineTypeResolver`'s own marker check
+   * (`ProjectSettings/ProjectVersion.txt`), the SAME signal used elsewhere
+   * in this codebase to distinguish engines, not a bespoke second check.
+   * Deliberately NOT consulted by `classifyUnitySetup` — every state below
+   * answers "is Unity set up correctly," a question that only makes sense
+   * for a project that IS Unity in the first place; this fact exists
+   * purely for a client that doesn't otherwise know. Increment 3's
+   * per-item settings panel reads this to render full per-item status for
+   * a Unity project versus a single honest "this isn't a Unity project"
+   * line for anything else — team-lead's ruling (2026-08-04): the signal
+   * belongs here, on the probe's own facts (server-side, where the
+   * project already lives), not reconstructed client-side from a second,
+   * unrelated concept (`EngineType`, tracked per-thread in
+   * `engineSelectorStore.ts`, not available where this panel lives). */
+  isUnityProject: Schema.Boolean,
   cliAvailable: Schema.Boolean,
   /** Populated only when `cliAvailable` is `false` and a candidate binary
    * was found off-PATH (plan §7's F11 fix) — `null` otherwise, including

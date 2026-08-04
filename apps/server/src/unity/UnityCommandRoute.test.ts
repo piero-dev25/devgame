@@ -61,6 +61,14 @@ function makeUnityPipelineClientSpy(): {
       play: record("play"),
       stop: record("stop"),
       pause: record("pause"),
+      // Never exercised by this file's own tests (this route dispatches
+      // play/stop/pause/status only, never list) — present only because
+      // `UnityPipelineClient.of({...})`'s object literal is checked
+      // against the FULL service interface, `list` included. A latent gap
+      // from #92 increment 1 adding `list` to the interface, surfaced now
+      // by running plain `tsc --noEmit` on this package rather than only
+      // the lint-inclusive `vp run ... typecheck`.
+      list: () => Effect.die("unexpected list call"),
     }),
   );
   return { layer, calls };

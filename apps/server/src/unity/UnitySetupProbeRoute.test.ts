@@ -31,6 +31,7 @@ function makeUnitySetupProbeSpy(): {
       calls += 1;
       return Effect.succeed({
         facts: {
+          isUnityProject: true,
           cliAvailable: true,
           cliDiscoveredPath: null,
           lockfilePresent: false,

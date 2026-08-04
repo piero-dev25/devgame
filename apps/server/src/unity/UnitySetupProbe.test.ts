@@ -19,6 +19,8 @@ import * as Path from "effect/Path";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as ServerConfig from "../config.ts";
 import * as EditorPresenceRegistry from "../editorPresence/EditorPresenceRegistry.ts";
+import * as EngineTypeResolver from "../project/EngineTypeResolver.ts";
+import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as UnityPackageLock from "./UnityPackageLock.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 import * as UnitySetupProbe from "./UnitySetupProbe.ts";
@@ -83,6 +85,7 @@ const runProbeTest = <A>(
     | UnityPipelineClient.UnityPipelineClient
     | UnityPackageLock.UnityPackageLock
     | EditorPresenceRegistry.EditorPresenceRegistry
+    | EngineTypeResolver.EngineTypeResolver
     | ServerConfig.ServerConfig
   >,
 ) =>
@@ -95,6 +98,7 @@ const runProbeTest = <A>(
       Effect.provide(pipelineClient(cwd)),
       Effect.provide(UnityPackageLock.layer),
       Effect.provide(EditorPresenceRegistry.layer),
+      Effect.provide(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
       Effect.provide(ServerConfig.layerTest(cwd, { prefix: "t3code-unity-setup-probe-" })),
     );
   }).pipe(Effect.provide(NodeServices.layer));
@@ -337,6 +341,98 @@ describe("UnitySetupProbe", () => {
         Effect.map((result) => {
           expect(result.primary.state).toBe("S11");
           expect(result.facts.selectionPublisherRegistered).toBe(true);
+        }),
+      ),
+  );
+
+  it.effect(
+    "isUnityProject: false for a plain temp dir with no marker file — even though every other fact in this test reaches S11, the fully-green state",
+    () =>
+      runProbeTest(
+        (cwd) =>
+          stubPipelineClient({
+            list: () =>
+              Effect.succeed({
+                _tag: "ok",
+                value: {
+                  instances: [
+                    {
+                      projectPath: cwd,
+                      pid: 444,
+                      isRunning: true,
+                      hasPipelinePackage: true,
+                      isReachable: true,
+                      pipelineVersion: "0.4.0",
+                      updateAvailable: false,
+                      safeMode: false,
+                    },
+                  ],
+                  latestVersion: null,
+                },
+              }),
+          }),
+        (cwd) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(
+              cwd,
+              "Packages/packages-lock.json",
+              JSON.stringify({
+                dependencies: {
+                  "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
+                  "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                },
+              }),
+            );
+            const registry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
+            const token = registry.newConnectionToken();
+            yield* registry.registerPublisher(
+              "test-session",
+              token,
+              {
+                editor: { id: "unity", name: "Unity", version: "6000.3.14f1" },
+                workspace: { root: cwd },
+              },
+              { claimantSessionId: undefined },
+            );
+            return yield* runProbe;
+          }),
+      ).pipe(
+        Effect.map((result) => {
+          expect(result.facts.isUnityProject).toBe(false);
+          // Not consulted by the classifier at all — S11 is still reached
+          // on otherwise fully-green facts, per this field's own doc
+          // comment in packages/contracts/src/unitySetup.ts. This is the
+          // strongest proof of that non-coupling: every OTHER fact is as
+          // green as `classifyUnitySetup` can require, and classification
+          // still doesn't budge on the missing Unity marker file.
+          expect(result.primary.state).toBe("S11");
+        }),
+      ),
+  );
+
+  it.effect(
+    "isUnityProject: true once ProjectSettings/ProjectVersion.txt exists — the SAME marker EngineTypeResolver reads elsewhere, computed even when the CLI itself is unavailable",
+    () =>
+      runProbeTest(
+        () => stubPipelineClient({ isAvailable: () => Effect.succeed(false) }),
+        (cwd) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(
+              cwd,
+              "ProjectSettings/ProjectVersion.txt",
+              "m_EditorVersion: 6000.3.14f1\n",
+            );
+            // Same real false-positive this file's first test guards
+            // against: `~/.unity/bin/unity` genuinely exists on the
+            // machine this suite runs on.
+            return yield* runProbe.pipe(
+              Effect.provideService(HostProcessEnvironment, { HOME: cwd }),
+            );
+          }),
+      ).pipe(
+        Effect.map((result) => {
+          expect(result.primary.state).toBe("S1");
+          expect(result.facts.isUnityProject).toBe(true);
         }),
       ),
   );
