@@ -61,6 +61,20 @@ type DockviewGridNode = SerializedGridObject<LeafGroupData>;
  * save from here on stamps a real `knownPanelIds`, so this fallback only
  * ever fires once per pre-existing file.
  *
+ * A THIRD category, distinct from both of the above (task #91): an ON-DEMAND
+ * panel — registered in the catalog, but deliberately absent from
+ * `buildChatDockPreset()`'s own default tree, opened only via "Add tab"
+ * (`third-party-source` is the first of these). It is ALWAYS absent from
+ * `presentIds`/`baseline` on a fresh or default-shaped layout — nothing ever
+ * put it there — which is not the same fact as "newly registered and needs
+ * grafting in": the default preset never placed it anywhere either, so there
+ * is nothing to graft, and reporting it "unplaceable" describes a decision
+ * this dock never tried to make. Told apart by membership in `defaultTree
+ * .panels`: only a panel the CURRENT default preset actually contains
+ * qualifies for either an add or an unplaceable report; an on-demand panel
+ * is silently excluded from consideration, and opening it stays entirely the
+ * "Add tab" affordance's job, unrelated to migration.
+ *
  * Placement only knows one shape: the CURRENT default preset's `grid.root`
  * is a flat branch of single-view leaves (true for every preset this dock
  * has ever had — see `buildChatDockPreset` in ChatDock.tsx). For a missing
@@ -102,9 +116,23 @@ export function migrateLoadedLayout(input: MigrateLoadedLayoutInput): MigrateLoa
 
   const presentIds = new Set(Object.keys(loaded.panels ?? {}));
   const baseline = new Set(knownPanelIds ?? Object.keys(loaded.panels ?? {}));
+  // #91: an ON-DEMAND panel (registered in the catalog but deliberately left
+  // out of `buildChatDockPreset()` — `third-party-source` is the first one,
+  // opened only via "Add tab") is absent from `presentIds` AND `baseline` on
+  // every fresh/default-shaped layout, which used to make it indistinguishable
+  // from a genuinely newly-registered panel the migration should be grafting
+  // in. It isn't one: there is nothing to graft, because the default preset
+  // never placed it anywhere either. Requiring membership in `defaultTree
+  // .panels` — the single source of truth for what the default preset
+  // actually contains — excludes it from `newlyRegisteredIds` entirely, so no
+  // placement is attempted and no "couldn't be updated to include" notice
+  // fires for it. A panel the CURRENT default preset DOES contain, but that a
+  // stale saved layout doesn't have and never closed on purpose, still
+  // qualifies exactly as before.
+  const defaultPresetIds = new Set(Object.keys(defaultTree.panels ?? {}));
   const newlyRegisteredIds = panelRegistry
     .ids()
-    .filter((id) => !presentIds.has(id) && !baseline.has(id));
+    .filter((id) => defaultPresetIds.has(id) && !presentIds.has(id) && !baseline.has(id));
 
   if (newlyRegisteredIds.length === 0) {
     return { tree: loaded, addedPanelIds: [], unplaceablePanelIds: [] };

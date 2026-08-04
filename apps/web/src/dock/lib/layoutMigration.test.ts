@@ -400,6 +400,119 @@ describe("migrateLoadedLayout — proof bar: positions survive AND the new panel
   });
 });
 
+describe("migrateLoadedLayout — task #91: an on-demand panel absent from the default preset is not an error", () => {
+  it("reports neither an add nor an unplaceable notice for a registered panel the default preset never contained, on a fresh default-shaped layout", () => {
+    // The exact fresh-install shape: nothing has been dragged, nothing
+    // customized — `loaded` IS today's default tree. `third-party-source` is
+    // registered (catalog knows about it) but was never part of
+    // `buildChatDockPreset()`, matching the real on-demand-panel shape.
+    const registry = registryWith("sidebar", "chat", "files", "third-party-source");
+    const result = migrateLoadedLayout({
+      loaded: DEFAULT_TREE,
+      knownPanelIds: ["sidebar", "chat", "files"],
+      panelRegistry: registry,
+      defaultTree: DEFAULT_TREE,
+    });
+    // Silent, not "unplaceable" — there was never a placement decision to
+    // make. A red "couldn't be updated to include: third-party-source"
+    // banner on a first-ever launch is exactly the bug this proves fixed.
+    expect(result).toEqual({ tree: DEFAULT_TREE, addedPanelIds: [], unplaceablePanelIds: [] });
+  });
+
+  it("also stays silent for the same on-demand panel against a STALE, user-customized layout — absence there isn't migration's business either", () => {
+    const registry = registryWith("sidebar", "chat", "files", "third-party-source");
+    const loaded = userLayoutBeforeFiles(); // pre-existing, customized, files not yet migrated
+    const result = migrateLoadedLayout({
+      loaded,
+      knownPanelIds: ["sidebar", "chat"], // files didn't exist when this was saved either
+      panelRegistry: registry,
+      defaultTree: DEFAULT_TREE,
+    });
+    // files (genuinely in the default preset) still gets added; third-party
+    // -source (never in the default preset) is absent from BOTH result
+    // lists — proves the discriminator, not just "the banner never fires,"
+    // by exercising a case where a REAL migration notice-worthy add is
+    // happening in the very same call.
+    expect(result.addedPanelIds).toEqual(["files"]);
+    expect(result.unplaceablePanelIds).toEqual([]);
+  });
+
+  it("still reports the notice-worthy case: a panel the default preset DOES contain, unplaceable due to tree shape, is unaffected by the on-demand exclusion", () => {
+    // Sibling proof to the two above: the discriminator must not swallow a
+    // real "couldn't place this" case just because SOME panel in the same
+    // registry happens to be on-demand. `notes` here IS present in the
+    // default tree's own panels map (unlike third-party-source) — it's
+    // legitimately new — it just can't be placed because the default tree
+    // is shaped as a nested branch, not the flat shape this function knows
+    // how to graft into.
+    const registry = registryWith("sidebar", "chat", "notes", "third-party-source");
+    const nestedDefaultTree: SerializedDockview = {
+      grid: {
+        orientation: Orientation.HORIZONTAL,
+        width: 800,
+        height: 600,
+        root: {
+          type: "branch",
+          size: 800,
+          data: [
+            {
+              type: "leaf",
+              size: 400,
+              data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+            },
+            {
+              type: "branch",
+              size: 400,
+              data: [
+                {
+                  type: "leaf",
+                  size: 200,
+                  data: { id: "group-chat", views: ["chat"], activeView: "chat" },
+                },
+                {
+                  type: "leaf",
+                  size: 200,
+                  data: { id: "group-notes", views: ["notes"], activeView: "notes" },
+                },
+              ],
+            },
+          ],
+        },
+      },
+      panels: {
+        sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
+        chat: { id: "chat", contentComponent: "chat", title: "Chat" },
+        notes: { id: "notes", contentComponent: "notes", title: "Notes" },
+        // Deliberately no `third-party-source` entry — matches the real
+        // default preset never including an on-demand panel.
+      },
+    };
+    const loaded: SerializedDockview = {
+      grid: {
+        orientation: Orientation.HORIZONTAL,
+        width: 400,
+        height: 600,
+        root: {
+          type: "leaf",
+          size: 400,
+          data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+        },
+      },
+      panels: { sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" } },
+    };
+    const result = migrateLoadedLayout({
+      loaded,
+      knownPanelIds: ["sidebar"],
+      panelRegistry: registry,
+      defaultTree: nestedDefaultTree,
+    });
+    expect(result.addedPanelIds).toEqual([]);
+    // notes still reported unplaceable (the notice DOES fire for the case
+    // that deserves it); third-party-source is absent from either list.
+    expect(result.unplaceablePanelIds).toEqual(["chat", "notes"]);
+  });
+});
+
 describe("migrateLoadedLayout — the user closed it on purpose, do not re-add it", () => {
   it("leaves a panel closed when it WAS in the recorded knownPanelIds baseline, even though it's absent from the grid", () => {
     const registry = registryWith("sidebar", "chat", "files");
