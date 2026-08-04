@@ -19,9 +19,14 @@ import {
   browserApiCorsLayer,
   httpCompressionLayer,
 } from "./http.ts";
-import { editorPresenceRouteLayer } from "./editorPresence/EditorPresenceRoute.ts";
+import {
+  editorPresenceRouteLayer,
+  editorPresenceCommandRouteLayer,
+} from "./editorPresence/EditorPresenceRoute.ts";
 import { fixPath } from "./os-jank.ts";
 import { spaceEventsRouteLayer } from "./spaceEvents/SpaceEventsRoute.ts";
+import { unityCommandRouteLayer } from "./unity/UnityCommandRoute.ts";
+import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -298,6 +303,38 @@ const CheckpointingLayerLive = Layer.empty.pipe(
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
+// Provided as a FULLY RESOLVED layer here (ProcessRunner AND FileSystem/Path
+// both discharged — `UnityPipelineClient.make` needs FileSystem/Path
+// directly, not just inside `isAvailable`'s pre-check; `PlatformServicesLive`,
+// defined above, resolves both for whichever runtime — Bun/Node — is active.
+// PortScannerLayerLive above is NOT a precedent for omitting them: PortScanner
+// never needs FileSystem/Path at all), then discharged INTO
+// `unityCommandRouteLayer` at the route registration site below via
+// `HttpRouter.provideRequest` — NOT `Layer.provide`.
+//
+// This distinction is load-bearing, not stylistic. `HttpRouter.add(...)`
+// does not expose a route's dependencies as a bare requirement — it wraps
+// them in a nominal branded marker, `Request.From<"Requires", X>`
+// (effect/unstable/http/HttpRouter.ts:496,787-806), structurally unrelated
+// to bare `X`. Ordinary `Layer.provide(SomeLayer providing X)` cancels bare
+// `X` from a layer's R; it CANNOT match `Request<"Requires", X>`, so it is a
+// silent no-op against a route's requirement — confirmed by isolating
+// `unityCommandRouteLayer.pipe(Layer.provide(UnityPipelineClientLayerLive))`
+// on its own (outside any Layer.mergeAll) and still seeing `UnityPipelineClient`
+// unresolved. The marker only turns back into a bare requirement once
+// `HttpRouter.serve(...)` runs (`Request.Without<R>` at HttpRouter.ts:1294-95)
+// — by which point it has propagated to the server bootstrap, hence the
+// 282-error cascade through bin.ts/server.test.ts. `HttpRouter.provideRequest`
+// (HttpRouter.ts:1240-1257) is the library's purpose-built combinator for
+// discharging THIS marker at the route, before `.serve()` ever unwraps it.
+// The sibling `editorPresenceCommandRouteLayer`'s `.pipe(Layer.provide(EditorPresenceRegistry.layer))`
+// has the identical bug — it looks correct and isn't, for the same
+// structural reason. Flagged to that lane; not touched here.
+const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(PlatformServicesLive),
+);
+
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
@@ -468,6 +505,8 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
     editorPresenceRouteLayer,
+    editorPresenceCommandRouteLayer,
+    unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     spaceEventsRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),

@@ -90,18 +90,20 @@ export const dispatchUnityCommand = (
     }
   });
 
-// Deliberately NOT `.pipe(Layer.provide(UnityPipelineClient.layer))` here —
-// measured live: `HttpRouter.add(...).pipe(Layer.provide(X))` silently
-// fails to register the route (every request 404s) when `X` itself has
-// unresolved EXTERNAL transitive dependencies, which `UnityPipelineClient.layer`
-// does (`ProcessRunner` / `FileSystem` / `Path`). `EditorPresenceRoute.ts`'s
-// own `.pipe(Layer.provide(EditorPresenceRegistry.layer))` doesn't hit this,
-// because `EditorPresenceRegistry.layer` has NO external deps of its own —
-// that's why copying that shape here broke silently instead of loudly. The
-// fix: leave `UnityPipelineClient.UnityPipelineClient` as an external
-// requirement of this route, and let whoever composes it in (`server.ts`,
-// or a test) provide a FULLY RESOLVED `UnityPipelineClient.layer` — see
-// `server.ts`'s own comment at its call site for the working composition.
+// Deliberately NOT `.pipe(Layer.provide(UnityPipelineClient.layer))` here.
+// `HttpRouter.add(...)` doesn't expose a route's requirements as a bare
+// type — it wraps them in a nominal branded marker,
+// `Request.From<"Requires", X>` (effect/unstable/http/HttpRouter.ts:496),
+// which ordinary `Layer.provide` structurally cannot match or discharge (it
+// only cancels bare types). The correct combinator is
+// `HttpRouter.provideRequest` (HttpRouter.ts:1240-1257), purpose-built for
+// this marker. Leave `UnityPipelineClient.UnityPipelineClient` as an
+// external requirement of this route, and let whoever composes it in
+// (`server.ts`, or a test) discharge it with
+// `.pipe(HttpRouter.provideRequest(UnityPipelineClient.layer))` — see
+// `server.ts`'s own comment at its call site for the full writeup, including
+// why the identical-looking `Layer.provide` on the sibling
+// `editorPresenceCommandRouteLayer` has the same bug despite looking correct.
 export const unityCommandRouteLayer = HttpRouter.add(
   "POST",
   UNITY_COMMAND_PATH,
