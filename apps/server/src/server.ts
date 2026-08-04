@@ -348,14 +348,44 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
   Layer.provideMerge(OrchestrationLayerLive),
 );
 
-const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
-  // Core Services
-  Layer.provideMerge(ServerSettingsLayerLive),
+// ─────────────────────────────────────────────────────────────────────────
+// RuntimeCoreDependenciesLive used to be one flat `.pipe(Layer.provideMerge(
+// ...))` chain with 20 arguments — TypeScript's typed-overload ceiling for
+// `.pipe()`. That ceiling does NOT fail loudly: a 21st entry silently
+// collapses type inference for the whole expression, which then resurfaces
+// as misleading "any in the requirements/error channel" errors in files
+// that don't even import this one (bin.ts, cli/server.ts, anything that
+// transitively pulls in `runServer`). Diagnosing that misdirection — an
+// unrelated-looking cascade with no pointer back to its actual cause —
+// cost real time in this repo already. Below, the ~20 layers are
+// pre-grouped into three named buckets so the top-level chain stays at 3
+// arguments with headroom to spare; if you're adding a new top-level
+// dependency, add it to whichever bucket it belongs with, not as a new
+// argument on RuntimeCoreDependenciesLive's own pipe.
+//
+// Each bucket is a SEQUENTIAL `.pipe(Layer.provideMerge(...))` chain, not a
+// `Layer.mergeAll(...)` bag, and that's deliberate, not a style choice:
+// `Layer.mergeAll` builds its members in PARALLEL, so members cannot
+// satisfy each other's requirements (see the EngineTypeResolver/
+// WorkspacePaths incident — TS377035 layerMergeAllWithDependencies is the
+// compiler's tell when this goes wrong). ProviderAndRuntimeLayerLive's
+// `ProviderRuntimeLayerLive` needs `RepositoryIdentityResolver` and
+// `EngineTypeResolver`, both of which only exist in the LATER
+// `IdentityAuthAndCloudLayerLive` bucket — a sequential chain lets that
+// later bucket's output cancel the earlier bucket's leftover requirement,
+// exactly like the original flat chain did (bucketing a contiguous run of
+// `provideMerge` calls behind its own `.pipe()` is associative: it
+// produces the identical inferred type as the flat chain, just fewer
+// syntactic top-level arguments). A future `Layer.mergeAll` "cleanup" of
+// these buckets would silently break that resolution — don't.
+const FoundationLayerLive = ServerSettingsLayerLive.pipe(
   Layer.provideMerge(CheckpointingLayerLive),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(ProviderRuntimeLayerLive),
+);
+
+const ProviderAndRuntimeLayerLive = ProviderRuntimeLayerLive.pipe(
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(Keybindings.layer),
@@ -378,9 +408,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // no longer transitively provides it. Exposing it at the runtime level
   // keeps a single Live for all opencode consumers.
   Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
-  Layer.provideMerge(WorkspaceLayerLive),
-  // Merged into one entry (rather than its own provideMerge line) to stay
-  // under the 20-argument ceiling on this pipe chain's typed overloads.
+);
+
+const IdentityAuthAndCloudLayerLive = WorkspaceLayerLive.pipe(
+  // Merged into one entry (rather than its own provideMerge line) to keep
+  // this bucket's own argument count comfortably low too.
   Layer.provideMerge(Layer.mergeAll(ProjectFaviconResolverLayerLive, EngineTypeResolverLayerLive)),
   Layer.provideMerge(RepositoryIdentityResolver.layer),
   Layer.provideMerge(ServerEnvironment.layer),
@@ -395,6 +427,12 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
       CloudManagedEndpointRuntimeLive,
     ),
   ),
+);
+
+const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
+  Layer.provideMerge(FoundationLayerLive),
+  Layer.provideMerge(ProviderAndRuntimeLayerLive),
+  Layer.provideMerge(IdentityAuthAndCloudLayerLive),
 );
 
 const RuntimeDependenciesLive = RuntimeCoreDependenciesLive.pipe(
