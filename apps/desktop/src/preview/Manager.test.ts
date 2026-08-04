@@ -43,6 +43,7 @@ const {
   fromId,
   getFocusedWebContents,
   mkdir,
+  shellOpenExternal,
   showItemInFolder,
   webviewSend,
   writeFile,
@@ -59,6 +60,9 @@ const {
   getFocusedWebContents: vi.fn(() => null),
   mkdir: vi.fn((_path: string) => undefined),
   showItemInFolder: vi.fn(),
+  // H1 (independent security review, 2026-08-04): the cross-origin popup
+  // deflect path calls `shell.openExternal` directly.
+  shellOpenExternal: vi.fn(async () => undefined),
   webviewSend: vi.fn(),
   writeFile: vi.fn((_path: string, _data: Uint8Array) => undefined),
   writeImage: vi.fn(),
@@ -76,6 +80,7 @@ vi.mock("electron", () => ({
     createFromPath,
   },
   shell: {
+    openExternal: shellOpenExternal,
     showItemInFolder,
   },
   session: {
@@ -250,6 +255,7 @@ describe("PreviewManager", () => {
     appOn.mockClear();
     browserWindowConstructor.mockReset();
     fromId.mockClear();
+    shellOpenExternal.mockClear();
     getFocusedWebContents.mockReset();
     getFocusedWebContents.mockReturnValue(null);
     mkdir.mockClear();
@@ -451,7 +457,7 @@ describe("PreviewManager", () => {
 
         const result = handler({ url: "https://www.figma.com/oauth/authorize" });
         expect(result).toEqual({ action: "deny" });
-        yield* Effect.yieldNow;
+        for (let i = 0; i < 20; i++) yield* Effect.yieldNow;
 
         expect(loadURL).toHaveBeenCalledOnce();
         expect(loadURL).toHaveBeenCalledWith("https://www.figma.com/oauth/authorize");
@@ -2177,6 +2183,15 @@ describe("PreviewManager", () => {
 // one, none was, and the guest navigated in place. This unit test proves
 // Manager.ts installs that same pattern; it does not re-run the probe.
 describe("G2 — early main-process window-open guard", () => {
+  // Sibling of `describe("PreviewManager", ...)` — its `beforeEach` does
+  // not reach here. See the H1 describe block's own comment on this same
+  // pattern for why it matters once a test asserts on `appOn`/mock state
+  // across more than one construction in the same run.
+  beforeEach(() => {
+    appOn.mockClear();
+    fromId.mockClear();
+  });
+
   effectIt.effect(
     "installs a window-open handler on every webview's WebContents at creation, before any tab registers",
     () =>
@@ -2258,7 +2273,196 @@ describe("G2 — early main-process window-open guard", () => {
   );
 });
 
+// H1 (independent security review, 2026-08-04, merge-gate — SHIP BLOCKER):
+// both window-open handlers denied the popup and fell back to
+// `wc.loadURL(url)` on the SAME guest — but Electron never fires
+// `will-navigate` for a main-process `loadURL`, so G3's origin guard
+// (DesktopWindow.ts, listens for exactly that event) never saw this path.
+// Proven live: a third-party guest's `window.open(crossOriginUrl)`
+// repainted the whole panel to the attacker origin. These assert the
+// EFFECT — did the guest actually navigate, was openExternal actually
+// called with which URL — not the handler's return value, which was
+// always {action:"deny"} even while the bug was live.
+describe("H1 — early window-open handler enforces G3's origin policy for third-party guests", () => {
+  // This describe is a SIBLING of `describe("PreviewManager", ...)`, not
+  // nested inside it — that outer block's own `beforeEach` (which clears
+  // `appOn`/`shellOpenExternal`/etc.) does not apply here. Without a local
+  // one, `appOn.mock.calls` and `shellOpenExternal.mock.calls` accumulate
+  // across every test in this block, and `getHandler()`'s `.find()` can
+  // return an EARLIER test's handler registration.
+  beforeEach(() => {
+    appOn.mockClear();
+    fromId.mockClear();
+    shellOpenExternal.mockClear();
+  });
+
+  const getHandler = () =>
+    appOn.mock.calls.find(([event]) => event === "web-contents-created")?.[1] as (
+      event: unknown,
+      wc: unknown,
+    ) => void;
+
+  // `handlePopupNavigation` runs on a separately `runFork`'d fiber (the
+  // window-open handler itself is a synchronous Electron callback, not an
+  // Effect the test can `yield*`), and it crosses a real Promise boundary
+  // (`attemptPromise` wrapping `wc.loadURL`/`shell.openExternal`). A single
+  // `Effect.yieldNow` is not reliably enough ticks for that fiber to fully
+  // settle before the assertion runs — under-flushing here doesn't just
+  // flake THIS test, it lets the fiber's mock call land LATER, bleeding
+  // into a subsequent test's own assertions once `beforeEach` clears the
+  // mock but the stray fiber is still in flight.
+  // H1's fibers cross a real Promise boundary; `it.live` (real clock) plus
+  // a short real sleep settles them reliably, unlike `it.effect`'s virtual
+  // TestClock, which never advances without an explicit tick and left
+  // these fibers' mock calls landing unpredictably across test boundaries.
+  const flush = Effect.sleep(50);
+
+  effectIt.live(
+    "denies AND does not loadURL a cross-origin popup on a third-party guest — deflects instead",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          void manager;
+          const webContentsCreatedHandler = getHandler();
+          const loadURL = vi.fn(async () => undefined);
+          const setWindowOpenHandler = vi.fn();
+          webContentsCreatedHandler(
+            {},
+            {
+              id: 501,
+              getType: () => "webview",
+              getURL: () => "https://figma.example/file/abc",
+              session: FAKE_THIRD_PARTY_SESSION,
+              loadURL,
+              setWindowOpenHandler,
+            },
+          );
+          const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+            url: string;
+          }) => { action: string };
+
+          const result = openHandler({ url: "https://attacker.example/evil" });
+
+          expect(result).toEqual({ action: "deny" });
+          yield* flush;
+          // The effect, not the return value: the guest must NOT have
+          // navigated in-panel to the attacker origin.
+          expect(loadURL).not.toHaveBeenCalled();
+          expect(shellOpenExternal).toHaveBeenCalledWith("https://attacker.example/evil");
+        }),
+      ),
+  );
+
+  effectIt.live("allows a same-origin popup on a third-party guest to load in place", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = getHandler();
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          {
+            id: 502,
+            getType: () => "webview",
+            getURL: () => "https://figma.example/file/abc",
+            session: FAKE_THIRD_PARTY_SESSION,
+            loadURL,
+            setWindowOpenHandler,
+          },
+        );
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+          url: string;
+        }) => { action: string };
+
+        openHandler({ url: "https://figma.example/file/def" });
+
+        yield* flush;
+        expect(loadURL).toHaveBeenCalledWith("https://figma.example/file/def");
+        expect(shellOpenExternal).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.live(
+    "keeps the original unconditional loadURL for a NON-third-party (preview) guest — unaffected by G3's policy",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          void manager;
+          const webContentsCreatedHandler = getHandler();
+          const loadURL = vi.fn(async () => undefined);
+          const setWindowOpenHandler = vi.fn();
+          webContentsCreatedHandler(
+            {},
+            {
+              id: 503,
+              getType: () => "webview",
+              getURL: () => "http://localhost:5173/",
+              session: { __brand: "ordinary-preview-session" },
+              loadURL,
+              setWindowOpenHandler,
+            },
+          );
+          const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+            url: string;
+          }) => { action: string };
+
+          openHandler({ url: "https://some-other-origin.example/" });
+
+          yield* flush;
+          expect(loadURL).toHaveBeenCalledWith("https://some-other-origin.example/");
+          expect(shellOpenExternal).not.toHaveBeenCalled();
+        }),
+      ),
+  );
+
+  // F-3 (same review): the deflect path is rate limited so a hostile page
+  // can't spawn unbounded real browser tabs by looping window.open.
+  effectIt.live("rate-limits repeated cross-origin deflects from the same guest", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = getHandler();
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          {
+            id: 504,
+            getType: () => "webview",
+            getURL: () => "https://figma.example/file/abc",
+            session: FAKE_THIRD_PARTY_SESSION,
+            loadURL,
+            setWindowOpenHandler,
+          },
+        );
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+          url: string;
+        }) => { action: string };
+
+        openHandler({ url: "https://attacker.example/evil?n=0" });
+        yield* flush;
+        openHandler({ url: "https://attacker.example/evil?n=1" });
+        yield* flush;
+        openHandler({ url: "https://attacker.example/evil?n=2" });
+        yield* flush;
+
+        expect(shellOpenExternal).toHaveBeenCalledOnce();
+        expect(shellOpenExternal).toHaveBeenCalledWith("https://attacker.example/evil?n=0");
+      }),
+    ),
+  );
+});
+
 describe("G4 — automation namespace excludes third-party tabs", () => {
+  // Sibling of `describe("PreviewManager", ...)` — see H1's own comment on
+  // this same pattern.
+  beforeEach(() => {
+    appOn.mockClear();
+    fromId.mockClear();
+  });
+
   const thirdPartyWc = (id = 90) =>
     ({
       id,

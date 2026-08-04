@@ -1119,6 +1119,13 @@ describe("DesktopWindow", () => {
           }
           const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
           const guestWebContents = {
+            // F-3 (independent security review, 2026-08-04): the deflect
+            // rate limiter is keyed by webContents id. An explicit, unique
+            // id here keeps this test's budget separate from every other
+            // test in this file that also exercises a deflect — sharing
+            // `undefined` (what a fixture with no `id` field resolves to)
+            // would make tests order-dependent.
+            id: 9101,
             session: FAKE_THIRD_PARTY_SESSION,
             getURL: () => "https://www.figma.com/files/recents",
             on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
@@ -1144,6 +1151,166 @@ describe("DesktopWindow", () => {
           assert.deepEqual(openedExternalUrls, [
             "https://figma-login-verify.example.com/session-expired",
           ]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // H2 (independent security review, 2026-08-04, merge-gate): `will-navigate`
+  // only fires for a navigation's INITIAL request — a same-origin request
+  // that then 302-redirects cross-origin fires `will-redirect` instead,
+  // which nothing listened to. Same policy, same rate limit, new event.
+  it.effect(
+    "wires a guest will-redirect guard on the third-party webview: same-origin redirect allowed",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 9102,
+            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "https://www.figma.com/files/recents",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willRedirect) {
+            return yield* Effect.die("guest will-redirect listener was not registered");
+          }
+          let prevented = false;
+          willRedirect(
+            { preventDefault: () => (prevented = true) },
+            "https://www.figma.com/files/recents?redirected=1",
+          );
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.isFalse(prevented);
+          assert.deepEqual(openedExternalUrls, []);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "wires a guest will-redirect guard on the third-party webview: cross-origin redirect denied and deflected externally",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 9103,
+            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "https://www.figma.com/files/recents",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willRedirect) {
+            return yield* Effect.die("guest will-redirect listener was not registered");
+          }
+          let prevented = false;
+          // H1's own composing precondition: a same-origin request that
+          // 302s cross-origin — this is the effect, not the handler's
+          // return value.
+          willRedirect(
+            { preventDefault: () => (prevented = true) },
+            "http://127.0.0.1:19999/evil",
+          );
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.isTrue(prevented);
+          assert.deepEqual(openedExternalUrls, ["http://127.0.0.1:19999/evil"]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // F-3 (independent security review, 2026-08-04): the deflect path is
+  // rate limited so a hostile page can't spawn unbounded real browser tabs
+  // by looping a redirect/navigation.
+  it.effect(
+    "rate-limits repeated cross-origin will-redirect deflects from the same guest",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 9104,
+            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "https://www.figma.com/files/recents",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willRedirect) {
+            return yield* Effect.die("guest will-redirect listener was not registered");
+          }
+          for (let i = 0; i < 3; i++) {
+            willRedirect({ preventDefault: () => {} }, `http://127.0.0.1:19999/evil?n=${i}`);
+          }
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.deepEqual(openedExternalUrls, ["http://127.0.0.1:19999/evil?n=0"]);
         }).pipe(Effect.provide(layer));
       }),
   );

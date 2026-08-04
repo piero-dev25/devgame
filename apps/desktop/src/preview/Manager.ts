@@ -56,7 +56,9 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import { parseSafeExternalUrl, shouldAllowExternalDeflect } from "../electron/ElectronShell.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
+import { isSameOriginRendererNavigation } from "../window/DesktopWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -490,21 +492,102 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // most recently set handler per WebContents, and this one is validated
   // identically, so the later call is a harmless no-op re-registration,
   // not a second navigation.
+  // H1 (independent security review, 2026-08-04, merge-gate — SHIP
+  // BLOCKER): both window-open handlers below deny the popup and fall
+  // back to `wc.loadURL(url)` on the SAME guest WebContents — but Electron
+  // never fires `will-navigate` for a main-process `loadURL` call, so
+  // DesktopWindow.ts's G3 guest guard (which listens for exactly that
+  // event) never sees this path at all. Proven by execution: a
+  // third-party guest calling `window.open(crossOriginUrl)` repainted the
+  // whole panel to the attacker origin, on the third-party session, with
+  // no `will-navigate` ever firing — and a cross-origin IFRAME inside the
+  // guest can trigger the identical `window.open` call with no user
+  // gesture, so this doesn't require figma.com/notion.so itself to be
+  // hostile.
+  //
+  // Fix applies G3's OWN policy here rather than inventing a second one:
+  // for a THIRD-PARTY guest specifically, same-origin-as-the-guest's-
+  // current-page loads in place (unchanged from before); cross-origin is
+  // NOT loaded in-panel — it's denied and deflected to the user's real
+  // browser via `shell.openExternal`, identically to G3's guest
+  // `will-navigate` handler. Preview webviews are explicitly OUT of this
+  // policy's scope (same carve-out G3 documents) and keep their original,
+  // unconditional `loadURL` behavior — preview loads the user's own
+  // fully-trusted dev server, and this handler's original purpose was
+  // simply "don't let a preview page pop an uncontrolled native window."
+  //
+  // F-3 (same review): the deflect-to-external-browser path is rate
+  // limited (`shouldAllowExternalDeflect`, ElectronShell.ts) — see that
+  // function's own comment for why a cooldown and not a gesture check.
+  //
+  // Resolved ONCE here, as part of `makeNativeOperations`'s own normal
+  // (non-forked) generator body — the same place `browserSession` itself
+  // gets bound just above — rather than re-resolved inside the popup
+  // handler's `runFork`'d fiber on every call. `getThirdPartyBrowserSession`
+  // always returns the SAME memoized session object regardless of when
+  // it's called (BrowserSession.ts caches it), so nothing is lost by
+  // resolving it up front; what's gained is avoiding a fresh
+  // service-dependent `yield*` inside a nested forked fiber for every
+  // single popup event, which is both unnecessary overhead and, if this
+  // effect never handles a raw failure, would deny-without-navigating
+  // forever rather than serving stale identity.
+  const thirdPartySessionForPopupPolicy: Session | null = yield* Effect.orElseSucceed(
+    browserSession.getThirdPartyBrowserSession(),
+    () => null,
+  );
+
+  const resolvePopupNavigationTarget = (
+    wc: Electron.WebContents,
+    normalizedUrl: string,
+  ): { readonly kind: "loadInPanel" | "deflect" | "denyOnly" } => {
+    // Fails CLOSED: if third-party session identity couldn't be resolved
+    // at startup, deny-only for every guest rather than falling back to
+    // the looser preview behavior for one that might actually be
+    // third-party.
+    if (thirdPartySessionForPopupPolicy === null) {
+      return { kind: "denyOnly" };
+    }
+    if (wc.session !== thirdPartySessionForPopupPolicy) {
+      return { kind: "loadInPanel" };
+    }
+    const anchor = wc.getURL();
+    const sameOrigin = isSameOriginRendererNavigation({
+      applicationUrl: anchor,
+      navigationUrl: normalizedUrl,
+    });
+    return sameOrigin ? { kind: "loadInPanel" } : { kind: "deflect" };
+  };
+
+  const handlePopupNavigation = Effect.fn("PreviewManager.handlePopupNavigation")(function* (
+    operation: string,
+    wc: Electron.WebContents,
+    rawUrl: string,
+  ) {
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizePreviewUrl(rawUrl);
+    } catch {
+      return;
+    }
+    const target = resolvePopupNavigationTarget(wc, normalizedUrl);
+    if (target.kind === "denyOnly") return;
+    if (target.kind === "loadInPanel") {
+      yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
+        wc.loadURL(normalizedUrl),
+      ).pipe(Effect.ignore);
+      return;
+    }
+    if (!shouldAllowExternalDeflect(wc.id)) return;
+    if (Option.isNone(parseSafeExternalUrl(normalizedUrl))) return;
+    yield* attemptPromise({ operation: `${operation}.deflect`, webContentsId: wc.id }, () =>
+      shell.openExternal(normalizedUrl),
+    ).pipe(Effect.ignore);
+  });
+
   app.on("web-contents-created", (_event, wc) => {
     if (wc.getType() !== "webview") return;
     wc.setWindowOpenHandler(({ url }) => {
-      let normalizedUrl: string;
-      try {
-        normalizedUrl = normalizePreviewUrl(url);
-      } catch {
-        return { action: "deny" };
-      }
-      runFork(
-        attemptPromise(
-          { operation: "openPreviewWindow.earlyGuard", webContentsId: wc.id },
-          () => wc.loadURL(normalizedUrl),
-        ).pipe(Effect.ignore),
-      );
+      runFork(handlePopupNavigation("openPreviewWindow.earlyGuard", wc, url));
       return { action: "deny" };
     });
   });
@@ -1506,17 +1589,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           // no business skipping the check every other navigation gets —
           // especially now that third-party (untrusted external) content
           // reaches this same handler via `allowpopups`.
-          let normalizedUrl: string;
-          try {
-            normalizedUrl = normalizePreviewUrl(url);
-          } catch {
-            return { action: "deny" };
-          }
-          runFork(
-            attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
-              wc.loadURL(normalizedUrl),
-            ).pipe(Effect.ignore),
-          );
+          //
+          // H1 (independent security review, 2026-08-04, merge-gate — SHIP
+          // BLOCKER): normalizing the URL was NOT enough — this same-
+          // webview `loadURL` fallback still bypassed G3's origin policy
+          // entirely, since `will-navigate` never fires for it. See
+          // `handlePopupNavigation`'s own comment (this file, near the
+          // early `web-contents-created` handler) for the fix; this call
+          // site shares it rather than re-implementing it.
+          runFork(handlePopupNavigation("openPreviewWindow", wc, url));
           return { action: "deny" };
         });
         wc.on("before-input-event", beforeInput);

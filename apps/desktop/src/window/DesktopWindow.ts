@@ -679,7 +679,40 @@ export const make = Effect.gen(function* () {
           return;
         }
         event.preventDefault();
-        if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+        if (
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+        ) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // H2 (independent security review, 2026-08-04, merge-gate): `will-
+      // navigate` only fires for the INITIAL navigation of a load — a
+      // same-origin navigation that then 302-redirects cross-origin fires
+      // `will-redirect` instead, which nothing was listening to. Proven:
+      // a same-origin request allowed above, then a 302 to a different
+      // origin, navigated unguarded. On its own this needs an open
+      // redirect on the guest's current origin, but it composes directly
+      // with H1/G4 — either of which can already hand an attacker that
+      // origin — so it's not an independent precondition in practice.
+      // Same policy as `will-navigate` above, not a new one: same-origin
+      // redirect target is allowed silently, cross-origin is denied and
+      // deflected, same rate limit.
+      guestWebContents.on("will-redirect", (event, url) => {
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+        ) {
           void runPromise(electronShell.openExternal(url));
         }
       });
