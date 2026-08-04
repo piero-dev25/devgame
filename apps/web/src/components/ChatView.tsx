@@ -22,6 +22,7 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
+  type UnitySetupProbeResult,
 } from "@t3tools/contracts";
 import {
   connectionStatusTitle,
@@ -222,6 +223,7 @@ import { resolveConnectedEditorForProject } from "../editorPresence/resolveProje
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
+import { fetchUnitySetupProbe } from "../unity/fetchSetupProbe";
 import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
@@ -1523,10 +1525,46 @@ function ChatViewContent(props: ChatViewProps) {
   useEffect(() => {
     setUnityPlayState(null);
   }, [activeProjectRef]);
+  // #92 increment 2: the probe-driven replacement for "always show the
+  // control cluster enabled, discover it doesn't work by clicking Play."
+  // Fetched on mount and whenever the project/resolved-engine changes —
+  // matching the plan's own "on demand" cadence (§1's cadence table: panel
+  // open / Play click / explicit refresh), not a poll. `null` (still
+  // loading, or fetch failed) is treated by `resolveEngineToolbarView` as
+  // "not confirmed ready yet," never as "assume enabled" — see
+  // `EngineToolbarView.unitySetup`'s own doc comment for why that default
+  // direction matters.
+  const [unitySetup, setUnitySetup] = useState<UnitySetupProbeResult | null>(null);
+  useEffect(() => {
+    setUnitySetup(null);
+    if (resolvedEngineType !== "unity") return;
+    const prepared = readPreparedConnection(environmentId);
+    if (!prepared) return;
+    let cancelled = false;
+    fetchUnitySetupProbe({
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((result) => {
+        if (!cancelled) setUnitySetup(result);
+      })
+      .catch((cause) => {
+        // Transport failure or a `presence:read`-scope refusal — leaves
+        // `unitySetup` at `null`, the same "not confirmed ready" state a
+        // slow-but-eventually-successful fetch passes through, so the
+        // toolbar degrades to a disabled Play with a generic "Checking…"
+        // reason rather than a thrown exception or a guessed-enabled state.
+        console.error("Failed to fetch Unity setup status:", cause);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProjectRef, resolvedEngineType, environmentId]);
   const engineToolbarView = resolveEngineToolbarView({
     engineType: resolvedEngineType,
     connectedEditor: connectedProjectEditor,
     unityPlayState,
+    unitySetup,
   });
   const primarySessionState = usePrimarySessionState();
   // Gates ONLY the editor-presence backend (Godot today) — see

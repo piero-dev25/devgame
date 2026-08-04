@@ -199,6 +199,17 @@ function ControlCluster(props: {
   }
 
   if (view.availableActions.length === 0) {
+    // `view.disabledReason` is the specific, backend-supplied reason
+    // (Unity's `UnitySetupProbe`-classified sentence today) — the fallback
+    // ternary below is `"editor-presence"`'s own generic copy, kept for
+    // when nothing more specific is available rather than replaced, since
+    // `disabledReason` is `null` there by design (see `EngineToolbarView`'s
+    // doc comment).
+    const reason =
+      view.disabledReason ??
+      (view.hasConnectedEditor
+        ? "The connected editor hasn't advertised any commands yet."
+        : "No editor is connected for this project.");
     return (
       <Tooltip>
         <TooltipTrigger
@@ -209,11 +220,7 @@ function ControlCluster(props: {
             </Button>
           }
         />
-        <TooltipPopup side="bottom">
-          {view.hasConnectedEditor
-            ? "The connected editor hasn't advertised any commands yet."
-            : "No editor is connected for this project."}
-        </TooltipPopup>
+        <TooltipPopup side="bottom">{reason}</TooltipPopup>
       </Tooltip>
     );
   }

@@ -2,7 +2,7 @@
 // — every input is a plain value the component (or a test) hands in, so the
 // actual decision of "what does this toolbar show right now" is checkable
 // without mounting anything or faking a WebSocket.
-import type { EngineType } from "@t3tools/contracts";
+import type { EngineType, UnitySetupFacts, UnitySetupProbeResult } from "@t3tools/contracts";
 
 import type {
   EditorPresenceCapability,
@@ -87,6 +87,55 @@ export function resolveEngineDispatchBackend(engineType: EngineType): EngineDisp
  * becomes queryable, this constant is what a live value should replace. */
 const UNITY_CLI_ACTIONS: ReadonlyArray<EngineToolbarAction> = ["play", "pause", "stop"];
 
+/**
+ * Whether Unity's Play/Pause/Stop controls may be clicked at all, per #92's
+ * `UnitySetupProbe` — gated on the EXPLICIT facts (Pipeline package
+ * installed, a matched live+reachable instance for this project), never on
+ * `UnitySetupPrimaryState.state`'s position in the S1-S12 taxonomy.
+ *
+ * That taxonomy is ORDERED (Pipeline checks run before the selection-
+ * package check, so a project missing only the optional selection package
+ * lands on S9 rather than S11) purely so ONE state can answer "what's the
+ * single most useful sentence to show right now." Depending on that
+ * ordering here — e.g. "Play is ready once the classifier reaches the
+ * selection check" — would make Play's own readiness an accident of check
+ * order: correct today only because Pipeline happens to be checked first,
+ * silently wrong the day a state is inserted or reordered, with no failing
+ * test to catch it. Reading the facts directly has no such dependency —
+ * team-lead's ruling, 2026-08-04, in response to exactly this design
+ * question. This mirrors (does not call) `classifyUnitySetup`'s own
+ * `liveMatch` computation in `apps/server/src/unity/UnitySetupClassifier.ts`;
+ * keep the two in sync if that logic changes, since the server has no
+ * client-facing "is play ready" field of its own to reuse here — `primary`
+ * answers a different question (see this function's callers).
+ */
+export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
+  return (
+    facts.cliAvailable &&
+    facts.pipelinePackage.installed &&
+    facts.pipelineList?._tag === "ran" &&
+    facts.pipelineList.matched !== null &&
+    facts.pipelineList.matched.isRunning &&
+    facts.pipelineList.matched.isReachable
+  );
+}
+
+/** The message to show when Unity's controls are disabled — `primary`'s own
+ * classified sentence, verbatim (S12 included: the CLI's raw message,
+ * unedited, per plan §1's "never map an unrecognized CLI string onto a
+ * friendly sentence"). This is the ONE place `primary.state` is consulted
+ * for Unity — for the reason shown, never for whether the button is
+ * clickable (see `isUnityPlayReady`'s doc comment). Every variant except
+ * `"S11"` carries `message`; `isUnityPlayReady` returning `false` should
+ * always mean `primary` is one of those (S11 implies the same facts this
+ * function's caller already found ready) — checked with `"message" in`
+ * rather than assumed, since the two are independently computed from the
+ * same facts, not one derived from the other. */
+function unityDisabledReason(setup: UnitySetupProbeResult | null): string | null {
+  if (setup === null) return "Checking Unity's status…";
+  return "message" in setup.primary ? setup.primary.message : null;
+}
+
 export interface EngineToolbarView {
   /** The engine this toolbar targets — override or detected, resolved by
    * the caller via `selectProjectEngineType` before this function runs.
@@ -127,6 +176,15 @@ export interface EngineToolbarView {
    * doc comment — so this is `null` until one exists). Always `null` for
    * `"threejs-script"`. */
   readonly playState: EditorPresencePlayState | null;
+  /** Why the control cluster is disabled (`availableActions.length === 0`)
+   * — `null` when there's nothing backend-specific to say (the component
+   * falls back to its own generic "no editor connected" copy for
+   * `"editor-presence"`) or when the cluster isn't disabled at all. For
+   * `"unity-cli"`, `UnitySetupProbe`'s own classified sentence — see
+   * `unityDisabledReason`'s doc comment for why `primary.message`, never a
+   * paraphrase, and never `primary.state` itself for the enable/disable
+   * decision (see `isUnityPlayReady`). */
+  readonly disabledReason: string | null;
 }
 
 function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): ReadonlySet<string> {
@@ -146,6 +204,17 @@ export function resolveEngineToolbarView(input: {
    * or pass `null` explicitly; do not guess `"stopped"`.
    */
   readonly unityPlayState?: EditorPresencePlayState | null;
+  /**
+   * Only consulted for the `"unity-cli"` backend. `null`/omitted means "no
+   * probe result yet" (still loading, or the caller hasn't wired the fetch
+   * for this render) — treated the SAME as "not ready": Play stays
+   * disabled with a "Checking Unity's status…" placeholder rather than
+   * defaulting to enabled, which was the actual defect (#92) this field
+   * fixes — `UNITY_CLI_ACTIONS` used to render unconditionally, so the only
+   * way a user learned Unity was unreachable was clicking Play and getting
+   * a generic toast.
+   */
+  readonly unitySetup?: UnitySetupProbeResult | null;
 }): EngineToolbarView {
   const { engineType, connectedEditor } = input;
   if (engineType === null) {
@@ -156,6 +225,7 @@ export function resolveEngineToolbarView(input: {
       hasConnectedEditor: false,
       availableActions: [],
       playState: null,
+      disabledReason: null,
     };
   }
 
@@ -169,17 +239,21 @@ export function resolveEngineToolbarView(input: {
       hasConnectedEditor: false,
       availableActions: [],
       playState: null,
+      disabledReason: null,
     };
   }
 
   if (backend === "unity-cli") {
+    const setup = input.unitySetup ?? null;
+    const playReady = setup !== null && isUnityPlayReady(setup.facts);
     return {
       engineType,
       backend,
       requiresPresenceCommandScope: true,
       hasConnectedEditor: false,
-      availableActions: UNITY_CLI_ACTIONS,
+      availableActions: playReady ? UNITY_CLI_ACTIONS : [],
       playState: input.unityPlayState ?? null,
+      disabledReason: playReady ? null : unityDisabledReason(setup),
     };
   }
 
@@ -192,6 +266,7 @@ export function resolveEngineToolbarView(input: {
       hasConnectedEditor: false,
       availableActions: [],
       playState: null,
+      disabledReason: null,
     };
   }
   const actionSet = toActionSet(connectedEditor.capabilities);
@@ -202,6 +277,7 @@ export function resolveEngineToolbarView(input: {
     hasConnectedEditor: true,
     availableActions: CONTROL_ACTION_ORDER.filter((action) => actionSet.has(action)),
     playState: connectedEditor.playState,
+    disabledReason: null,
   };
 }
 
