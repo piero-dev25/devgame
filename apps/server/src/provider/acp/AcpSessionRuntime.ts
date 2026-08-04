@@ -24,6 +24,7 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   collectSessionConfigOptionValues,
   extractModelConfigId,
+  extractToolCallImageDeltas,
   findSessionConfigOption,
   mergeToolCallState,
   parseSessionModeState,
@@ -256,7 +257,7 @@ type AcpStartState =
     }
   | { readonly _tag: "Started"; readonly result: AcpStartedState };
 
-interface AcpAssistantSegmentState {
+export interface AcpAssistantSegmentState {
   readonly nextSegmentIndex: number;
   readonly activeItemId?: string;
 }
@@ -280,6 +281,12 @@ export const make = (
     const eventQueue = yield* Queue.unbounded<AcpSessionRuntimeEvent>();
     const modeStateRef = yield* Ref.make<AcpSessionModeState | undefined>(undefined);
     const toolCallsRef = yield* Ref.make(new Map<string, AcpToolCallState>());
+    // Task #67 tool_call_update path: the dedup guard extractToolCallImageDeltas
+    // relies on — toolCallsRef alone deletes a completed entry, but a
+    // provider that (incorrectly) sends a second terminal notification for
+    // the same toolCallId would start a fresh merge with no `previous`, so
+    // this needs to outlive that deletion.
+    const emittedToolCallImageIdsRef = yield* Ref.make(new Set<string>());
     const assistantItemRuntimeId = yield* crypto.randomUUIDv4.pipe(
       Effect.mapError(
         (cause) =>
@@ -397,6 +404,7 @@ export const make = (
           queue: eventQueue,
           modeStateRef,
           toolCallsRef,
+          emittedToolCallImageIdsRef,
           assistantSegmentRef,
           assistantItemRuntimeId,
           params: notification,
@@ -841,10 +849,11 @@ function configOptionCurrentValueMatches(
   return currentValue.trim() === String(value).trim();
 }
 
-const handleSessionUpdate = ({
+export const handleSessionUpdate = ({
   queue,
   modeStateRef,
   toolCallsRef,
+  emittedToolCallImageIdsRef,
   assistantSegmentRef,
   assistantItemRuntimeId,
   params,
@@ -852,6 +861,14 @@ const handleSessionUpdate = ({
   readonly queue: Queue.Queue<AcpSessionRuntimeEvent>;
   readonly modeStateRef: Ref.Ref<AcpSessionModeState | undefined>;
   readonly toolCallsRef: Ref.Ref<Map<string, AcpToolCallState>>;
+  /**
+   * Task #67 tool_call_update path: outlives `toolCallsRef`'s per-toolCallId
+   * entry (deleted on completion) so a provider sending a second terminal
+   * notification for the same id still can't re-emit its image — see
+   * `extractToolCallImageDeltas`'s doc comment for why status alone isn't
+   * a strong enough guard.
+   */
+  readonly emittedToolCallImageIdsRef: Ref.Ref<Set<string>>;
   readonly assistantSegmentRef: Ref.Ref<AcpAssistantSegmentState>;
   readonly assistantItemRuntimeId: string;
   readonly params: EffectAcpSchema.SessionNotification;
@@ -880,6 +897,43 @@ const handleSessionUpdate = ({
           }
           return [{ previous, merged: nextToolCall }, next] as const;
         });
+
+        // Task #67 tool_call_update path: a tool call result (e.g. the
+        // devgame MCP server's `preview_snapshot` screenshot tool) can carry
+        // an image the same way ImageDelta already handles for the
+        // assistant's own inline content — see extractToolCallImageDeltas's
+        // doc comment for why this only fires on the terminal "completed"
+        // status and only once per toolCallId. Independent of
+        // shouldEmitToolCallUpdate below: that gate is activity-log noise
+        // reduction, unrelated to whether an image should be attached.
+        const alreadyEmittedToolCallImageIds = yield* Ref.get(emittedToolCallImageIdsRef);
+        const toolCallImages = extractToolCallImageDeltas({
+          merged,
+          alreadyEmittedToolCallIds: alreadyEmittedToolCallImageIds,
+        });
+        if (toolCallImages.length > 0) {
+          yield* Ref.update(emittedToolCallImageIdsRef, (ids) => {
+            const next = new Set(ids);
+            next.add(merged.toolCallId);
+            return next;
+          });
+          for (const image of toolCallImages) {
+            const itemId = yield* ensureActiveAssistantSegment({
+              queue,
+              assistantSegmentRef,
+              sessionId: params.sessionId,
+              assistantItemRuntimeId,
+            });
+            yield* Queue.offer(queue, {
+              _tag: "ImageDelta",
+              itemId,
+              data: image.data,
+              mimeType: image.mimeType,
+              rawPayload: event.rawPayload,
+            });
+          }
+        }
+
         if (!shouldEmitToolCallUpdate(previous, merged)) {
           continue;
         }

@@ -64,6 +64,15 @@ export interface AcpToolCallState {
   readonly command?: string;
   readonly detail?: string;
   readonly data: Record<string, unknown>;
+  /**
+   * Task #67 tool_call_update path: the typed sibling of `data.content` —
+   * that field exists for the untyped client-facing activity payload
+   * (ThreadActivity's `data`), so it stays `unknown` on the way back out.
+   * This field keeps the same values as `EffectAcpSchema.ToolCallContent[]`
+   * so `extractToolCallImageDeltas` can read a tool call's image content
+   * (e.g. a screenshot tool's result) without re-validating unknown data.
+   */
+  readonly content?: ReadonlyArray<EffectAcpSchema.ToolCallContent>;
 }
 
 export interface AcpPlanUpdate {
@@ -301,6 +310,61 @@ function extractTextContentFromToolCallContent(
   return chunks.length > 0 ? chunks.join("\n") : undefined;
 }
 
+/**
+ * Task #67 tool_call_update path: `extractTextContentFromToolCallContent`'s
+ * sibling — pulls the image variant instead of the text one out of a tool
+ * call's `content`. Private: only `extractToolCallImageDeltas` calls this,
+ * which is the exported, directly-testable decision point.
+ */
+function extractImageContentsFromToolCallContent(
+  content: ReadonlyArray<EffectAcpSchema.ToolCallContent> | null | undefined,
+): ReadonlyArray<{ readonly data: string; readonly mimeType: string }> {
+  if (!content) return [];
+  const images: Array<{ data: string; mimeType: string }> = [];
+  for (const entry of content) {
+    if (entry.type !== "content") {
+      continue;
+    }
+    const nestedContent = entry.content;
+    if (nestedContent.type !== "image" || nestedContent.data.length === 0) {
+      continue;
+    }
+    images.push({ data: nestedContent.data, mimeType: nestedContent.mimeType });
+  }
+  return images;
+}
+
+/**
+ * Task #67 tool_call_update path: decides which images (if any) a MERGED
+ * tool-call state transition should emit as message attachments — e.g. the
+ * devgame MCP server's `preview_snapshot` screenshot tool result. Two
+ * deliberate gates, both required:
+ *
+ * - Terminal status only. An in-progress tool call's content can still
+ *   change, and ACP updates accumulate (see `mergeToolCallState`), so
+ *   content present on an early update would otherwise be visible — and
+ *   actionable — well before the tool call actually finishes.
+ * - Not already emitted. `merged.content` persists across every update for
+ *   a toolCallId once set (same accumulation), so gating on status alone
+ *   would re-emit the same image on every later "completed" state a caller
+ *   sees for that id — e.g. a provider that (incorrectly) sends more than
+ *   one terminal notification for the same tool call. The caller
+ *   (AcpSessionRuntime.ts) is responsible for recording `merged.toolCallId`
+ *   into the set it passes back in on the next call.
+ */
+export function extractToolCallImageDeltas(input: {
+  readonly merged: AcpToolCallState;
+  readonly alreadyEmittedToolCallIds: ReadonlySet<string>;
+}): ReadonlyArray<{ readonly data: string; readonly mimeType: string }> {
+  if (input.merged.status !== "completed") {
+    return [];
+  }
+  if (input.alreadyEmittedToolCallIds.has(input.merged.toolCallId)) {
+    return [];
+  }
+  return extractImageContentsFromToolCallContent(input.merged.content);
+}
+
 function normalizeToolKind(kind: unknown): string | undefined {
   return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;
 }
@@ -391,6 +455,7 @@ function makeToolCallState(
     ...(status ? { status } : {}),
     ...(command ? { command } : {}),
     ...(presentation?.detail ? { detail: presentation.detail } : {}),
+    ...(input.content != null ? { content: input.content } : {}),
     data,
   };
 }
@@ -426,6 +491,11 @@ export function mergeToolCallState(
   const status = next.status ?? previous?.status;
   const command = next.command ?? previous?.command;
   const detail = next.detail ?? previous?.detail;
+  // Task #67 tool_call_update path: content can arrive on an earlier update
+  // and be absent from the completing one — carry it forward the same way
+  // title/detail/command already do, so a tool call's image survives to the
+  // terminal status transition that extractToolCallImageDeltas gates on.
+  const content = next.content ?? previous?.content;
   return {
     toolCallId: next.toolCallId,
     ...(kind ? { kind } : {}),
@@ -433,6 +503,7 @@ export function mergeToolCallState(
     ...(status ? { status } : {}),
     ...(command ? { command } : {}),
     ...(detail ? { detail } : {}),
+    ...(content ? { content } : {}),
     data: {
       ...previous?.data,
       ...next.data,

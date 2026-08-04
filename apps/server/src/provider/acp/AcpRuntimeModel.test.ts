@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
 import {
+  type AcpToolCallState,
   extractModelConfigId,
+  extractToolCallImageDeltas,
   mergeToolCallState,
   parsePermissionRequest,
   parseSessionModeState,
@@ -185,6 +187,20 @@ describe("AcpRuntimeModel", () => {
           status: "pending",
           command: "bun run typecheck",
           detail: "bun run typecheck",
+          // Task #67 tool_call_update path: the typed sibling of
+          // `data.content` below — same input, but preserved as
+          // `ToolCallContent[]` rather than an untyped diagnostic blob, so
+          // extractToolCallImageDeltas can read it without re-validating
+          // unknown data.
+          content: [
+            {
+              type: "content",
+              content: {
+                type: "text",
+                text: "Running checks",
+              },
+            },
+          ],
           data: {
             toolCallId: "tool-1",
             kind: "execute",
@@ -251,8 +267,106 @@ describe("AcpRuntimeModel", () => {
         title: "Ran command",
         detail: "bun run typecheck",
         command: "bun run typecheck",
+        // The completing update carries no `content` of its own — proves
+        // content survives the merge from the earlier "tool_call" event
+        // rather than being dropped once the tool call finishes.
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Running checks",
+            },
+          },
+        ],
       });
     }
+  });
+
+  // Task #67 tool_call_update path: a tool call result (e.g. the devgame
+  // MCP server's `preview_snapshot` screenshot tool, apps/server/src/mcp/
+  // McpHttpServer.ts) can carry an image the same way an assistant's own
+  // inline content can — ACP's ToolCallContent has an image variant nested
+  // under type "content", structurally identical to ContentBlock's. This is
+  // the pure decision function AcpSessionRuntime.ts calls: which images (if
+  // any) a merged tool-call state transition should emit, gated to the
+  // terminal "completed" status and guarded against a repeat for the same
+  // toolCallId.
+  describe("extractToolCallImageDeltas", () => {
+    const imageToolCall = (overrides: Partial<AcpToolCallState> = {}): AcpToolCallState => ({
+      toolCallId: "tool-screenshot-1",
+      status: "completed",
+      data: {},
+      content: [
+        {
+          type: "content",
+          content: {
+            type: "image",
+            data: "iVBORw0KGgo=",
+            mimeType: "image/png",
+          },
+        },
+      ],
+      ...overrides,
+    });
+
+    it("extracts an image from a completed tool call's content", () => {
+      const images = extractToolCallImageDeltas({
+        merged: imageToolCall(),
+        alreadyEmittedToolCallIds: new Set(),
+      });
+
+      expect(images).toEqual([{ data: "iVBORw0KGgo=", mimeType: "image/png" }]);
+    });
+
+    it("emits nothing for a tool call that has not reached a terminal status", () => {
+      const images = extractToolCallImageDeltas({
+        merged: imageToolCall({ status: "inProgress" }),
+        alreadyEmittedToolCallIds: new Set(),
+      });
+
+      expect(images).toEqual([]);
+    });
+
+    it("emits nothing for a tool call with no image content", () => {
+      const images = extractToolCallImageDeltas({
+        merged: imageToolCall({
+          content: [{ type: "content", content: { type: "text", text: "exit code 0" } }],
+        }),
+        alreadyEmittedToolCallIds: new Set(),
+      });
+
+      expect(images).toEqual([]);
+    });
+
+    it("drops an image entry with empty data", () => {
+      const images = extractToolCallImageDeltas({
+        merged: imageToolCall({
+          content: [
+            { type: "content", content: { type: "image", data: "", mimeType: "image/png" } },
+          ],
+        }),
+        alreadyEmittedToolCallIds: new Set(),
+      });
+
+      expect(images).toEqual([]);
+    });
+
+    // This is the dedup guard team-lead asked to be mutation-proven: the
+    // same tool call reaching "completed" a second time (a provider sending
+    // a duplicate terminal notification) must not re-emit — otherwise the
+    // same screenshot would be persisted and attached twice. Assert the
+    // count, not just presence, per the same lesson task #74 already
+    // established: a weaker assertion here would pass even with the guard
+    // deleted.
+    it("does not re-emit for a toolCallId already recorded as emitted", () => {
+      const images = extractToolCallImageDeltas({
+        merged: imageToolCall(),
+        alreadyEmittedToolCallIds: new Set(["tool-screenshot-1"]),
+      });
+
+      expect(images).toHaveLength(0);
+    });
   });
 
   it("trims padded current mode updates before emitting a mode change", () => {
