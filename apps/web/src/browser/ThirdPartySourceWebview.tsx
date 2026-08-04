@@ -158,6 +158,19 @@ export function ThirdPartySourceWebview(props: { readonly source: ThirdPartySour
     );
   }
 
+  // KNOWN GAP, not fixed here: `config` is `null` for two still-undifferentiated
+  // reasons — `thirdPartyBrowserWebviewConfigAtom` hasn't resolved yet (normal,
+  // brief, on every mount), or `getThirdPartyBrowserConfig()` failed
+  // (`ThirdPartyBrowserWebviewConfigLoadError`, real, would otherwise persist).
+  // `useThirdPartyBrowserWebviewConfig()` collapses both to `null` via
+  // `Option.getOrNull(AsyncResult.value(result))`, discarding which one
+  // happened, so this branch can't tell a slow load from a broken one — a
+  // load failure currently reads to the user as an indefinitely blank panel,
+  // same as mid-load. Distinguishing them needs surfacing
+  // `AsyncResult`'s own loading/failure states out of
+  // `thirdPartyBrowserWebviewConfigState.ts`, not a check addable at this
+  // call site — left as a scoped follow-up, not fixed in the pass that added
+  // the `previewBridge === null` branch above it.
   if (!config) return null;
 
   return (
