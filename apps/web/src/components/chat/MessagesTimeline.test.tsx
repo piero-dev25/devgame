@@ -405,6 +405,50 @@ describe("MessagesTimeline", () => {
     expect(onAnchorSizeChanged).toHaveBeenCalledWith(secondEntry.message.id, 240);
   });
 
+  // Task #67: agents cannot put an image in a thread. This is the RENDERER
+  // half of the gap — an assistant message carrying an attachment must
+  // actually render a visible `<img>`. Same `ChatAttachment` shape the
+  // "anchors a sent attachment message" test above uses for a USER
+  // message, but with `role: "assistant"` — proving AssistantTimelineRow,
+  // not just UserTimelineRow, reads `message.attachments`.
+  it("renders a visible image for an assistant message carrying an attachment", () => {
+    const assistantMessageId = MessageId.make("message-assistant-with-image");
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-assistant-with-image",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: assistantMessageId,
+              role: "assistant",
+              text: "Here's the captured Game View.",
+              turnId: null,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: false,
+              attachments: [
+                {
+                  type: "image" as const,
+                  id: "attachment-game-view",
+                  name: "game-view.png",
+                  mimeType: "image/png",
+                  sizeBytes: 1,
+                  previewUrl: "data:image/png;base64,iVBORw0KGgo=",
+                },
+              ],
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain('src="data:image/png;base64,iVBORw0KGgo="');
+    expect(markup).toContain('alt="game-view.png"');
+  });
+
   it("renders collapse controls for long user messages", () => {
     const markup = renderToStaticMarkup(
       <MessagesTimeline

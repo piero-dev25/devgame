@@ -1135,6 +1135,10 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           messageId: command.messageId,
           role: "assistant",
           text: command.delta,
+          // Task #67: pass through an image the assistant emitted inline in
+          // its own ACP content stream (already persisted to disk by the
+          // ingestion layer before this command was dispatched).
+          ...(command.attachments ? { attachments: command.attachments } : {}),
           turnId: command.turnId ?? null,
           streaming: true,
           createdAt: command.createdAt,

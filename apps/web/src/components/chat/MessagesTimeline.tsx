@@ -869,6 +869,56 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
   );
 });
 
+/**
+ * Task #67: factored out of `UserTimelineRow` (the only caller until now)
+ * so `AssistantTimelineRow` can render an attachment the exact same way —
+ * `ChatAttachment` was never role-restricted, only the RENDER path was.
+ * Same grid, same zoom-to-preview click handler via `ctx.onImageExpand`,
+ * same missing-preview-URL fallback. No behavior change for the user
+ * message case; this is a pure extraction.
+ */
+function MessageImageGrid({
+  images,
+}: {
+  images: readonly NonNullable<TimelineMessage["attachments"]>[number][];
+}) {
+  const ctx = use(TimelineRowCtx);
+  if (images.length === 0) return null;
+  return (
+    <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
+      {images.map((image) => (
+        <div
+          key={image.id}
+          className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+        >
+          {image.previewUrl ? (
+            <button
+              type="button"
+              className="h-full w-full cursor-zoom-in"
+              aria-label={`Preview ${image.name}`}
+              onClick={() => {
+                const preview = buildExpandedImagePreview(images, image.id);
+                if (!preview) return;
+                ctx.onImageExpand(preview);
+              }}
+            >
+              <img
+                src={image.previewUrl}
+                alt={image.name}
+                className="block h-auto max-h-[220px] w-full object-cover"
+              />
+            </button>
+          ) : (
+            <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
+              {image.name}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const userImages = row.message.attachments ?? [];
@@ -902,39 +952,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   return (
     <div className="group flex flex-col items-end gap-1">
       <div className="relative max-w-[80%] rounded-2xl bg-accent p-3">
-        {regularImages.length > 0 && (
-          <div className="mb-2 grid max-w-[420px] grid-cols-2 gap-2">
-            {regularImages.map((image: NonNullable<TimelineMessage["attachments"]>[number]) => (
-              <div
-                key={image.id}
-                className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
-              >
-                {image.previewUrl ? (
-                  <button
-                    type="button"
-                    className="h-full w-full cursor-zoom-in"
-                    aria-label={`Preview ${image.name}`}
-                    onClick={() => {
-                      const preview = buildExpandedImagePreview(regularImages, image.id);
-                      if (!preview) return;
-                      ctx.onImageExpand(preview);
-                    }}
-                  >
-                    <img
-                      src={image.previewUrl}
-                      alt={image.name}
-                      className="block h-auto max-h-[220px] w-full object-cover"
-                    />
-                  </button>
-                ) : (
-                  <div className="flex min-h-[72px] items-center justify-center px-2 py-3 text-center text-[11px] text-muted-foreground/70">
-                    {image.name}
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
+        <MessageImageGrid images={regularImages} />
         {previewAnnotations.map((annotation, index) => (
           <UserMessagePreviewAnnotationCard
             key={annotation.id}
@@ -1030,10 +1048,18 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  // Task #67: the renderer half of "agents cannot put an image in a
+  // thread" — `row.message.attachments` was already role-agnostic data
+  // (`ChatAttachment`/`OrchestrationMessage.attachments` have no role
+  // gate); this row simply never read it. Same grid UserTimelineRow uses,
+  // same click-to-zoom via `ctx.onImageExpand` — see MessageImageGrid's
+  // own doc comment.
+  const assistantImages = row.message.attachments ?? [];
 
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
+        <MessageImageGrid images={assistantImages} />
         <ChatMarkdown
           text={messageText}
           cwd={ctx.markdownCwd}

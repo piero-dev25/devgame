@@ -85,6 +85,13 @@ const RuntimeContentStreamKind = Schema.Literals([
   "plan_text",
   "command_output",
   "file_change_output",
+  // Task #67: an image ACP's ContentBlock union carries as part of the
+  // assistant's own content stream (`agent_message_chunk` with
+  // `content.type === "image"`) — see AcpRuntimeModel.ts's "ImageDelta"
+  // parsed event, which this streamKind exists to carry through to
+  // ProviderRuntimeIngestion.ts. A sibling of "assistant_text", not a
+  // replacement for it — the two can interleave within one response.
+  "assistant_image",
   "unknown",
 ]);
 export type RuntimeContentStreamKind = typeof RuntimeContentStreamKind.Type;
@@ -415,6 +422,13 @@ const ContentDeltaPayload = Schema.Struct({
   delta: Schema.String,
   contentIndex: Schema.optional(Schema.Int),
   summaryIndex: Schema.optional(Schema.Int),
+  // Task #67: populated only when `streamKind === "assistant_image"`.
+  // `delta` stays "" for that case rather than repurposed to carry the
+  // base64 payload — keeping `delta` meaning "text to append" unconditionally
+  // is what let every existing `streamKind === "assistant_text"` consumer
+  // stay untouched by this change.
+  attachmentData: Schema.optional(Schema.String),
+  attachmentMimeType: Schema.optional(Schema.String),
 });
 export type ContentDeltaPayload = typeof ContentDeltaPayload.Type;
 

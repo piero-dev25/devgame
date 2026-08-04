@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
+  makeAcpImageDeltaEvent,
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
@@ -131,6 +132,32 @@ describe("AcpCoreRuntimeEvents", () => {
       itemId: "assistant:session-1:segment:0",
       payload: {
         delta: "hello",
+      },
+    });
+
+    // Task #67: `makeAcpImageDeltaEvent` is `makeAcpContentDeltaEvent`'s
+    // sibling for the "ImageDelta" parsed event (AcpRuntimeModel.ts) — an
+    // image ACP's ContentBlock union carries inline in the assistant's own
+    // content stream.
+    expect(
+      makeAcpImageDeltaEvent({
+        stamp,
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: "thread-1" as never,
+        turnId,
+        itemId: "assistant:session-1:segment:0",
+        data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toMatchObject({
+      type: "content.delta",
+      itemId: "assistant:session-1:segment:0",
+      payload: {
+        streamKind: "assistant_image",
+        delta: "",
+        attachmentData: "iVBORw0KGgo=",
+        attachmentMimeType: "image/png",
       },
     });
 

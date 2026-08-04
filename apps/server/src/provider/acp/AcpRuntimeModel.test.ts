@@ -336,6 +336,52 @@ describe("AcpRuntimeModel", () => {
     ]);
   });
 
+  // Task #67: the producer half of "agents cannot put an image in a
+  // thread" — ACP's `ContentBlock` union has an "image" variant
+  // (`{type:"image", data, mimeType}`), and this parser was the exact
+  // place nobody read it: the "agent_message_chunk" case only ever
+  // checked `content.type === "text"`, silently dropping anything else.
+  it("parses an image content block from agent_message_chunk into an ImageDelta event", () => {
+    const rawPayload = {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "image",
+          data: "iVBORw0KGgo=",
+          mimeType: "image/png",
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification;
+
+    const imageResult = parseSessionUpdateEvent(rawPayload);
+
+    expect(imageResult.events).toEqual([
+      {
+        _tag: "ImageDelta",
+        data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+        rawPayload,
+      },
+    ]);
+  });
+
+  it("drops an image content block with empty data rather than emitting a useless attachment", () => {
+    const imageResult = parseSessionUpdateEvent({
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: {
+          type: "image",
+          data: "",
+          mimeType: "image/png",
+        },
+      },
+    } satisfies EffectAcpSchema.SessionNotification);
+
+    expect(imageResult.events).toEqual([]);
+  });
+
   it("keeps permission request parsing compatible with loose extension payloads", () => {
     const request = parsePermissionRequest({
       sessionId: "session-1",

@@ -108,6 +108,22 @@ export type AcpParsedSessionEvent =
       readonly itemId?: string;
       readonly text: string;
       readonly rawPayload: unknown;
+    }
+  | {
+      /**
+       * Task #67: the producer half of "agents cannot put an image in a
+       * thread" — ACP's `ContentBlock` union's "image" variant
+       * (`{type:"image", data, mimeType}`), parsed from an
+       * "agent_message_chunk" update the same way `ContentDelta` parses
+       * its "text" sibling. `data` is the ACP-supplied base64 payload,
+       * unmodified — decoding/persisting it to disk is the ingestion
+       * layer's job (see ProviderRuntimeIngestion.ts), not the parser's.
+       */
+      readonly _tag: "ImageDelta";
+      readonly itemId?: string;
+      readonly data: string;
+      readonly mimeType: string;
+      readonly rawPayload: unknown;
     };
 
 type AcpSessionSetupResponse =
@@ -569,6 +585,13 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         events.push({
           _tag: "ContentDelta",
           text: upd.content.text,
+          rawPayload: params,
+        });
+      } else if (upd.content.type === "image" && upd.content.data.length > 0) {
+        events.push({
+          _tag: "ImageDelta",
+          data: upd.content.data,
+          mimeType: upd.content.mimeType,
           rawPayload: params,
         });
       }

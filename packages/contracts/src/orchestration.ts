@@ -925,6 +925,14 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   delta: Schema.String,
+  /**
+   * Task #67: an image the assistant emitted inline in its own content
+   * stream (ACP `ContentBlock` type "image" on `agent_message_chunk`),
+   * already persisted to disk by the ingestion layer before this command is
+   * dispatched. `delta` is typically "" alongside this — an image delta
+   * carries no text of its own.
+   */
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });

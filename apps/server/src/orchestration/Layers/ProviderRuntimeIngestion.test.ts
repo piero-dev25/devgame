@@ -950,6 +950,62 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  // Task #67 producer half: an image ACP's ContentBlock union carries inline
+  // in the assistant's own content stream (agent_message_chunk) reaches this
+  // layer as a "content.delta" event with streamKind "assistant_image" (see
+  // AcpRuntimeModel.ts's ImageDelta parsed event and makeAcpImageDeltaEvent).
+  // Nothing downstream of this layer needs a change: decider.ts and
+  // ProjectionPipeline.ts already carry `attachments` through generically.
+  it("persists an assistant_image content delta as a message attachment", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-image-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-2"),
+      itemId: asItemId("item-1"),
+      payload: {
+        streamKind: "assistant_image",
+        delta: "",
+        attachmentData: "iVBORw0KGgo=",
+        attachmentMimeType: "image/png",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-message-image-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-2"),
+      itemId: asItemId("item-1"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-1" && (message.attachments?.length ?? 0) > 0,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-1",
+    );
+    expect(message?.attachments).toHaveLength(1);
+    expect(message?.attachments?.[0]).toMatchObject({
+      type: "image",
+      mimeType: "image/png",
+      sizeBytes: 8,
+    });
+  });
+
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

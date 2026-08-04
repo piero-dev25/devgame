@@ -39,6 +39,9 @@ import {
 } from "../Services/ProviderRuntimeIngestion.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { ServerConfig } from "../../config.ts";
+import { inferImageExtension } from "../../imageMime.ts";
+import { persistAssistantImageAttachment } from "../AssistantImageAttachmentPersistence.ts";
 
 const providerTurnKey = (threadId: ThreadId, turnId: TurnId) => `${threadId}:${turnId}`;
 const providerTaskKey = (threadId: ThreadId, taskId: string) => `${threadId}:${taskId}`;
@@ -694,6 +697,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const projectionTurnRepository = yield* ProjectionTurnRepository;
   const serverSettingsService = yield* ServerSettingsService;
+  const serverConfig = yield* ServerConfig;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
     crypto.randomUUIDv4.pipe(
       Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
@@ -1496,6 +1500,70 @@ const make = Effect.gen(function* () {
             threadId: thread.id,
             messageId: assistantMessageId,
             delta: assistantDelta,
+            ...(turnId ? { turnId } : {}),
+            createdAt: now,
+          });
+        }
+      }
+
+      // Task #67 producer half: an image the assistant emitted inline in its
+      // own ACP content stream (agent_message_chunk → ImageDelta →
+      // makeAcpImageDeltaEvent, see AcpRuntimeModel.ts / AcpCoreRuntimeEvents.ts).
+      // Unlike text, an image is never buffered — there's nothing to
+      // accumulate — and a bad payload from a misbehaving provider drops the
+      // image (logged) rather than failing the assistant's turn over it;
+      // that's the opposite of Normalizer.ts's user-upload path, which
+      // rejects the whole client command on the same kind of error.
+      const assistantImage =
+        event.type === "content.delta" && event.payload.streamKind === "assistant_image"
+          ? {
+              data: event.payload.attachmentData,
+              mimeType: event.payload.attachmentMimeType,
+            }
+          : undefined;
+
+      if (assistantImage?.data && assistantImage.mimeType) {
+        const turnId = toTurnId(event.turnId);
+        const assistantMessageId = yield* getOrCreateAssistantMessageId({
+          threadId: thread.id,
+          event,
+          ...(turnId ? { turnId } : {}),
+        });
+        if (turnId) {
+          yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+        }
+
+        // ACP's image ContentBlock carries no filename, only data/mimeType/an
+        // optional resource `uri` we don't thread through — synthesize one.
+        const attachmentName = `assistant-image${inferImageExtension({ mimeType: assistantImage.mimeType })}`;
+
+        const persistedAttachment = yield* persistAssistantImageAttachment({
+          threadId: thread.id,
+          attachmentsDir: serverConfig.attachmentsDir,
+          name: attachmentName,
+          mimeType: assistantImage.mimeType,
+          base64Data: assistantImage.data,
+        }).pipe(
+          Effect.catchTag("AssistantImageAttachmentPersistError", (error) =>
+            Effect.logWarning(
+              "provider runtime ingestion dropped an unpersistable assistant image",
+              {
+                eventId: event.eventId,
+                eventType: event.type,
+                detail: error.detail,
+              },
+            ).pipe(Effect.as(undefined)),
+          ),
+        );
+
+        if (persistedAttachment) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.message.assistant.delta",
+            commandId: yield* providerCommandId(event, "assistant-image-delta"),
+            threadId: thread.id,
+            messageId: assistantMessageId,
+            delta: "",
+            attachments: [persistedAttachment],
             ...(turnId ? { turnId } : {}),
             createdAt: now,
           });

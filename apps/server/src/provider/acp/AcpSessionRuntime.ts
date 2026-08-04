@@ -909,6 +909,23 @@ const handleSessionUpdate = ({
         });
         continue;
       }
+      if (event._tag === "ImageDelta") {
+        // Task #67: same assistant-segment lifecycle `ContentDelta` gets —
+        // an image arriving as the first content in a response (before any
+        // text) must still open an assistant item, or it has nowhere to
+        // attach once it reaches the orchestration layer.
+        const itemId = yield* ensureActiveAssistantSegment({
+          queue,
+          assistantSegmentRef,
+          sessionId: params.sessionId,
+          assistantItemRuntimeId,
+        });
+        yield* Queue.offer(queue, {
+          ...event,
+          itemId,
+        });
+        continue;
+      }
       yield* Queue.offer(queue, event);
     }
   });
