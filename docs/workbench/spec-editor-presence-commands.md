@@ -43,7 +43,7 @@ Retrofitting a narrower scope after plugins are in the field is a coordinated
 release, not a patch.
 
 **And it must be mintable in the same change.** A scope excluded from every
-default grant is correct; a scope excluded from every grant *and* from every
+default grant is correct; a scope excluded from every grant _and_ from every
 path that could request one is inert — a control that has never been
 exercisable, plus a doc comment describing a way to obtain it that does not
 exist. The first version of this shipped exactly that: four independent
@@ -51,6 +51,7 @@ chokepoints, and the only way to construct a session holding it was to fabricate
 one inside a test.
 
 The minting path is an explicit request, never a default:
+
 - an entry in the token-exchange scope allowlist, so it CAN be asked for
 - an option in the pairing UI, so a human consciously grants "allow this client
   to control my editor"
