@@ -100,6 +100,25 @@ export const AuthRelayWriteScope = "relay:write" as const;
  * place for it.
  */
 export const AuthPresenceCommandScope = "presence:command" as const;
+/**
+ * Authorizes READ-ONLY inspection of Unity's setup state — CLI presence,
+ * `packages-lock.json`/`manifest.json` contents, `Temp/UnityLockfile`,
+ * `unity pipeline list --json` — see `UnitySetupProbeRoute.ts` and
+ * docs/workbench/plan-setup-integration.md's §1 "New route and auth scope
+ * (F6)". Deliberately its OWN scope, sibling to `AuthPresenceCommandScope`,
+ * not a reuse: `presence:command` is desktop-owner-only ("make the user's
+ * editor execute code") and excluded from `AuthStandardClientScopes` for
+ * exactly that reason — reusing it here would make the browser app's own
+ * session unable to call the very probe its own settings panel needs to
+ * render. This scope authorizes no code execution and no project mutation
+ * — it only reads state that already exists on disk or that `pipeline
+ * list` already reports — so it belongs in `AuthStandardClientScopes`
+ * (below), same as the existing `<domain>:read` / `<domain>:write` split
+ * where a domain's `:read` scope is granted more broadly than its write
+ * counterpart (`AuthRelayReadScope` is standard, `AuthRelayWriteScope` is
+ * administrative-only — see that scope's own use below).
+ */
+export const AuthPresenceReadScope = "presence:read" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -110,6 +129,7 @@ export const AuthEnvironmentScope = Schema.Literals([
   AuthRelayReadScope,
   AuthRelayWriteScope,
   AuthPresenceCommandScope,
+  AuthPresenceReadScope,
 ]);
 export type AuthEnvironmentScope = typeof AuthEnvironmentScope.Type;
 export const AuthEnvironmentScopes = Schema.Array(AuthEnvironmentScope);
@@ -156,6 +176,7 @@ export const AuthStandardClientScopes = [
   AuthTerminalOperateScope,
   AuthReviewWriteScope,
   AuthRelayReadScope,
+  AuthPresenceReadScope,
 ] as const;
 export const AuthAdministrativeScopes = [
   ...AuthStandardClientScopes,

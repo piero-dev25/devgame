@@ -81,6 +81,7 @@ it.layer(NodeServices.layer)("PairingGrantStore.layer", (it) => {
         "terminal:operate",
         "review:write",
         "relay:read",
+        "presence:read",
       ]);
       expect(first.subject).toBe("one-time-token");
       expect(first.label).toBe("Julius iPhone");

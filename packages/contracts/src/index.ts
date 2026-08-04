@@ -31,3 +31,4 @@ export * from "./resourceTelemetry.ts";
 export * from "./rpc.ts";
 export * from "./editorPresence.ts";
 export * from "./unity.ts";
+export * from "./unitySetup.ts";

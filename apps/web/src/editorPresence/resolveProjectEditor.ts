@@ -2,6 +2,8 @@
 // reason `resolveFilesDockPanelView.ts` is: it needs only TYPES from the
 // wider app (never a runtime import), so a test can exercise it without
 // pulling in the Web Worker chain a component import would drag along.
+import { normalizeWorkspaceRoot } from "@t3tools/shared/workspaceRootPath";
+
 import type { EditorPresenceEntry } from "./protocol";
 
 /**
@@ -47,13 +49,12 @@ export function resolveConnectedEditorForProject(
 }
 
 /**
- * Exported so every workspace-root comparison in this module family shares
- * ONE normalization rule. `store.ts`'s `selectEditorPresenceChipsForProject`
- * (task #71) is the second caller: a second, subtly-different normalizer
- * would let the Play/Stop toolbar and the chip attachment disagree about
- * whether an editor belongs to a project — precisely the class of bug #71
- * already was.
+ * Re-exported for existing callers (`store.ts`'s
+ * `selectEditorPresenceChipsForProject`, task #71) — the real definition
+ * now lives in `@t3tools/shared/workspaceRootPath` so a SERVER-side caller
+ * (`UnitySetupProbe.ts`) can share the identical rule instead of writing a
+ * third, subtly-different comparison site — precisely the class of bug #71
+ * already was, just across the client/server boundary this time. See that
+ * module's own doc comment for the full reasoning.
  */
-export function normalizeWorkspaceRoot(root: string): string {
-  return root.length > 1 && root.endsWith("/") ? root.slice(0, -1) : root;
-}
+export { normalizeWorkspaceRoot };

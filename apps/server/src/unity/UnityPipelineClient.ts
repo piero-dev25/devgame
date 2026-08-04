@@ -135,7 +135,10 @@ function isNotReadyMessage(message: string): boolean {
 
 interface UnityCliEnvelope {
   readonly success: boolean;
-  readonly data: { readonly result: unknown } | null;
+  /** `data`'s own shape is NOT common across subcommands — see the note
+   * below. Left as `unknown`; each caller narrows it for the specific
+   * subcommand it ran. */
+  readonly data: unknown;
   readonly errors: ReadonlyArray<{ readonly code: string; readonly message: string }>;
 }
 
@@ -143,12 +146,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** Parses the `unity ... --json` envelope common to every subcommand this
- * module calls: `{ success, command, data: { result, ... } | null, errors,
- * warnings }`. Returns `null` for anything that doesn't even look like the
- * envelope (unparseable JSON, or missing the fields every real response
- * has) — the caller treats that the same as a generic `error`, since a
- * shape this far off is not something to guess at. */
+/** Parses the outer `unity ... --json` envelope common to every subcommand
+ * this module calls: `{ success, command, data, errors, warnings }`.
+ * Returns `null` for anything that doesn't even look like the envelope
+ * (unparseable JSON, or missing the fields every real response has) — the
+ * caller treats that the same as a generic `error`, since a shape this far
+ * off is not something to guess at.
+ *
+ * `data`'s OWN inner shape is deliberately NOT validated here — it used to
+ * be (a hardcoded `{ result: unknown }` wrapper), which was correct for
+ * `editor_status`/`editor_play`/`editor_stop`/`editor_pause` (verified live,
+ * per this module's doc comment) but WRONG for `pipeline list`: a real
+ * captured sample (2026-08-04, `Mafia Game`, a live Editor) has
+ * `data: { instances, latestVersion, summary }` directly, with no nested
+ * `result` key at all. Forcing that shape through the old `data.result`
+ * check made every real `pipeline list` response fail to parse. Each caller
+ * now pulls what it needs from `data` itself — `extractEnvelopeResult` for
+ * the `{ result }`-shaped commands, `parsePipelineListResult` directly for
+ * `pipeline list`. */
 function parseUnityCliEnvelope(raw: string): UnityCliEnvelope | null {
   let parsed: unknown;
   try {
@@ -159,14 +174,16 @@ function parseUnityCliEnvelope(raw: string): UnityCliEnvelope | null {
   if (!isRecord(parsed) || typeof parsed.success !== "boolean" || !Array.isArray(parsed.errors)) {
     return null;
   }
-  const data =
-    isRecord(parsed.data) && "result" in parsed.data
-      ? { result: parsed.data.result }
-      : parsed.data === null
-        ? null
-        : undefined;
-  if (data === undefined) return null;
-  return { success: parsed.success, data, errors: parsed.errors };
+  return { success: parsed.success, data: parsed.data, errors: parsed.errors };
+}
+
+/** Pulls `data.result` for the subcommands verified to nest their payload
+ * that way (`editor_status`/`editor_play`/`editor_stop`/`editor_pause`).
+ * `undefined` when `data` isn't a record or has no `result` key at all —
+ * distinct from a legitimate `null`/other value AT `result`, which passes
+ * through unchanged for the caller's own parser to judge. */
+function extractEnvelopeResult(data: unknown): unknown {
+  return isRecord(data) && "result" in data ? data.result : undefined;
 }
 
 const UNITY_PLAY_MODES: ReadonlySet<string> = new Set<UnityPlayMode>([
@@ -174,6 +191,111 @@ const UNITY_PLAY_MODES: ReadonlySet<string> = new Set<UnityPlayMode>([
   "playing",
   "paused",
 ]);
+
+/** One instance's worth of `unity pipeline list --json`'s own
+ * `data.instances[]` entries. VERIFIED against a real captured sample
+ * (2026-08-04, `Mafia Game`, a live Editor with no Pipeline package
+ * installed — see docs/workbench/plan-setup-integration.md §1 and this
+ * module's own doc comment): `isRunning` / `hasPipelinePackage` /
+ * `pipelineServer.isReachable` / `pipelineVersion` / `updateAvailable` /
+ * `safeMode`, plus `projectPath`/`pid` for matching and liveness. Two
+ * corrections that sample made against the earlier, prose-reconstructed
+ * version of this interface: `data` has no nested `result` wrapper for this
+ * subcommand (see `parseUnityCliEnvelope`'s doc comment), and
+ * `latestVersion` is NOT one of these per-instance fields — it lives
+ * alongside `instances` in `data` itself (a CLI-wide fact, not an
+ * instance-specific one), so it's returned separately by
+ * `parsePipelineListResult` below rather than on this type.
+ * `parsePipelineListInstance` still fails safe on a shape mismatch (falls
+ * through to `cliError`, the same "don't guess at an unfamiliar shape"
+ * posture as `parseEditorStatusResult`) — one captured sample from one CLI
+ * version is not a contract, so a future field this parser doesn't
+ * recognize still degrades to S12's verbatim-CLI-message passthrough
+ * rather than a wrong classification. */
+export interface UnityPipelineListInstance {
+  readonly projectPath: string;
+  readonly pid: number | null;
+  readonly isRunning: boolean;
+  readonly hasPipelinePackage: boolean;
+  readonly isReachable: boolean;
+  readonly pipelineVersion: string | null;
+  readonly updateAvailable: boolean | null;
+  readonly safeMode: boolean | null;
+}
+
+/** `unity pipeline list --json`'s full parsed result: every instance PLUS
+ * the CLI-wide `latestVersion` fact that sits alongside `instances` in
+ * `data`, not inside any one instance. */
+export interface UnityPipelineListResult {
+  readonly instances: ReadonlyArray<UnityPipelineListInstance>;
+  readonly latestVersion: string | null;
+}
+
+function isNullOr<A>(value: unknown, check: (value: unknown) => value is A): value is A | null {
+  return value === null || check(value);
+}
+const isString = (value: unknown): value is string => typeof value === "string";
+const isNumber = (value: unknown): value is number => typeof value === "number";
+const isBoolean = (value: unknown): value is boolean => typeof value === "boolean";
+
+/** Parses one entry of `pipeline list`'s `instances` array. `null` on
+ * anything that doesn't have every field this module reads — same
+ * "don't guess" posture as `parseEditorStatusResult` above. Deliberately
+ * does NOT read `latestVersion` — see `UnityPipelineListInstance`'s doc
+ * comment for why that field isn't per-instance at all. */
+function parsePipelineListInstance(entry: unknown): UnityPipelineListInstance | null {
+  if (!isRecord(entry)) return null;
+  const {
+    projectPath,
+    pid,
+    isRunning,
+    hasPipelinePackage,
+    pipelineServer,
+    pipelineVersion,
+    updateAvailable,
+    safeMode,
+  } = entry;
+  if (typeof projectPath !== "string") return null;
+  if (!isNullOr(pid, isNumber)) return null;
+  if (typeof isRunning !== "boolean") return null;
+  if (typeof hasPipelinePackage !== "boolean") return null;
+  if (!isRecord(pipelineServer) || typeof pipelineServer.isReachable !== "boolean") return null;
+  if (!isNullOr(pipelineVersion, isString)) return null;
+  if (!isNullOr(updateAvailable, isBoolean)) return null;
+  if (!isNullOr(safeMode, isBoolean)) return null;
+  return {
+    projectPath,
+    pid,
+    isRunning,
+    hasPipelinePackage,
+    isReachable: pipelineServer.isReachable,
+    pipelineVersion,
+    updateAvailable,
+    safeMode,
+  };
+}
+
+/** Parses `pipeline list`'s `data` object as a whole: every entry of
+ * `data.instances`, plus the CLI-wide `data.latestVersion` sitting
+ * alongside it. `null` (not a value with an empty `instances` array) when
+ * the shape itself is unrecognized — an EMPTY `instances` array is a real,
+ * valid answer ("no Editor instances running anywhere"), distinct from
+ * "couldn't even parse the response," which the caller treats as a CLI
+ * error (S12), not as "zero instances." A missing/wrong-typed
+ * `latestVersion` key fails the whole parse the same as a bad instance
+ * entry does — `undefined` is not `null`, and a value this module doesn't
+ * recognize should not be silently treated as "no update available." */
+function parsePipelineListResult(data: unknown): UnityPipelineListResult | null {
+  if (!isRecord(data) || !Array.isArray(data.instances)) return null;
+  if (!isNullOr(data.latestVersion, isString)) return null;
+  const instances: UnityPipelineListInstance[] = [];
+  for (const entry of data.instances) {
+    const instance = parsePipelineListInstance(entry);
+    if (instance === null) return null;
+    instances.push(instance);
+  }
+  return { instances, latestVersion: data.latestVersion };
+}
 
 /** Parses `editor_status`'s `data.result` object. `null` on anything that
  * doesn't have the fields this module actually reads — same "don't guess
@@ -227,6 +349,24 @@ export class UnityPipelineClient extends Context.Service<
     readonly pause: (
       workspaceRoot: string,
     ) => Effect.Effect<UnityPipelineResult<UnityEditorStatus>>;
+    /** `unity pipeline list --json` — every running Editor instance
+     * Pipeline can currently see, regardless of project. Takes NO
+     * `workspaceRoot`: unlike `status`/`play`/`stop`/`pause`, `pipeline
+     * list` has no `--project-path` filter at all (confirmed against
+     * `unity pipeline list --help` — see
+     * docs/workbench/plan-setup-integration.md §1's F14) — matching an
+     * entry to "this project" is the CALLER's job (`UnitySetupProbe.ts`,
+     * via `@t3tools/shared/workspaceRootPath`'s normalizer), not this
+     * client's. `notReady`/`cliUnavailable` are structurally impossible
+     * results here (there is no "wrong project" or "not open" concept for
+     * a command that lists every instance), but the return type stays
+     * `UnityPipelineResult` for the same reason `status` does: a `cli
+     * Unavailable`/`error` outcome IS still possible ( the binary vanished
+     * between `isAvailable()` and this call, or the JSON envelope itself
+     * doesn't parse), and folding those into a bespoke smaller type here
+     * would just require the caller to re-derive the same handling this
+     * module's every other method already gives it for free. */
+    readonly list: () => Effect.Effect<UnityPipelineResult<UnityPipelineListResult>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -251,10 +391,10 @@ export const make = Effect.gen(function* () {
       .pipe(Effect.map((output) => parseUnityCliEnvelope(output.stdout)));
 
   /** Runs one `unity command <name> --project-path <root> --json` call and
-   * folds it into a `UnityPipelineResult`, WITHOUT parsing `data.result`
-   * yet — callers that need a typed result (status) parse it themselves;
-   * callers that only need pass/fail (the action commands, before their
-   * own confirming status re-read) use this as-is. */
+   * folds it into a `UnityPipelineResult`, WITHOUT parsing the extracted
+   * `data.result` yet — callers that need a typed result (status) parse it
+   * themselves; callers that only need pass/fail (the action commands,
+   * before their own confirming status re-read) use this as-is. */
   const runEditorCommand = (
     action: "editor_play" | "editor_stop" | "editor_pause" | "editor_status",
     workspaceRoot: string,
@@ -268,7 +408,7 @@ export const make = Effect.gen(function* () {
           };
         }
         if (envelope.success) {
-          return { _tag: "ok", value: envelope.data?.result };
+          return { _tag: "ok", value: extractEnvelopeResult(envelope.data) };
         }
         const message = envelope.errors[0]?.message ?? "unknown Pipeline error";
         if (isNotReadyMessage(message)) {
@@ -327,6 +467,37 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  /** `unity pipeline list --json` — no `--project-path` (plan §1's F14:
+   * the flag doesn't exist for this subcommand), so this is a bare
+   * `runUnityCommand` call, not `runEditorCommand` (which always appends
+   * one). `notReady` is not a real outcome for this subcommand (there is
+   * no single project to be "not ready" for), so a `notReady` envelope
+   * reply — which should never happen in practice — folds into `error`
+   * rather than silently reusing a tag whose meaning doesn't apply here. */
+  const list: UnityPipelineClient["Service"]["list"] = () =>
+    runUnityCommand(["pipeline", "list"]).pipe(
+      Effect.map((envelope): UnityPipelineResult<UnityPipelineListResult> => {
+        if (envelope === null) {
+          return { _tag: "error", message: "unparseable response from 'unity pipeline list'" };
+        }
+        if (!envelope.success) {
+          const message = envelope.errors[0]?.message ?? "unknown Pipeline error";
+          return { _tag: "error", message };
+        }
+        // No `.result` unwrap here, unlike `runEditorCommand` — `pipeline
+        // list`'s `data` IS the result (`{ instances, latestVersion,
+        // summary }` directly). See `parseUnityCliEnvelope`'s doc comment.
+        const parsed = parsePipelineListResult(envelope.data);
+        return parsed === null
+          ? {
+              _tag: "error",
+              message: "'unity pipeline list' returned an unrecognised result shape",
+            }
+          : { _tag: "ok", value: parsed };
+      }),
+      Effect.catch(processRunErrorToResult<UnityPipelineListResult>),
+    );
+
   return UnityPipelineClient.of({
     isAvailable: () =>
       isCommandAvailable(UNITY_CLI_COMMAND).pipe(
@@ -338,6 +509,7 @@ export const make = Effect.gen(function* () {
     play: (workspaceRoot) => dispatchAndConfirm("editor_play", workspaceRoot),
     stop: (workspaceRoot) => dispatchAndConfirm("editor_stop", workspaceRoot),
     pause: (workspaceRoot) => dispatchAndConfirm("editor_pause", workspaceRoot),
+    list,
   });
 });
 

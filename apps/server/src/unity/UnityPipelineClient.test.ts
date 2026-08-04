@@ -334,3 +334,250 @@ describe("play/stop/pause — assert the EFFECT via a confirming status re-read,
     }),
   );
 });
+
+// `unity pipeline list --json`'s envelope is now VERIFIED against a real
+// captured sample (2026-08-04, from `Mafia Game`, a live Unity Editor with
+// no Pipeline package installed — supplied by team-lead, captured on the
+// owner's own machine while Unity was genuinely open):
+//
+//   {
+//     "success": true, "command": "pipeline list",
+//     "data": {
+//       "instances": [{
+//         "projectName": "Mafia Game",
+//         "projectPath": "/Users/pieroherrera/Projects/Mafia Game",
+//         "pid": 39658, "isRunning": true, "hasPipelinePackage": false,
+//         "pipelineVersion": null, "updateAvailable": false,
+//         "pipelineServer": { "isReachable": false, "apiUrl": null },
+//         "safeMode": null
+//       }],
+//       "latestVersion": null,
+//       "summary": { "totalInstances": 1, "runningInstances": 1,
+//         "instancesWithPipeline": 0, "reachableServers": 0,
+//         "instancesInSafeMode": 0, "instancesWithUpdateAvailable": 0 }
+//     },
+//     "errors": [], "warnings": []
+//   }
+//
+// Two corrections that sample forced against the earlier, prose-
+// reconstructed version of these fixtures: `data` has NO nested `result`
+// wrapper for this subcommand (unlike `editor_status`/`editor_play`/etc,
+// which do), and `latestVersion` sits on `data` ALONGSIDE `instances`, not
+// inside any one instance — see UnityPipelineClient.ts's
+// `UnityPipelineListInstance`/`parseUnityCliEnvelope` doc comments. Every
+// field in `pipelineListEnvelope` below is real; `projectName`/`apiUrl`/
+// `command`/`summary` are captured but unused by this module (ignored, not
+// asserted on) — see `UnityPipelineListInstance`'s doc comment for why an
+// unrecognized EXTRA field is fine while a missing REQUIRED one is not.
+function pipelineListEnvelope(
+  instances: ReadonlyArray<{
+    readonly projectPath: string;
+    readonly pid?: number | null;
+    readonly isRunning?: boolean;
+    readonly hasPipelinePackage?: boolean;
+    readonly isReachable?: boolean;
+    readonly pipelineVersion?: string | null;
+    readonly updateAvailable?: boolean | null;
+    readonly safeMode?: boolean | null;
+  }>,
+  latestVersion: string | null = null,
+): string {
+  return JSON.stringify({
+    success: true,
+    command: "pipeline list",
+    data: {
+      instances: instances.map((instance) => ({
+        projectPath: instance.projectPath,
+        pid: instance.pid ?? 12345,
+        isRunning: instance.isRunning ?? true,
+        hasPipelinePackage: instance.hasPipelinePackage ?? true,
+        pipelineServer: { isReachable: instance.isReachable ?? true, apiUrl: null },
+        // `??` would be WRONG here: a caller passing `pipelineVersion:
+        // null` means "genuinely no version installed" (a real answer,
+        // exactly the Mafia Game sample's own value), not "unspecified" —
+        // `??` cannot tell those apart and silently overwrote the real
+        // `null` with this default, which is exactly what the "byte-for-
+        // byte against the real Mafia Game sample" test below caught.
+        pipelineVersion:
+          instance.pipelineVersion === undefined ? "0.4.0-exp.1" : instance.pipelineVersion,
+        updateAvailable: instance.updateAvailable ?? false,
+        safeMode: instance.safeMode ?? null,
+      })),
+      latestVersion,
+      summary: {
+        totalInstances: instances.length,
+        runningInstances: instances.length,
+        instancesWithPipeline: 0,
+        reachableServers: 0,
+        instancesInSafeMode: 0,
+        instancesWithUpdateAvailable: 0,
+      },
+    },
+    errors: [],
+    warnings: [],
+  });
+}
+
+describe("list", () => {
+  it.effect("parses zero instances as a real, valid empty array — not a failure", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([pipelineListEnvelope([])]);
+      const result = yield* withClient(runner.run, (client) => client.list());
+      expect(result).toEqual({ _tag: "ok", value: { instances: [], latestVersion: null } });
+    }),
+  );
+
+  it.effect(
+    "parses every field of a single instance, byte-for-byte against the real Mafia Game sample",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          pipelineListEnvelope([
+            {
+              projectPath: "/Users/pieroherrera/Projects/Mafia Game",
+              pid: 39658,
+              isRunning: true,
+              hasPipelinePackage: false,
+              isReachable: false,
+              pipelineVersion: null,
+              updateAvailable: false,
+              safeMode: null,
+            },
+          ]),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.list());
+        expect(result).toEqual({
+          _tag: "ok",
+          value: {
+            instances: [
+              {
+                projectPath: "/Users/pieroherrera/Projects/Mafia Game",
+                pid: 39658,
+                isRunning: true,
+                hasPipelinePackage: false,
+                isReachable: false,
+                pipelineVersion: null,
+                updateAvailable: false,
+                safeMode: null,
+              },
+            ],
+            latestVersion: null,
+          },
+        });
+      }),
+  );
+
+  it.effect(
+    "latestVersion is CLI-wide, not per-instance — read from data.latestVersion, not any instance",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          pipelineListEnvelope(
+            [{ projectPath: PROJECT, updateAvailable: true, pipelineVersion: "0.4.0-exp.1" }],
+            "0.5.0",
+          ),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.list());
+        expect(result._tag).toBe("ok");
+        if (result._tag !== "ok") return;
+        expect(result.value.latestVersion).toBe("0.5.0");
+        // and NOT attached to the instance itself:
+        expect(result.value.instances[0]).not.toHaveProperty("latestVersion");
+      }),
+  );
+
+  it.effect("parses multiple instances, preserving order", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([
+        pipelineListEnvelope([
+          { projectPath: "/Users/piero/Projects/arena-spike" },
+          { projectPath: "/Users/piero/Projects/Deepmind" },
+        ]),
+      ]);
+      const result = yield* withClient(runner.run, (client) => client.list());
+      expect(result._tag).toBe("ok");
+      if (result._tag !== "ok") return;
+      expect(result.value.instances.map((instance) => instance.projectPath)).toEqual([
+        "/Users/piero/Projects/arena-spike",
+        "/Users/piero/Projects/Deepmind",
+      ]);
+    }),
+  );
+
+  it.effect(
+    "does NOT take --project-path — no project-scoped argv, unlike status/play/stop/pause",
+    () =>
+      Effect.gen(function* () {
+        const seenArgs: Array<ReadonlyArray<string>> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seenArgs.push(input.args);
+          return okOutput(pipelineListEnvelope([]));
+        };
+        yield* withClient(runner, (client) => client.list());
+        expect(seenArgs).toEqual([["pipeline", "list", "--json"]]);
+      }),
+  );
+
+  it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([
+        JSON.stringify({
+          success: false,
+          command: "pipeline list",
+          data: null,
+          errors: [{ code: "SOME_FAILURE", message: "No Unity Editor instances found anywhere" }],
+          warnings: [],
+        }),
+      ]);
+      const result = yield* withClient(runner.run, (client) => client.list());
+      expect(result).toEqual({
+        _tag: "error",
+        message: "No Unity Editor instances found anywhere",
+      });
+    }),
+  );
+
+  it.effect("unparseable stdout folds into { _tag: 'error' }, never throws", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner(["not json at all"]);
+      const result = yield* withClient(runner.run, (client) => client.list());
+      expect(result._tag).toBe("error");
+    }),
+  );
+
+  it.effect(
+    "a well-formed envelope whose instances entries are missing a required field folds into { _tag: 'error' }, not a silent partial parse",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          JSON.stringify({
+            success: true,
+            command: "pipeline list",
+            data: { instances: [{ projectPath: PROJECT }], latestVersion: null }, // missing every other instance field
+            errors: [],
+            warnings: [],
+          }),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.list());
+        expect(result._tag).toBe("error");
+      }),
+  );
+
+  it.effect(
+    "a well-formed envelope missing data.latestVersion entirely folds into { _tag: 'error' }, never silently read as null",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          JSON.stringify({
+            success: true,
+            command: "pipeline list",
+            data: { instances: [] }, // no latestVersion key at all
+            errors: [],
+            warnings: [],
+          }),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.list());
+        expect(result._tag).toBe("error");
+      }),
+  );
+});

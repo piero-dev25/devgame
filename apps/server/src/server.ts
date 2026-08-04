@@ -26,7 +26,11 @@ import {
 import { fixPath } from "./os-jank.ts";
 import { spaceEventsRouteLayer } from "./spaceEvents/SpaceEventsRoute.ts";
 import { unityCommandRouteLayer } from "./unity/UnityCommandRoute.ts";
+import * as UnityPackageLock from "./unity/UnityPackageLock.ts";
 import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
+import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
+import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
+import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -335,6 +339,25 @@ const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
   Layer.provide(PlatformServicesLive),
 );
 
+// `EditorPresenceRegistry.layer` here is the SAME layer reference
+// `editorPresenceRouteLayer`/`editorPresenceCommandRouteLayer` already
+// compose in elsewhere in `makeRoutesLayer`'s merge below — Effect's own
+// layer memoization shares ONE constructed instance across a merged graph
+// for the same layer reference, so `UnitySetupProbe.ts`'s
+// `hasPublisherForWorkspace` reads the identical registry those routes
+// register publishers/subscribers against, not a second, disconnected one.
+// `ServerConfig.ServerConfig` is deliberately NOT provided here — it's
+// ambient in this file already (see `makeServerLayer`'s own bare
+// `yield* ServerConfig.ServerConfig` a few hundred lines below), satisfied
+// by whoever composes `makeServerLayer` with a real config, same as every
+// other server-side service that needs it.
+const UnitySetupProbeLayerLive = UnitySetupProbe.layer.pipe(
+  Layer.provide(UnityPipelineClientLayerLive),
+  Layer.provide(UnityPackageLock.layer.pipe(Layer.provide(PlatformServicesLive))),
+  Layer.provide(EditorPresenceRegistry.layer),
+  Layer.provide(PlatformServicesLive),
+);
+
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
@@ -507,6 +530,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     editorPresenceRouteLayer,
     editorPresenceCommandRouteLayer,
     unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),

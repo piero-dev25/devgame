@@ -17,6 +17,7 @@
  * if there isn't one — there is no queue to replay from, by construction,
  * not by a check that could be forgotten.
  */
+import { normalizeWorkspaceRoot } from "@t3tools/shared/workspaceRootPath";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -310,6 +311,24 @@ export class EditorPresenceRegistry extends Context.Service<
       connectionToken: EditorPresenceConnectionToken,
       outcome: EditorPresenceCommandOutcome,
     ) => Effect.Effect<void>;
+    /**
+     * Whether ANY currently-connected publisher's `workspace.root` matches
+     * `workspaceRoot` (compared via `@t3tools/shared/workspaceRootPath`'s
+     * `normalizeWorkspaceRoot` — plan §1's F14: reuse the one normalizer,
+     * never a second comparison site). Built for `UnitySetupProbe.ts`'s
+     * S10/S10′ check (docs/workbench/plan-setup-integration.md §2's F3):
+     * "no publisher registered in `EditorPresenceRegistry` for this
+     * workspace" is one of that state's own preconditions, and this
+     * registry had no read surface for it at all before this method —
+     * every other member here is a mutation or a fan-out subscription.
+     * Read-only, no side effect, and — same as every mutation above — this
+     * is `Nothing on disk, nothing per-thread` (module doc): a `false`
+     * here is exactly as likely to mean "not paired" as "Unity closed" or
+     * "mid-reconnect," which is precisely why `UnitySetupProbe.ts` only
+     * calls this once its OWN liveness signal is independently confirmed
+     * green, not the other way around.
+     */
+    readonly hasPublisherForWorkspace: (workspaceRoot: string) => Effect.Effect<boolean>;
   }
 >()("t3/editorPresence/EditorPresenceRegistry") {}
 
@@ -786,6 +805,21 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
       return { ...current, subscribers };
     });
 
+  const hasPublisherForWorkspace: EditorPresenceRegistry["Service"]["hasPublisherForWorkspace"] = (
+    workspaceRoot,
+  ) =>
+    Ref.get(stateRef).pipe(
+      Effect.map((current) => {
+        const target = normalizeWorkspaceRoot(workspaceRoot);
+        for (const record of current.publishers.values()) {
+          if (record.connected && normalizeWorkspaceRoot(record.workspace.root) === target) {
+            return true;
+          }
+        }
+        return false;
+      }),
+    );
+
   return EditorPresenceRegistry.of({
     newConnectionToken: () => Symbol("editor-presence-connection"),
     registerPublisher,
@@ -796,6 +830,7 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
     removeSubscriber,
     sendCommand,
     resolveCommand,
+    hasPublisherForWorkspace,
   });
 });
 
