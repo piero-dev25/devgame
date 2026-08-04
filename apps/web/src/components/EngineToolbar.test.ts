@@ -57,10 +57,10 @@ describe("resolveEngineToolbarView — threejs-script backend", () => {
 });
 
 describe("resolveEngineToolbarView — unity-cli backend", () => {
-  it("needs no presence scope", () => {
+  it("needs presence:command too — same risk class as editor-presence (may make the editor execute code), different transport", () => {
     const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
     expect(view.backend).toBe("unity-cli");
-    expect(view.requiresPresenceCommandScope).toBe(false);
+    expect(view.requiresPresenceCommandScope).toBe(true);
   });
 
   it("advertises the fixed play/pause/stop set — no step, Pipeline has no scriptable frame step", () => {

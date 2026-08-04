@@ -1,9 +1,11 @@
-// The Play/Stop toolbar (#52). Appearance copied from
-// `ProviderModelPicker.tsx`'s Popover + `ComposerControl` trigger pattern —
-// deliberately NOT its state model, which mounts per composer/per chat tab.
-// This toolbar's engine selection is per-PROJECT (`engineSelectorStore.ts`),
-// so every thread against the same project sees the same selector state no
-// matter where in the DOM this component happens to be mounted.
+// The Play/Stop toolbar (#52). Lives in the chat header's action row
+// (`ChatHeader.tsx`), styled to match its neighbours there — `outline`/`xs`
+// buttons, `Group`/`GroupSeparator` for a segmented cluster — the same
+// convention `ProjectScriptsControl` ("Add action") and `GitActionsControl`
+// ("Open" / "Publish repository") already use, per the owner's explicit
+// ask to match those rather than stand out. Originally styled after
+// `ProviderModelPicker.tsx`'s composer-footer `ComposerControl` look before
+// the header move; this file no longer imports that pattern at all.
 //
 // Presentational: every read comes in as a prop, every write goes out as a
 // callback. All of the actual decision logic (which controls to show, what
@@ -12,7 +14,6 @@
 import type { EngineType } from "@t3tools/contracts";
 import { ChevronDownIcon, PauseIcon, PlayIcon, SquareIcon, StepForwardIcon } from "lucide-react";
 
-import { ComposerControl, ComposerControlChevron } from "./chat/ComposerControl";
 import {
   isPlayEngaged,
   type EngineToolbarAction,
@@ -21,8 +22,8 @@ import {
 import { Menu, MenuGroup, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { Group, GroupSeparator } from "./ui/group";
 import { Button } from "./ui/button";
-import { cn } from "~/lib/utils";
 
 const ENGINE_LABELS: Readonly<Record<EngineType, string>> = {
   unity: "Unity",
@@ -88,20 +89,13 @@ export function EngineToolbar(props: EngineToolbarProps) {
     : "No engine";
 
   return (
-    <div className="flex items-center gap-1" data-engine-toolbar="true">
+    <div className="flex shrink-0 items-center gap-2" data-engine-toolbar="true">
       <Menu>
-        <MenuTrigger
-          render={
-            <ComposerControl
-              aria-label="Select engine"
-              className="max-w-32 min-w-0 justify-between whitespace-nowrap"
-            />
-          }
-        >
-          <span className="min-w-0 flex-1 truncate">{engineLabel}</span>
-          <ComposerControlChevron />
+        <MenuTrigger render={<Button size="xs" variant="outline" aria-label="Select engine" />}>
+          <span className="max-w-24 truncate">{engineLabel}</span>
+          <ChevronDownIcon aria-hidden="true" className="size-3.5" />
         </MenuTrigger>
-        <MenuPopup align="start">
+        <MenuPopup align="end">
           <MenuGroup>
             {ENGINE_OPTIONS.map((engine) => (
               <MenuItem key={engine} onClick={() => props.onSelectEngine(engine)}>
@@ -147,14 +141,14 @@ function ThreeJsPlayButton(props: {
 }) {
   const button = (
     <Button
-      size="sm"
-      variant="default"
+      size="xs"
+      variant="outline"
       aria-label="Run preview"
       disabled={!props.onPlay}
       onClick={() => props.onPlay?.()}
     >
-      <PlayIcon />
-      Play
+      <PlayIcon className="size-3.5" aria-hidden />
+      <span className="ml-0.5">Play</span>
     </Button>
   );
   if (props.onPlay || !props.unavailableReason) return button;
@@ -186,13 +180,13 @@ function ControlCluster(props: {
         <TooltipTrigger
           render={
             <Button
-              size="sm"
-              variant="ghost"
+              size="xs"
+              variant="outline"
               aria-label="Engine control requires an additional permission"
               onClick={() => props.onOpenConnectionsSettings?.()}
             >
-              <PlayIcon />
-              Play
+              <PlayIcon className="size-3.5" aria-hidden />
+              <span className="ml-0.5">Play</span>
             </Button>
           }
         />
@@ -209,9 +203,9 @@ function ControlCluster(props: {
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button size="sm" variant="ghost" disabled aria-label="No editor connected">
-              <PlayIcon />
-              Play
+            <Button size="xs" variant="outline" disabled aria-label="No editor connected">
+              <PlayIcon className="size-3.5" aria-hidden />
+              <span className="ml-0.5">Play</span>
             </Button>
           }
         />
@@ -225,34 +219,37 @@ function ControlCluster(props: {
   }
 
   return (
-    <div className="flex items-center gap-0.5">
+    <Group aria-label="Engine controls" className="shrink-0">
       {view.availableActions.map((action) => {
         const Icon = ACTION_ICON[action];
         const isPlay = action === "play";
         const engaged = isPlay && isPlayEngaged(view.playState);
         return (
-          <span key={action} className={cn("flex items-center", isPlay && "relative")}>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    size="icon-sm"
-                    variant={engaged ? "default" : "ghost"}
-                    aria-label={ACTION_LABEL[action]}
-                    aria-pressed={engaged}
-                    onClick={() => props.onAction(action)}
-                  />
-                }
-              >
-                <Icon />
-              </TooltipTrigger>
-              <TooltipPopup side="bottom">{ACTION_LABEL[action]}</TooltipPopup>
-            </Tooltip>
-            {isPlay ? <PlayTargetMenu onAction={props.onAction} /> : null}
-          </span>
+          <Tooltip key={action}>
+            <TooltipTrigger
+              render={
+                <Button
+                  size="icon-xs"
+                  variant={engaged ? "default" : "outline"}
+                  aria-label={ACTION_LABEL[action]}
+                  aria-pressed={engaged}
+                  onClick={() => props.onAction(action)}
+                />
+              }
+            >
+              <Icon className="size-3.5" aria-hidden />
+            </TooltipTrigger>
+            <TooltipPopup side="bottom">{ACTION_LABEL[action]}</TooltipPopup>
+          </Tooltip>
         );
       })}
-    </div>
+      {/* Separator before the play-target chevron, matching
+          `GitActionsControl`'s quick-action-plus-chevron shape exactly —
+          one separator between the button cluster and the menu trigger,
+          not between every individual button. */}
+      <GroupSeparator />
+      <PlayTargetMenu onAction={props.onAction} />
+    </Group>
   );
 }
 
@@ -263,24 +260,19 @@ function ControlCluster(props: {
  * the reference shape; deferred with the rest of Unreal, but the slot
  * itself isn't engine-specific and costs nothing to have ready now). The
  * one entry present today does the same thing the Play button does; it
- * exists so the slot is exercised rather than dead UI.
+ * exists so the slot is exercised rather than dead UI. Grouped as the last
+ * segment of the same `Group` the control buttons sit in, mirroring
+ * `GitActionsControl`'s quick-action-plus-chevron shape exactly.
  */
 function PlayTargetMenu(props: { readonly onAction: (action: EngineToolbarAction) => void }) {
   return (
     <Popover>
       <PopoverTrigger
-        render={
-          <Button
-            size="icon-xs"
-            variant="ghost"
-            aria-label="Play target options"
-            className="-ml-0.5"
-          />
-        }
+        render={<Button size="icon-xs" variant="outline" aria-label="Play target options" />}
       >
-        <ChevronDownIcon className="size-3" />
+        <ChevronDownIcon aria-hidden="true" className="size-3.5" />
       </PopoverTrigger>
-      <PopoverPopup align="start">
+      <PopoverPopup align="end">
         <MenuGroup>
           <MenuItem onClick={() => props.onAction("play")}>Default</MenuItem>
         </MenuGroup>

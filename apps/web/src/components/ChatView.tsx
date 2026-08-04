@@ -139,7 +139,6 @@ import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { triggerAutoOpenPreview } from "./preview/autoOpenPreviewForScript";
 import { resolveThreeJsPlayScript } from "./preview/resolveThreeJsPlayScript";
-import { EngineToolbar } from "./EngineToolbar";
 import { resolveEngineToolbarView, type EngineToolbarAction } from "./EngineToolbar.logic";
 import { useTerminalDiscoveredPorts } from "~/portDiscoveryState";
 import {
@@ -215,6 +214,8 @@ import { getCurrentEditorPresenceChips } from "../editorPresence/store";
 import { useEditorPresence } from "../editorPresence/useEditorPresence";
 import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
+import type { EditorPresencePlayState } from "../editorPresence/protocol";
+import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
@@ -1673,9 +1674,21 @@ function ChatViewContent(props: ChatViewProps) {
     engineToolbarEditorPresence.editors,
     activeProject,
   );
+  // Unity has no presence feed to read a play state from — the CLI route's
+  // successful responses carry a freshly re-read `UnityEditorStatus`
+  // (`UnityPipelineClient` re-reads status before returning, so a caller
+  // never has to separately poll), and this is where that lands. Reset per
+  // project so switching projects never shows a stale reading from a
+  // different one — presence-backed engines don't need this because
+  // `connectedProjectEditor` itself is re-derived per project already.
+  const [unityPlayState, setUnityPlayState] = useState<EditorPresencePlayState | null>(null);
+  useEffect(() => {
+    setUnityPlayState(null);
+  }, [activeProjectRef]);
   const engineToolbarView = resolveEngineToolbarView({
     engineType: resolvedEngineType,
     connectedEditor: connectedProjectEditor,
+    unityPlayState,
   });
   const primarySessionState = usePrimarySessionState();
   // Gates ONLY the editor-presence backend (Godot today) — see
@@ -1706,39 +1719,98 @@ function ChatViewContent(props: ChatViewProps) {
   }, [navigate]);
   const handleEngineAction = useCallback(
     (action: EngineToolbarAction) => {
-      // Unity has no route yet — that lane's own server-side CLI dispatch
-      // endpoint doesn't exist as a client-reachable route as of this
-      // change (their service, `UnityPipelineClient`, is ready; nobody has
-      // wired a route to it). Godot/Unreal go over the editor-presence
-      // command route this task just built; three.js never reaches this
-      // handler at all (its Play button calls `handlePlayThreeJs`
-      // directly — see the toolbar mount below).
-      if (engineToolbarView.backend !== "editor-presence") {
-        console.warn(
-          `Engine command "${action}" has no dispatch route wired yet for backend "${engineToolbarView.backend}".`,
-        );
+      // three.js never reaches this handler at all (its Play button calls
+      // `handlePlayThreeJs` directly — see the toolbar mount below).
+      if (engineToolbarView.backend === "editor-presence") {
+        if (!connectedProjectEditor) return;
+        const prepared = readPreparedConnection(environmentId);
+        if (!prepared) return;
+        void dispatchEditorPresenceCommand({
+          httpBaseUrl: prepared.httpBaseUrl,
+          httpAuthorization: prepared.httpAuthorization,
+          sessionId: connectedProjectEditor.session.id,
+          action,
+        }).catch((cause) => {
+          // Transport failure only (couldn't reach the server) — a
+          // well-formed `{ok:false, error}` the server actually sent back is
+          // not an exception here, and isn't surfaced as one: the toolbar's
+          // own presence-driven state is the source of truth for whether the
+          // command "worked," not this call's return value, per
+          // spec-unity-play-stop.md's "acceptance is an edge, play state is
+          // a level" ruling.
+          console.error(`Failed to send engine command "${action}":`, cause);
+        });
         return;
       }
-      if (!connectedProjectEditor) return;
-      const prepared = readPreparedConnection(environmentId);
-      if (!prepared) return;
-      void dispatchEditorPresenceCommand({
-        httpBaseUrl: prepared.httpBaseUrl,
-        httpAuthorization: prepared.httpAuthorization,
-        sessionId: connectedProjectEditor.session.id,
-        action,
-      }).catch((cause) => {
-        // Transport failure only (couldn't reach the server) — a
-        // well-formed `{ok:false, error}` the server actually sent back is
-        // not an exception here, and isn't surfaced as one: the toolbar's
-        // own presence-driven state is the source of truth for whether the
-        // command "worked," not this call's return value, per
-        // spec-unity-play-stop.md's "acceptance is an edge, play state is
-        // a level" ruling.
-        console.error(`Failed to send engine command "${action}":`, cause);
-      });
+
+      if (engineToolbarView.backend === "unity-cli") {
+        // Unity has no capability for "step" — `EngineToolbarView.availableActions`
+        // never includes it for this backend (see EngineToolbar.logic.ts's
+        // `UNITY_CLI_ACTIONS`), so `onAction` can never actually be called
+        // with it; this narrows the type rather than silently miscasting.
+        if (action === "step") return;
+        if (!activeProject) return;
+        const prepared = readPreparedConnection(environmentId);
+        if (!prepared) return;
+        void dispatchUnityCommand({
+          httpBaseUrl: prepared.httpBaseUrl,
+          httpAuthorization: prepared.httpAuthorization,
+          workspaceRoot: activeProject.workspaceRoot,
+          action,
+        })
+          .then((outcome) => {
+            // `notReady` and `cliUnavailable` are DIFFERENT problems with
+            // different fixes ("open the project in Unity" vs. "install the
+            // unity CLI") — per UnityCommandResult's own non-negotiable
+            // contract, they must reach the user as the different things
+            // they are, not a generic failure.
+            if (outcome._tag === "ok") {
+              setUnityPlayState(outcome.value.playMode);
+              return;
+            }
+            if (outcome._tag === "notReady") {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "warning",
+                  title: "Unity isn't open for this project",
+                  description:
+                    "Open the project in the Unity Editor, then try again — or wait a moment if it just entered/exited play mode.",
+                }),
+              );
+              return;
+            }
+            if (outcome._tag === "cliUnavailable") {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Unity CLI isn't installed",
+                  description: "The `unity` command-line tool isn't available on this machine.",
+                }),
+              );
+              return;
+            }
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: `Unity command "${action}" failed`,
+                description: outcome.message,
+              }),
+            );
+          })
+          .catch((cause) => {
+            // Transport failure only — see the editor-presence branch's
+            // identical comment above for why this stays separate from a
+            // well-formed `{_tag:"error"}` the server sent back.
+            console.error(`Failed to send Unity command "${action}":`, cause);
+          });
+        return;
+      }
+
+      console.warn(
+        `Engine command "${action}" has no dispatch route wired yet for backend "${engineToolbarView.backend}".`,
+      );
     },
-    [connectedProjectEditor, engineToolbarView.backend, environmentId],
+    [activeProject, connectedProjectEditor, engineToolbarView.backend, environmentId],
   );
 
   // Task #61: this used to reconcile rightPanelStore's own "files"/"file"
@@ -5886,6 +5958,15 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            resolvedEngineType={resolvedEngineType}
+            engineToolbarView={engineToolbarView}
+            onSelectEngine={handleSelectEngine}
+            onEngineAction={handleEngineAction}
+            {...(threeJsUnavailableReason
+              ? { threeJsUnavailableReason }
+              : { onPlayThreeJs: handlePlayThreeJs })}
+            hasPresenceCommandScope={hasPresenceCommandScope}
+            onOpenConnectionsSettings={handleOpenConnectionsSettings}
           />
         </header>
 
@@ -6130,26 +6211,6 @@ function ChatViewContent(props: ChatViewProps) {
                                   : {})}
                                 {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
                                 availableEnvironments={logicalProjectEnvironments}
-                              />
-                            </div>
-                          )}
-                          {activeProject && (
-                            // Task #52: deliberately NOT gated on
-                            // showComposerContextStrip/isGitRepo — an engine
-                            // project needn't be a git repo. Per-project
-                            // engine selection (not per-thread/per-tab), see
-                            // engineSelectorStore.ts.
-                            <div className="pointer-events-auto">
-                              <EngineToolbar
-                                resolvedEngineType={resolvedEngineType}
-                                view={engineToolbarView}
-                                onSelectEngine={handleSelectEngine}
-                                onAction={handleEngineAction}
-                                {...(threeJsUnavailableReason
-                                  ? { threeJsUnavailableReason }
-                                  : { onPlayThreeJs: handlePlayThreeJs })}
-                                hasPresenceCommandScope={hasPresenceCommandScope}
-                                onOpenConnectionsSettings={handleOpenConnectionsSettings}
                               />
                             </div>
                           )}

@@ -39,8 +39,18 @@ const CONTROL_ACTION_ORDER: ReadonlyArray<EngineToolbarAction> = ["play", "pause
  * Editor Presence command frame. This has real consequences beyond which
  * function gets called:
  *
- * - Only `"editor-presence"` needs `presence:command`. Gating Unity or
- *   three.js behind that scope would be wrong — they never touch it.
+ * - Both `"editor-presence"` AND `"unity-cli"` need `presence:command` —
+ *   corrected from an earlier version of this file that gated only
+ *   `"editor-presence"`, reasoning from the TRANSPORT ("Unity doesn't use
+ *   the presence socket, so it doesn't need the presence scope"). That
+ *   reasoning was wrong: the scope doesn't mean "uses the presence socket,"
+ *   it means "may make the user's editor execute code." Unity's CLI route
+ *   does exactly that — same risk class, different transport, not a new
+ *   scope and not an exemption. Leaving it ungated would have shipped an
+ *   enabled-looking Unity Play button that any authenticated client could
+ *   use to drive someone's editor — precisely the hole `presence:command`
+ *   exists to close. Only `"threejs-script"` is genuinely exempt: it runs a
+ *   project script the user already configured, and touches no editor.
  * - Only `"editor-presence"` has a live `capabilities`/`playState` feed at
  *   all (the presence WebSocket). `"unity-cli"` has no publisher and never
  *   appears in the presence feed's editor list; `"threejs-script"` has no
@@ -86,10 +96,12 @@ export interface EngineToolbarView {
   readonly engineType: EngineType | null;
   /** `null` exactly when `engineType` is `null` — see `resolveEngineDispatchBackend`. */
   readonly backend: EngineDispatchBackend | null;
-  /** Whether commands for this view need `presence:command` — true only
-   * for `"editor-presence"`. The component gates its scope-missing UI on
-   * THIS, never on a toolbar-wide flag: Unity and three.js don't use the
-   * scope and must never be disabled over it. */
+  /** Whether commands for this view need `presence:command` — true for
+   * `"editor-presence"` AND `"unity-cli"` (both can make the user's editor
+   * execute code; see `EngineDispatchBackend`'s doc comment for why
+   * gating only the presence-socket path was wrong), false only for
+   * `"threejs-script"`. The component gates its scope-missing UI on THIS,
+   * never on a toolbar-wide flag. */
   readonly requiresPresenceCommandScope: boolean;
   /** Whether a connected editor was found for this project's workspace
    * root. Only meaningful for the `"editor-presence"` backend — `false`
@@ -164,7 +176,7 @@ export function resolveEngineToolbarView(input: {
     return {
       engineType,
       backend,
-      requiresPresenceCommandScope: false,
+      requiresPresenceCommandScope: true,
       hasConnectedEditor: false,
       availableActions: UNITY_CLI_ACTIONS,
       playState: input.unityPlayState ?? null,

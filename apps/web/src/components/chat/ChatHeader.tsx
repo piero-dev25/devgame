@@ -1,6 +1,7 @@
 import {
   type EnvironmentId,
   type EditorId,
+  type EngineType,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
@@ -18,6 +19,8 @@ import { OpenInPicker } from "./OpenInPicker";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { EngineToolbar } from "../EngineToolbar";
+import type { EngineToolbarAction, EngineToolbarView } from "../EngineToolbar.logic";
 import { cn } from "~/lib/utils";
 
 interface ChatHeaderProps {
@@ -42,6 +45,23 @@ interface ChatHeaderProps {
     input: NewProjectScriptInput,
   ) => Promise<ProjectScriptActionResult>;
   onDeleteProjectScript: (scriptId: string) => Promise<ProjectScriptActionResult>;
+  /**
+   * The Play/Stop toolbar (#52), moved here from the composer footer per
+   * the owner's request to match `ProjectScriptsControl`/`GitActionsControl`'s
+   * styling and position. Gated on `activeProjectName` at the call site
+   * below — same coarse "a project exists" gate `GitActionsControl` itself
+   * uses (its OWN, finer git-repo gate lives inside that component, not
+   * here) — deliberately NOT tied to whether the project is a git repo: an
+   * engine project needn't be one.
+   */
+  resolvedEngineType: EngineType | null;
+  engineToolbarView: EngineToolbarView;
+  onSelectEngine: (engine: EngineType) => void;
+  onEngineAction: (action: EngineToolbarAction) => void;
+  onPlayThreeJs?: () => void;
+  threeJsUnavailableReason?: string;
+  hasPresenceCommandScope: boolean;
+  onOpenConnectionsSettings: () => void;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -75,6 +95,14 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
+  resolvedEngineType,
+  engineToolbarView,
+  onSelectEngine,
+  onEngineAction,
+  onPlayThreeJs,
+  threeJsUnavailableReason,
+  hasPresenceCommandScope,
+  onOpenConnectionsSettings,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const fileScripts = useT3ProjectFileScripts(
@@ -165,6 +193,18 @@ export const ChatHeader = memo(function ChatHeader({
             gitCwd={gitCwd}
             activeThreadRef={scopeThreadRef(activeThreadEnvironmentId, activeThreadId)}
             {...(draftId ? { draftId } : {})}
+          />
+        )}
+        {activeProjectName && (
+          <EngineToolbar
+            resolvedEngineType={resolvedEngineType}
+            view={engineToolbarView}
+            onSelectEngine={onSelectEngine}
+            onAction={onEngineAction}
+            {...(onPlayThreeJs ? { onPlayThreeJs } : {})}
+            {...(threeJsUnavailableReason ? { threeJsUnavailableReason } : {})}
+            hasPresenceCommandScope={hasPresenceCommandScope}
+            onOpenConnectionsSettings={onOpenConnectionsSettings}
           />
         )}
       </div>
