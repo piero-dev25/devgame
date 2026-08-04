@@ -633,6 +633,7 @@ function makePublisherRegistrySpy(): {
       return Effect.void;
     },
     updatePublisherSelection: () => Effect.void,
+    updatePublisherPlayState: () => Effect.void,
     removePublisher: () => Effect.void,
     addSubscriber: () => Effect.succeed("{}"),
     removeSubscriber: () => Effect.void,
@@ -1112,6 +1113,134 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         Effect.scoped,
         // See the sibling scope-gate test above for why
         // `EditorPresenceRegistry.layer` is provided here too.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  /** Auto-replies to any `command` frame with `commandResult{ok:true}`,
+   * exactly like the wire-roundtrip test above's fake engine — needed on
+   * BOTH sockets in the takeover test below, not just whichever one is
+   * "supposed to" receive the command: `dispatchEditorCommand` awaits a
+   * real `commandResult` with a 10s bound that never elapses under
+   * `it.effect`'s virtual clock, so if the RED (vulnerable) state routes
+   * the frame to the socket that ISN'T wired to reply, the test hangs
+   * instead of failing — which would make a real vulnerability look like
+   * a timeout, not a finding.
+   *
+   * Attached DIRECTLY to the raw `ws` socket's own "message" event
+   * (`connectPublisherAndConfirmRegistered`'s own `onMessage` callback is
+   * a no-op here, since this needs its own listener on top) — a raw `ws`
+   * "message" event hands the listener `RawData` (Buffer/ArrayBuffer/
+   * Buffer[]), never a string, so this converts via `rawDataToString`
+   * exactly like every other listener in this file does. The first
+   * version of this helper skipped that and fed a raw Buffer straight
+   * into `decodeUnknownJson`, which throws on anything but a string — a
+   * harness bug, not a product bug, caught by running the test and
+   * reading the actual error rather than assuming either way. */
+  const makeCommandAutoReplier =
+    (socket: { send: (data: string) => void }, collected: Array<string>) =>
+    (data: NodeSocket.NodeWS.RawData) => {
+      const raw = rawDataToString(data);
+      collected.push(raw);
+      const parsed = decodeUnknownJson(raw) as { readonly type?: string; readonly id?: string };
+      if (parsed.type !== "command" || typeof parsed.id !== "string") return;
+      socket.send(JSON.stringify({ v: 1, type: "commandResult", id: parsed.id, ok: true }));
+    };
+
+  it.effect(
+    "a session-id takeover by a DIFFERENT authenticated subject must not let the impostor intercept a command meant for the original publisher (task #60)",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        // Both hold the SAME scope any ordinary, non-malicious client
+        // already has (orchestration:operate) — this is not a scope
+        // bypass. It's two DIFFERENT authenticated identities: an
+        // attacker who read a victim's session.id off the (already
+        // scope-authorized) presence feed and opens a SECOND publisher
+        // connection claiming that same id for itself.
+        const victimIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+          subject: "victim-editor-owner",
+        });
+        const attackerIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+          subject: "attacker",
+        });
+        const dispatcherSession = makeFakeAuthenticatedSession([AuthPresenceCommandScope]);
+        const publisherUrl = yield* getPublisherWsUrl();
+        const sharedSessionId = "takeover-target-repro";
+
+        const victimMessages: Array<string> = [];
+        const victimSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          victimIssued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        victimSocket.on("message", makeCommandAutoReplier(victimSocket, victimMessages));
+        // Registered as a SCOPED finalizer, not a bare call at the end of
+        // the happy path — a thrown assertion below must still close both
+        // sockets. Skipping this was the second bug this test's own
+        // authoring surfaced: a failed assertion left both raw `ws`
+        // clients open, `NodeHttpServer.layerTest`'s own scope teardown
+        // then waited on them, and a real, fast assertion failure showed
+        // up as an uninformative 60-120s timeout instead — a finding
+        // this test was never trying to make, and one that would have
+        // made a genuine RED result look like a hang.
+        yield* Effect.addFinalizer(() => Effect.sync(() => victimSocket.close()));
+
+        const attackerMessages: Array<string> = [];
+        const attackerSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          attackerIssued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        attackerSocket.on("message", makeCommandAutoReplier(attackerSocket, attackerMessages));
+        yield* Effect.addFinalizer(() => Effect.sync(() => attackerSocket.close()));
+
+        const outcome = yield* dispatchEditorCommand(dispatcherSession, sharedSessionId, "play");
+
+        // THE property this test exists for: the impostor's connection
+        // must never receive so much as one command frame — not "some
+        // check rejected the takeover", the actual bytes on the actual
+        // wire. Assert the EFFECT, not a precondition.
+        const attackerCommandFrames = attackerMessages.filter((raw) => {
+          const parsed = decodeUnknownJson(raw) as { readonly type?: string };
+          return parsed.type === "command";
+        });
+        assert.deepStrictEqual(attackerCommandFrames, []);
+
+        // The command must still reach the LEGITIMATE, original
+        // publisher — proving this isn't "nobody gets it" (which would
+        // trivially satisfy the assertion above without the takeover
+        // actually being refused).
+        const victimCommandFrames = victimMessages.filter((raw) => {
+          const parsed = decodeUnknownJson(raw) as { readonly type?: string };
+          return parsed.type === "command";
+        });
+        assert.strictEqual(victimCommandFrames.length, 1);
+        const received = decodeUnknownJson(victimCommandFrames[0]!) as {
+          readonly type: string;
+          readonly action: string;
+        };
+        assert.strictEqual(received.type, "command");
+        assert.strictEqual(received.action, "play");
+        assert.deepStrictEqual(outcome, { ok: true });
+      }).pipe(
+        Effect.scoped,
         Effect.provide(
           makeEnvironmentAuthLayer().pipe(
             Layer.provideMerge(NodeHttpServer.layerTest),

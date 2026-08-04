@@ -169,6 +169,13 @@ export const runPublisherConnection = (
     // moving auth after the upgrade must not widen that surface.
     let connectionToken: EditorPresenceConnectionToken | null = null;
 
+    // The authenticated caller's own identity (task #60), set alongside
+    // `connectionToken` in `onOpen` below and threaded into every
+    // `registerPublisher` call so the registry can refuse a same-sessionId
+    // takeover claimed by a DIFFERENT subject — see
+    // `EditorPresenceRegistry.ts`'s SESSION TAKEOVER doc.
+    let claimantSubject: string | null = null;
+
     // EVERY session id this connection has ever registered, not just the
     // most recent one. A publisher can legitimately say `hello` more than
     // once on the same socket (regenerating its session id without
@@ -202,6 +209,7 @@ export const runPublisherConnection = (
             // already on its way out.
             if (connectionToken === null) return;
             const token = connectionToken;
+            const subject = claimantSubject ?? undefined;
 
             const frame = parseEditorPresenceInboundFrame(raw);
             if (!frame) {
@@ -235,6 +243,7 @@ export const runPublisherConnection = (
                   },
                   (code, reason) => rejectUpgrade(code, reason),
                   (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
+                  subject,
                 );
                 return;
               }
@@ -307,6 +316,7 @@ export const runPublisherConnection = (
               return;
             }
             connectionToken = registry.newConnectionToken();
+            claimantSubject = session.subject;
           }).pipe(
             Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
               rejectUpgrade(

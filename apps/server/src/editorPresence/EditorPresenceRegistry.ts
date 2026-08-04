@@ -118,6 +118,18 @@ interface PublisherRecord extends EditorPresenceEntry {
    * THIS record, pruned to the rate-limit window on every check — see
    * `COMMAND_RATE_LIMIT_MAX`/`COMMAND_RATE_LIMIT_WINDOW_MS` above. */
   readonly commandTimestamps: ReadonlyArray<number>;
+  /** The authenticated session's `subject` at the moment THIS record was
+   * FIRST claimed (never updated by a later same-subject reconnect — see
+   * `registerPublisher`'s SESSION TAKEOVER doc below for why a claim from a
+   * DIFFERENT subject is refused rather than silently allowed to supersede
+   * it). `undefined` when the caller didn't supply one — every REAL
+   * connection always does (see `EditorPresenceRoute.ts`'s
+   * `runPublisherConnection`, which threads it from the connection's own
+   * auth); `undefined` only shows up from a test that doesn't care about
+   * identity, and a record with no known subject imposes no identity
+   * check on takeover, matching this parameter's existing optional/no-op
+   * defaults for `close`/`send` above. */
+  readonly claimantSubject: string | undefined;
 }
 
 /** One `sendCommand` call awaiting its `commandResult` (or a timeout, or a
@@ -151,10 +163,13 @@ function toEntry(record: PublisherRecord): EditorPresenceEntry {
 
 /** Explicit result type for registerPublisher's Ref.modify — without this,
  * the two branches' object-literal shapes don't unify into one type TS can
- * infer, since a bare `{ refused: true }` vs `{ refused: false, frame,
- * subscribers, supersededClose }` have structurally different keys. */
+ * infer, since a bare `{ refused: true, reason }` vs `{ refused: false,
+ * frame, subscribers, supersededClose }` have structurally different keys.
+ * `reason` distinguishes the two ways a claim can be refused (task #60
+ * added `subject_mismatch` alongside the pre-existing `at_capacity`) so the
+ * logging below can say which, without a second boolean tacked on. */
 type RegisterPublisherResult =
-  | { readonly refused: true }
+  | { readonly refused: true; readonly reason: "at_capacity" | "subject_mismatch" }
   | {
       readonly refused: false;
       readonly frame: string;
@@ -184,6 +199,13 @@ export class EditorPresenceRegistry extends Context.Service<
      * Both are optional and default to a no-op so existing single-connection
      * callers/tests that only care about presence, not commands, don't need
      * to thread either through.
+     *
+     * `subject` is the caller's authenticated identity (task #60) — pass
+     * the real `AuthenticatedSession.subject` from `EditorPresenceRoute.ts`
+     * so a takeover attempt from a DIFFERENT subject than whoever currently
+     * holds `sessionId` is refused instead of silently allowed. Optional,
+     * defaulting to no identity check, so existing callers/tests that only
+     * care about presence, not identity, keep working unchanged.
      */
     readonly registerPublisher: (
       sessionId: string,
@@ -195,6 +217,7 @@ export class EditorPresenceRegistry extends Context.Service<
       },
       close?: EditorPresenceCloseConnection,
       send?: EditorPresencePublisherSend,
+      subject?: string,
     ) => Effect.Effect<void>;
     readonly updatePublisherSelection: (
       sessionId: string,
@@ -300,15 +323,31 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
    * OPEN and kept publishing into a record every one of its writes was now
    * discarded from by the connection-token guard).
    *
-   * The take-over itself is intentional and unchanged — it's what makes a
-   * reconnect after a Unity domain reload replace the stale chip instead
-   * of duplicating it, and rejecting the claim outright would break that.
-   * What changes: the connection being superseded is now told, via a
-   * coded close on ITS OWN socket (`sessionSuperseded`, outside the
-   * credential-close class, so a well-behaved client can retry if it
-   * wants to). This is why `PublisherRecord` carries a `close` callback —
-   * the registry doesn't own a socket, only a way to ask the route to
-   * close the one it superseded.
+   * The take-over itself is intentional for a SAME-identity reconnect — it's
+   * what makes a reconnect after a Unity domain reload replace the stale
+   * chip instead of duplicating it, and rejecting the claim outright would
+   * break that. What changes on a same-identity takeover: the connection
+   * being superseded is now told, via a coded close on ITS OWN socket
+   * (`sessionSuperseded`, outside the credential-close class, so a
+   * well-behaved client can retry if it wants to). This is why
+   * `PublisherRecord` carries a `close` callback — the registry doesn't own
+   * a socket, only a way to ask the route to close the one it superseded.
+   *
+   * TASK #60 — TAKEOVER BY A DIFFERENT SUBJECT IS REFUSED, NOT ALLOWED.
+   * A red test proved the pre-fix behavior: `sendCommand` looks up
+   * whoever CURRENTLY holds `sessionId` with zero check tying that claim
+   * to the client the command was actually meant for, so any
+   * operate-scoped client that learns (or guesses) another session's id
+   * could re-`hello` with it and silently start receiving commands
+   * addressed to the original publisher. `claimantSubject` on
+   * `PublisherRecord` is the authenticated identity that FIRST claimed a
+   * given `sessionId`; a later claim from a KNOWN, DIFFERENT subject is
+   * refused outright (`reason: "subject_mismatch"`, logged, no
+   * `supersededClose` — nothing was superseded) rather than reaching the
+   * takeover path at all. A claim with no subject, or a claim whose
+   * subject matches the existing record's, is unaffected — that is
+   * exactly the legitimate reconnect case above, plus every existing
+   * test/caller that never threads a subject through.
    */
   const registerPublisher: EditorPresenceRegistry["Service"]["registerPublisher"] = (
     sessionId,
@@ -316,6 +355,7 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
     hello,
     close = noopClose,
     send = noopSend,
+    subject,
   ) =>
     Effect.gen(function* () {
       const lastSeenAt = yield* nowIso;
@@ -325,8 +365,24 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
           const existing = current.publishers.get(sessionId);
           const isNewSession = existing === undefined;
 
+          // TASK #60: refuse a takeover claimed by a KNOWN, DIFFERENT
+          // subject than whoever currently holds this sessionId — see the
+          // SESSION TAKEOVER doc above. `existing.claimantSubject ===
+          // undefined` (no prior claimant recorded an identity) and
+          // `subject === undefined` (this caller didn't supply one) both
+          // impose no check, matching every existing caller/test that
+          // never threads identity through.
+          if (
+            existing !== undefined &&
+            existing.claimantSubject !== undefined &&
+            subject !== undefined &&
+            existing.claimantSubject !== subject
+          ) {
+            return [{ refused: true, reason: "subject_mismatch" }, current];
+          }
+
           if (isNewSession && current.publishers.size >= MAX_PUBLISHERS) {
-            return [{ refused: true }, current];
+            return [{ refused: true, reason: "at_capacity" }, current];
           }
 
           const supersededClose =
@@ -354,6 +410,12 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
             // plugin.gd), so this null window is momentary, not a lasting
             // regression to "unknown" on every domain-reload reconnect.
             playState: null,
+            // The FIRST known subject wins and sticks — a same-subject
+            // reconnect doesn't need to "refresh" it (it's already equal),
+            // and this is what lets the mismatch check above compare
+            // against the ORIGINAL claimant rather than whatever the most
+            // recent taker happened to supply.
+            claimantSubject: existing?.claimantSubject ?? subject,
           });
           const next = { ...current, publishers };
           const frame = buildPresenceFrame(Array.from(publishers.values(), toEntry));
@@ -365,10 +427,17 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
       );
 
       if (result.refused) {
-        yield* Effect.logWarning(
-          "editor-presence: refused a new publisher registration, at capacity",
-          { sessionId, cap: MAX_PUBLISHERS },
-        );
+        if (result.reason === "subject_mismatch") {
+          yield* Effect.logWarning(
+            "editor-presence: refused a publisher takeover claimed by a different authenticated subject",
+            { sessionId },
+          );
+        } else {
+          yield* Effect.logWarning(
+            "editor-presence: refused a new publisher registration, at capacity",
+            { sessionId, cap: MAX_PUBLISHERS },
+          );
+        }
         return;
       }
 
