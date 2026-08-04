@@ -2463,6 +2463,79 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
   );
 });
 
+describe("F-1 fail-closed — third-party session identity cannot be resolved at startup", () => {
+  // Sibling of `describe("PreviewManager", ...)` — see H1's own comment on
+  // this same pattern.
+  beforeEach(() => {
+    appOn.mockClear();
+    fromId.mockClear();
+    shellOpenExternal.mockClear();
+  });
+
+  const flush = Effect.sleep(50);
+
+  // Mutation-tested (independent review, 2026-08-04): flipping
+  // `resolvePopupNavigationTarget`'s `thirdPartySessionForPopupPolicy ===
+  // null` branch from `denyOnly` to `loadInPanel` was the ONLY survivor out
+  // of nine mutations run against the real popup-policy module — nothing
+  // previously asserted this handler's behavior when
+  // `getThirdPartyBrowserSession()` itself fails at startup. Unreachable in
+  // practice today (BrowserSession.ts's real implementation only fails on a
+  // partition-derivation or session-creation error, both surfaced loudly
+  // elsewhere), and it correctly fails CLOSED already — this pins that so a
+  // future edit can't flip it to fail-open unnoticed.
+  effectIt.live(
+    "denies AND does not loadURL any popup — third-party or not — when third-party session identity failed to resolve",
+    () =>
+      withManagerUsingBrowserSession(
+        {
+          getThirdPartyBrowserSession: () =>
+            Effect.fail(
+              new BrowserSession.BrowserSessionCreationError({
+                scope: "third-party-tabs",
+                partition: "persist:devgame-thirdparty-test",
+                cause: new Error("simulated session-creation failure"),
+              }),
+            ),
+        },
+        (manager) =>
+          Effect.gen(function* () {
+            void manager;
+            const webContentsCreatedHandler = appOn.mock.calls.find(
+              ([event]) => event === "web-contents-created",
+            )?.[1] as (event: unknown, wc: unknown) => void;
+            const loadURL = vi.fn(async () => undefined);
+            const setWindowOpenHandler = vi.fn();
+            webContentsCreatedHandler(
+              {},
+              {
+                id: 505,
+                getType: () => "webview",
+                getURL: () => "https://figma.example/file/abc",
+                session: FAKE_THIRD_PARTY_SESSION,
+                loadURL,
+                setWindowOpenHandler,
+              },
+            );
+            const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+              url: string;
+            }) => { action: string };
+
+            // A same-origin URL — under G3's normal policy this would load
+            // in-panel. Deny-only means it must not, even here.
+            const result = openHandler({ url: "https://figma.example/file/def" });
+
+            expect(result).toEqual({ action: "deny" });
+            yield* flush;
+            // The effect, not the return value: deny-only means NOTHING
+            // navigates and NOTHING deflects.
+            expect(loadURL).not.toHaveBeenCalled();
+            expect(shellOpenExternal).not.toHaveBeenCalled();
+          }),
+      ),
+  );
+});
+
 describe("G4 — automation namespace excludes third-party tabs", () => {
   // Sibling of `describe("PreviewManager", ...)` — see H1's own comment on
   // this same pattern.

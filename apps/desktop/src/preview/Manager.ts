@@ -531,6 +531,23 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // single popup event, which is both unnecessary overhead and, if this
   // effect never handles a raw failure, would deny-without-navigating
   // forever rather than serving stale identity.
+  //
+  // CORRECTED 2026-08-04: this used to be justified here as safe against a
+  // G5-style bootstrap-ordering race because this generator body runs
+  // start-to-finish before `app.on("web-contents-created", ...)` registers
+  // below. That's not a real safety argument — `Effect.gen` bodies are
+  // ordinary interruptible Effects with real yield points (this one
+  // included), not something that becomes safe by being free of them. The
+  // actual guarantee: `DesktopWindow.ts` takes `PreviewManager.PreviewManager`
+  // as a Layer dependency (`yield* PreviewManager.PreviewManager`,
+  // `DesktopWindow.ts:251`), so Effect's own layer graph cannot begin
+  // constructing DesktopWindow — and therefore cannot create the main
+  // `BrowserWindow` — until THIS layer, including the listener registered
+  // below, has already finished. No `<webview>` element (the only thing
+  // that produces the "webview"-typed webContents this handler cares about)
+  // can exist before that window loads its renderer page. The ordering is
+  // enforced by the dependency graph between layers, not by any property of
+  // how this particular function happens to execute.
   const thirdPartySessionForPopupPolicy: Session | null = yield* Effect.orElseSucceed(
     browserSession.getThirdPartyBrowserSession(),
     () => null,
