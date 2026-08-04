@@ -198,7 +198,21 @@ function makeTestLayer(input: {
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
   readonly thirdPartySession?: Electron.Session;
+  // F-4 (independent security review, follow-up to G5, 2026-08-04): these
+  // used to default to a blanket `.startsWith(...)` prefix match — the
+  // exact vulnerable semantics G5 removed from the real BrowserSession.ts
+  // (`isPartition`/`isThirdPartyPartition`, which check SET MEMBERSHIP /
+  // an exact cached value, never a prefix). A test that registers nothing
+  // here gets NOTHING recognized as preview or third-party, matching the
+  // real fail-closed default; a test exercising `will-attach-webview`
+  // with a specific partition string must opt that exact string in here,
+  // the same way the real code only ever recognizes a partition after
+  // this process's own derivation actually produced it.
+  readonly browserPartitions?: readonly string[];
+  readonly thirdPartyPartition?: string | null;
 }) {
+  const browserPartitions = new Set(input.browserPartitions ?? []);
+  const thirdPartyPartition = input.thirdPartyPartition ?? null;
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
     get: Effect.sync(() => desktopSettings),
@@ -274,10 +288,9 @@ function makeTestLayer(input: {
         Layer.mock(PreviewManager.PreviewManager)({
           getBrowserSession: () => Effect.succeed({} as Electron.Session),
           setMainWindow: () => Effect.void,
-          isBrowserPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
+          isBrowserPartition: (partition) => browserPartitions.has(partition),
           getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
-          isThirdPartyBrowserPartition: (partition) =>
-            partition.startsWith("persist:devgame-thirdparty-"),
+          isThirdPartyBrowserPartition: (partition) => partition === thirdPartyPartition,
           getThirdPartyBrowserSession: () =>
             Effect.succeed(input.thirdPartySession ?? FAKE_THIRD_PARTY_SESSION),
         }),
@@ -372,10 +385,13 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
           Layer.mock(PreviewManager.PreviewManager)({
             getBrowserSession: () => Effect.succeed({} as Electron.Session),
             setMainWindow: () => Effect.void,
-            isBrowserPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
+            // F-4: no test reaches `will-attach-webview` through this
+            // splash scenario, so nothing needs to be registered as
+            // recognized — matches the real fail-closed default (see
+            // makeTestLayer above, which IS exercised against it).
+            isBrowserPartition: () => false,
             getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
-            isThirdPartyBrowserPartition: (partition) =>
-              partition.startsWith("persist:devgame-thirdparty-"),
+            isThirdPartyBrowserPartition: () => false,
             getThirdPartyBrowserSession: () => Effect.succeed(FAKE_THIRD_PARTY_SESSION),
           }),
         ),
@@ -1404,7 +1420,12 @@ describe("DesktopWindow", () => {
       const fakeWindow = makeFakeBrowserWindow();
       const createCount = yield* Ref.make(0);
       const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+      const layer = makeTestLayer({
+        window: fakeWindow.window,
+        createCount,
+        mainWindow,
+        browserPartitions: ["persist:devgame-preview-abc"],
+      });
 
       yield* Effect.gen(function* () {
         const desktopWindow = yield* DesktopWindow.DesktopWindow;
@@ -1442,7 +1463,12 @@ describe("DesktopWindow", () => {
         const fakeWindow = makeFakeBrowserWindow();
         const createCount = yield* Ref.make(0);
         const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          thirdPartyPartition: "persist:devgame-thirdparty-abc",
+        });
 
         yield* Effect.gen(function* () {
           const desktopWindow = yield* DesktopWindow.DesktopWindow;
@@ -1493,7 +1519,12 @@ describe("DesktopWindow", () => {
         const fakeWindow = makeFakeBrowserWindow();
         const createCount = yield* Ref.make(0);
         const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          thirdPartyPartition: "persist:devgame-thirdparty-abc",
+        });
 
         yield* Effect.gen(function* () {
           const desktopWindow = yield* DesktopWindow.DesktopWindow;
