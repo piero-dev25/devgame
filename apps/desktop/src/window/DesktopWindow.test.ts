@@ -264,6 +264,8 @@ function makeTestLayer(input: {
           setMainWindow: () => Effect.void,
           isBrowserPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
           getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
+          isThirdPartyBrowserPartition: (partition) =>
+            partition.startsWith("persist:devgame-thirdparty-"),
         }),
       ),
     ),
@@ -358,6 +360,8 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             setMainWindow: () => Effect.void,
             isBrowserPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
             getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
+            isThirdPartyBrowserPartition: (partition) =>
+              partition.startsWith("persist:devgame-thirdparty-"),
           }),
         ),
       ),
@@ -991,6 +995,124 @@ describe("DesktopWindow", () => {
 
         assert.isTrue(prevented);
         assert.deepEqual(openedExternalUrls, ["https://accounts.microsoft.com/oauth"]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("allows a preview-partition webview to attach with contextIsolation=false", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+        if (!willAttachWebview) {
+          return yield* Effect.die("will-attach-webview listener was not registered");
+        }
+        let prevented = false;
+        const webPreferences: Record<string, unknown> = {};
+        willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+          partition: "persist:devgame-preview-abc",
+        });
+
+        assert.isFalse(prevented);
+        assert.deepEqual(webPreferences, {
+          sandbox: true,
+          nodeIntegration: false,
+          nodeIntegrationInSubFrames: false,
+          contextIsolation: false,
+        });
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect(
+    "allows a third-party-partition webview to attach with contextIsolation=true (untrusted external content, no preload to protect)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          const webPreferences: Record<string, unknown> = {};
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:devgame-thirdparty-abc",
+          });
+
+          assert.isFalse(prevented);
+          assert.deepEqual(webPreferences, {
+            sandbox: true,
+            nodeIntegration: false,
+            nodeIntegrationInSubFrames: false,
+            contextIsolation: true,
+          });
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "blocks a webview attach whose partition matches neither the preview nor the third-party allowlist",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          const webPreferences: Record<string, unknown> = {};
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:some-unrelated-partition",
+          });
+
+          assert.isTrue(prevented);
+          assert.deepEqual(webPreferences, {});
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect("blocks a webview attach with a missing or non-string partition", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+        if (!willAttachWebview) {
+          return yield* Effect.die("will-attach-webview listener was not registered");
+        }
+        let prevented = false;
+        willAttachWebview({ preventDefault: () => (prevented = true) }, {}, {});
+
+        assert.isTrue(prevented);
       }).pipe(Effect.provide(layer));
     }),
   );

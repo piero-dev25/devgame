@@ -40,3 +40,26 @@
  */
 export const PREVIEW_WEBVIEW_PREFERENCES =
   "contextIsolation=false,sandbox=true,nodeIntegration=false";
+
+/**
+ * webPreferences for a third-party browser-panel `<webview>` (Figma,
+ * Notion). Deliberately its own constant, not a reuse of
+ * `PREVIEW_WEBVIEW_PREFERENCES` — third-party pages are untrusted external
+ * content, unlike the user's own dev-server preview, and get no preload
+ * (`getThirdPartyBrowserConfig`'s `preloadUrl` is always `null`). With no
+ * preload, there is nothing running in that renderer for
+ * `contextIsolation` to protect either way — `sandbox=true` +
+ * `nodeIntegration=false` already deny Node/IPC access regardless of it —
+ * so `contextIsolation=true` here costs nothing and is pure defense in
+ * depth, unlike preview's `false`, which is a real, documented tradeoff for
+ * the picker preload.
+ *
+ * NOT YET ENFORCED end-to-end: `DesktopWindow.ts`'s `will-attach-webview`
+ * handler is a security-relevant CHANGE still pending review before a
+ * third-party webview can attach at all (it currently only recognizes the
+ * preview partition and hardcodes `contextIsolation=false` for it) — see
+ * that handler's own doc note. This constant is correct in isolation and
+ * ready for that handler to honor once it's updated.
+ */
+export const THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES =
+  "contextIsolation=true,sandbox=true,nodeIntegration=false";

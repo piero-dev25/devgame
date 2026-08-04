@@ -86,6 +86,9 @@ const browserSessionLayer = Layer.succeed(
     getSession: () => Effect.die("unexpected getSession"),
     clearCookies: () => Effect.void,
     clearCache: () => Effect.void,
+    getThirdPartyBrowserPartition: () => Effect.succeed("persist:devgame-thirdparty-test"),
+    getThirdPartyBrowserSession: () => Effect.die("unexpected getThirdPartyBrowserSession"),
+    isThirdPartyPartition: (partition) => partition.startsWith("persist:devgame-thirdparty-"),
   }),
 );
 

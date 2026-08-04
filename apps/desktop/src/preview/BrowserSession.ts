@@ -11,6 +11,39 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 
 const PREVIEW_PARTITION_PREFIX = "persist:devgame-preview-";
 
+// Third-party browser-panel destinations (Figma, Notion — see
+// docs/workbench/three-feature-decisions.md #4) get their OWN prefix, not a
+// scope under the preview one. A Figma tab is not a preview of anything, and
+// it deliberately does NOT go through the thread/environment-scoped preview-
+// session machinery (`Manager.ts`'s `openPreviewSession` chain) — reusing
+// `persist:devgame-preview-` would make the partition name lie about what it
+// holds and imply a relationship to that machinery this was built to avoid.
+//
+// ONE shared scope for every third-party destination (owner ruling, relayed
+// 2026-08-04): cookies are already origin-scoped WITHIN a partition — Figma
+// and Notion cookies can't leak into each other whether or not they share a
+// partition — so a separate partition per product buys no real isolation,
+// only more surface to reason about. `getThirdPartyBrowserPartition`/
+// `getThirdPartyBrowserSession` take no scope argument at all: there is
+// exactly one third-party partition, by construction, so it can't fragment
+// by accident the way a caller-supplied scope string could.
+//
+// WHAT THIS STORES, PLAINLY: real third-party login cookies (and
+// localStorage/IndexedDB), persisted to disk by Electron because the
+// partition name is `persist:`-prefixed — exactly what keeping a user logged
+// into Figma/Notion across app restarts requires, and exactly what the owner
+// asked for ("no repeated logins"). Clearing this partition's storage signs
+// the user out of every third-party destination at once; nothing here
+// prunes or expires it automatically.
+//
+// Deliberately excluded from `clearCookies`/`clearCache` below: those two
+// methods exist to reset PREVIEW data (the user's own dev-server browsing)
+// and iterate `sessionsRef`. Third-party sessions live in their own
+// `thirdPartySessionsRef` specifically so a "reset preview data" action can
+// never silently sign the user out of Figma/Notion as a side effect.
+const THIRD_PARTY_PARTITION_PREFIX = "persist:devgame-thirdparty-";
+const THIRD_PARTY_BROWSER_SCOPE = "third-party-tabs";
+
 // Permissions granted to preview web content. `clipboard-sanitized-write` is the
 // Electron permission behind `navigator.clipboard.writeText()` — note it is NOT
 // `clipboard-write`, which is not a valid Electron permission name. Async
@@ -100,29 +133,56 @@ export class BrowserSession extends Context.Service<
     readonly getSession: (scope?: string) => Effect.Effect<Session, BrowserSessionGetSessionError>;
     readonly clearCookies: () => Effect.Effect<void, BrowserSessionStorageClearError>;
     readonly clearCache: () => Effect.Effect<void, BrowserSessionCacheClearError>;
+    /** The one shared partition for every third-party browser-panel
+     * destination (Figma, Notion, ...) — see the module doc above for why
+     * this takes no scope argument and why it's excluded from
+     * `clearCookies`/`clearCache`. */
+    readonly getThirdPartyBrowserPartition: () => Effect.Effect<
+      string,
+      BrowserSessionPartitionDerivationError
+    >;
+    readonly getThirdPartyBrowserSession: () => Effect.Effect<
+      Session,
+      BrowserSessionGetSessionError
+    >;
+    readonly isThirdPartyPartition: (partition: string) => boolean;
   }
 >()("@t3tools/desktop/preview/BrowserSession") {}
 
 export const make = Effect.gen(function* BrowserSessionMake() {
   const crypto = yield* Crypto.Crypto;
   const sessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(new Map());
+  const thirdPartySessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(
+    new Map(),
+  );
 
-  const getPartition = Effect.fn("BrowserSession.getPartition")(function* (scope = "shared") {
-    const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(scope)).pipe(
-      Effect.mapError(
-        (cause) =>
-          new BrowserSessionPartitionDerivationError({
-            scope,
-            cause,
-          }),
-      ),
-    );
-    return `${PREVIEW_PARTITION_PREFIX}${Encoding.encodeHex(digest).slice(0, 20)}`;
+  const derivePartition = (prefix: string) =>
+    Effect.fn("BrowserSession.derivePartition")(function* (scope: string) {
+      const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(scope)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new BrowserSessionPartitionDerivationError({
+              scope,
+              cause,
+            }),
+        ),
+      );
+      return `${prefix}${Encoding.encodeHex(digest).slice(0, 20)}`;
+    });
+
+  const derivePreviewPartitionForScope = derivePartition(PREVIEW_PARTITION_PREFIX);
+  const derivePreviewPartition = Effect.fn("BrowserSession.getPartition")(function* (
+    scope = "shared",
+  ) {
+    return yield* derivePreviewPartitionForScope(scope);
   });
 
-  const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
-    const partition = yield* getPartition(scope);
-    return yield* SynchronizedRef.modifyEffect(sessionsRef, (sessions) => {
+  const resolveSession = (
+    ref: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
+    scope: string,
+    partition: string,
+  ) =>
+    SynchronizedRef.modifyEffect(ref, (sessions) => {
       const existing = sessions.get(partition);
       if (existing) return Effect.succeed([existing, sessions] as const);
       return Effect.try({
@@ -151,12 +211,33 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           }),
       });
     });
+
+  const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
+    const partition = yield* derivePreviewPartition(scope);
+    return yield* resolveSession(sessionsRef, scope, partition);
   });
 
+  const getThirdPartyPartition = derivePartition(THIRD_PARTY_PARTITION_PREFIX);
+  const getThirdPartyBrowserPartition = Effect.fn("BrowserSession.getThirdPartyBrowserPartition")(
+    function* () {
+      return yield* getThirdPartyPartition(THIRD_PARTY_BROWSER_SCOPE);
+    },
+  );
+
+  const getThirdPartyBrowserSession = Effect.fn("BrowserSession.getThirdPartyBrowserSession")(
+    function* () {
+      const partition = yield* getThirdPartyBrowserPartition();
+      return yield* resolveSession(thirdPartySessionsRef, THIRD_PARTY_BROWSER_SCOPE, partition);
+    },
+  );
+
   return BrowserSession.of({
-    getPartition,
+    getPartition: derivePreviewPartition,
     isPartition: (partition) => partition.startsWith(PREVIEW_PARTITION_PREFIX),
     getSession,
+    getThirdPartyBrowserPartition,
+    getThirdPartyBrowserSession,
+    isThirdPartyPartition: (partition) => partition.startsWith(THIRD_PARTY_PARTITION_PREFIX),
     clearCookies: Effect.fn("BrowserSession.clearCookies")(function* () {
       const sessions = yield* SynchronizedRef.get(sessionsRef);
       yield* Effect.all(

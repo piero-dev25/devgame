@@ -26,7 +26,10 @@ import * as NodeURL from "node:url";
 
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
 import * as PreviewManager from "../../preview/Manager.ts";
-import { PREVIEW_WEBVIEW_PREFERENCES } from "../../preview/WebviewPreferences.ts";
+import {
+  PREVIEW_WEBVIEW_PREFERENCES,
+  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+} from "../../preview/WebviewPreferences.ts";
 import * as IpcChannels from "../channels.ts";
 import * as DesktopIpc from "../DesktopIpc.ts";
 
@@ -214,6 +217,21 @@ export const getPreviewConfig = DesktopIpc.makeIpcMethod({
   }),
 });
 
+export const getThirdPartyBrowserConfig = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.THIRD_PARTY_BROWSER_GET_CONFIG_CHANNEL,
+  payload: Schema.Void,
+  result: DesktopPreviewWebviewConfigSchema,
+  handler: Effect.fn("desktop.ipc.preview.getThirdPartyBrowserConfig")(function* () {
+    const manager = yield* PreviewManager.PreviewManager;
+    yield* manager.getThirdPartyBrowserSession();
+    return {
+      partition: yield* manager.getThirdPartyBrowserPartition(),
+      webPreferences: THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+      preloadUrl: null,
+    };
+  }),
+});
+
 export const setAnnotationTheme = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_SET_ANNOTATION_THEME_CHANNEL,
   payload: DesktopPreviewAnnotationThemeInputSchema,
@@ -371,6 +389,7 @@ export const methods = [
   clearCookies,
   clearCache,
   getPreviewConfig,
+  getThirdPartyBrowserConfig,
   setAnnotationTheme,
   pickElement,
   cancelPickElement,

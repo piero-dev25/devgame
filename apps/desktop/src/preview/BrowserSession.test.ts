@@ -192,6 +192,75 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  it.effect("derives a third-party partition under its own prefix, independent of scope", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+
+      const first = yield* browserSessions.getThirdPartyBrowserPartition();
+      const second = yield* browserSessions.getThirdPartyBrowserPartition();
+
+      assert.strictEqual(first, second);
+      assert.isTrue(first.startsWith("persist:devgame-thirdparty-"));
+      assert.isFalse(first.startsWith("persist:devgame-preview-"));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("isPartition does not claim a third-party partition as a preview one", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const thirdPartyPartition = yield* browserSessions.getThirdPartyBrowserPartition();
+
+      assert.isFalse(browserSessions.isPartition(thirdPartyPartition));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("isThirdPartyPartition recognizes its own partition and rejects a preview one", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const thirdPartyPartition = yield* browserSessions.getThirdPartyBrowserPartition();
+      const previewPartition = yield* browserSessions.getPartition("scope-a");
+
+      assert.isTrue(browserSessions.isThirdPartyPartition(thirdPartyPartition));
+      assert.isFalse(browserSessions.isThirdPartyPartition(previewPartition));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("memoizes the third-party session the same way preview sessions are memoized", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+
+      const first = yield* browserSessions.getThirdPartyBrowserSession();
+      const second = yield* browserSessions.getThirdPartyBrowserSession();
+
+      assert.strictEqual(first, second);
+      assert.strictEqual(fromPartition.mock.calls.length, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect(
+    "clearCookies/clearCache never touch the third-party session — it is preview-only cleanup",
+    () =>
+      Effect.gen(function* () {
+        const browserSessions = yield* BrowserSession.BrowserSession;
+        yield* browserSessions.getSession("scope-a");
+        const thirdPartySession = yield* browserSessions.getThirdPartyBrowserSession();
+
+        yield* browserSessions.clearCookies();
+        yield* browserSessions.clearCache();
+
+        assert.strictEqual(
+          (thirdPartySession as unknown as { clearStorageData: ReturnType<typeof vi.fn> })
+            .clearStorageData.mock.calls.length,
+          0,
+        );
+        assert.strictEqual(
+          (thirdPartySession as unknown as { clearCache: ReturnType<typeof vi.fn> }).clearCache.mock
+            .calls.length,
+          0,
+        );
+      }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("correlates clear failures while still attempting every session", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;

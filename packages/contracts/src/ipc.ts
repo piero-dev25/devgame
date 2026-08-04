@@ -1054,6 +1054,17 @@ export interface DesktopPreviewBridge {
    * the contract + main, not the renderer's mount logic.
    */
   getPreviewConfig: (environmentId: EnvironmentId) => Promise<DesktopPreviewWebviewConfig>;
+  /**
+   * Config for mounting a third-party browser-panel `<webview>` (Figma,
+   * Notion — see BrowserSession.ts's own doc for the shared, non-preview
+   * partition this reads). No `environmentId`: unlike `getPreviewConfig`,
+   * there is exactly one third-party partition for the whole app, so there
+   * is nothing to key it by. `preloadUrl` is always `null` here — the
+   * picker preload's react-grab/bippy machinery targets the user's OWN
+   * source-mapped React app; it has nothing to do on an arbitrary
+   * third-party page and is not attached.
+   */
+  getThirdPartyBrowserConfig: () => Promise<DesktopPreviewWebviewConfig>;
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
   /**
    * Activate the in-page element picker for the given tab. Resolves with

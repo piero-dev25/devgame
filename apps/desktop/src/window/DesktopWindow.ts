@@ -430,18 +430,42 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    // ALLOWLIST, not a style-setter: any `<webview>` whose partition matches
+    // neither predicate below gets `event.preventDefault()` and never
+    // attaches at all. Two NAMED predicates, not one loosened check —
+    // `isBrowserPartition` deliberately excludes the third-party partition
+    // (see BrowserSession.ts's own doc), because preview-only machinery
+    // (`clearCookies`/`clearCache`) must never sweep up third-party
+    // sessions. Merging the two checks here to save a branch would erode
+    // that separation at the one place it's actually enforced.
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-      if (
-        typeof params.partition !== "string" ||
-        !previewManager.isBrowserPartition(params.partition)
-      ) {
+      const partition = typeof params.partition === "string" ? params.partition : null;
+      const isPreviewPartition = partition !== null && previewManager.isBrowserPartition(partition);
+      const isThirdPartyPartition =
+        partition !== null && previewManager.isThirdPartyBrowserPartition(partition);
+      if (!isPreviewPartition && !isThirdPartyPartition) {
         event.preventDefault();
         return;
       }
       webPreferences.sandbox = true;
       webPreferences.nodeIntegration = false;
       webPreferences.nodeIntegrationInSubFrames = false;
-      webPreferences.contextIsolation = false;
+      // Preview loads the user's OWN dev server, and its picker preload
+      // needs `contextIsolation=false` to reach the page's React DevTools
+      // hook (see WebviewPreferences.ts). Third-party tabs load ARBITRARY
+      // EXTERNAL CONTENT — figma.com, notion.so, and anything either links
+      // to — a different trust level that must not share preview's value
+      // just because it shares this handler.
+      //
+      // Setting this `false` ONLY for preview keeps third-party's isolation
+      // INTRINSIC rather than incidental: today it's also true that no
+      // preload runs on a third-party tab, so `contextIsolation` isn't
+      // protecting anything yet — but that fact can change silently (e.g.
+      // an in-page "Add to chat" affordance needing its own preload) with
+      // no error and no reason for whoever adds it to look at this
+      // main-process handler. Keeping the flag itself correct means nobody
+      // has to remember why.
+      webPreferences.contextIsolation = isThirdPartyPartition;
     });
 
     window.webContents.on("context-menu", (event, params) => {

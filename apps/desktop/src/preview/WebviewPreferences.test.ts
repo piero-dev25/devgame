@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { PREVIEW_WEBVIEW_PREFERENCES } from "./WebviewPreferences.ts";
+import {
+  PREVIEW_WEBVIEW_PREFERENCES,
+  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+} from "./WebviewPreferences.ts";
 
 /**
  * Mirrors Electron's webview attribute parser closely enough to catch the
@@ -74,5 +77,44 @@ describe("PREVIEW_WEBVIEW_PREFERENCES", () => {
     // Electron splits on `,` without trimming, so any whitespace would turn
     // a key into an unknown one and silently drop the security flag.
     expect(PREVIEW_WEBVIEW_PREFERENCES).not.toMatch(/\s/);
+  });
+});
+
+describe("THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES", () => {
+  const parsed = parseWebPreferences(THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES);
+
+  it("contains exactly the three security-critical keys", () => {
+    expect(Object.keys(parsed).toSorted()).toEqual(
+      ["contextIsolation", "nodeIntegration", "sandbox"].toSorted(),
+    );
+  });
+
+  it("uses canonical JS-boolean string literals (not yes/no, on/off, 1/0)", () => {
+    for (const value of Object.values(parsed)) {
+      expect(value).toMatch(/^(true|false)$/);
+    }
+  });
+
+  it("ENABLES context isolation, unlike preview — no preload runs here to protect", () => {
+    expect(parsed["contextIsolation"]).toBe("true");
+  });
+
+  it("keeps the renderer sandbox enabled (so the page cannot reach Node APIs)", () => {
+    expect(parsed["sandbox"]).toBe("true");
+  });
+
+  it("disables nodeIntegration (defense in depth — page never gets Node)", () => {
+    expect(parsed["nodeIntegration"]).toBe("false");
+  });
+
+  it("contains no whitespace (Electron's parser does not trim)", () => {
+    expect(THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES).not.toMatch(/\s/);
+  });
+
+  it("differs from PREVIEW_WEBVIEW_PREFERENCES only in contextIsolation", () => {
+    const previewParsed = parseWebPreferences(PREVIEW_WEBVIEW_PREFERENCES);
+    expect(parsed["sandbox"]).toBe(previewParsed["sandbox"]);
+    expect(parsed["nodeIntegration"]).toBe(previewParsed["nodeIntegration"]);
+    expect(parsed["contextIsolation"]).not.toBe(previewParsed["contextIsolation"]);
   });
 });

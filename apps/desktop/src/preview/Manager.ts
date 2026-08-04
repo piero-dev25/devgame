@@ -3559,6 +3559,13 @@ export class PreviewManager extends Context.Service<
     readonly setMainWindow: (window: BrowserWindow) => Effect.Effect<void, PreviewManagerError>;
     readonly getBrowserSession: (scope?: string) => Effect.Effect<Session, PreviewManagerError>;
     readonly isBrowserPartition: (partition: string) => boolean;
+    /** The one shared session/partition for every third-party browser-panel
+     * destination (Figma, Notion) — see BrowserSession.ts's own doc for why
+     * these take no scope argument and are kept out of `clearCookies`/
+     * `clearCache`'s reach. */
+    readonly getThirdPartyBrowserSession: () => Effect.Effect<Session, PreviewManagerError>;
+    readonly getThirdPartyBrowserPartition: () => Effect.Effect<string, PreviewManagerError>;
+    readonly isThirdPartyBrowserPartition: (partition: string) => boolean;
     readonly createTab: (tabId: string) => Effect.Effect<PreviewTabState, PreviewManagerError>;
     readonly closeTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly registerWebview: (
@@ -3662,6 +3669,31 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         );
     }),
     isBrowserPartition: browserSession.isPartition,
+    getThirdPartyBrowserSession: Effect.fn("PreviewManager.getThirdPartyBrowserSession")(
+      function* () {
+        return yield* browserSession
+          .getThirdPartyBrowserSession()
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new PreviewOperationError({ operation: "getThirdPartyBrowserSession", cause }),
+            ),
+          );
+      },
+    ),
+    getThirdPartyBrowserPartition: Effect.fn("PreviewManager.getThirdPartyBrowserPartition")(
+      function* () {
+        return yield* browserSession
+          .getThirdPartyBrowserPartition()
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new PreviewOperationError({ operation: "getThirdPartyBrowserPartition", cause }),
+            ),
+          );
+      },
+    ),
+    isThirdPartyBrowserPartition: browserSession.isThirdPartyPartition,
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,
