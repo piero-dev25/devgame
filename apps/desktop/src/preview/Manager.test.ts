@@ -2227,11 +2227,12 @@ describe("G2 — early main-process window-open guard", () => {
 
 // #88 (2026-08-04): restores G2/H1/F-3's popup policy — same-origin loads
 // in the guest, cross-origin is denied and deflected to the real external
-// browser, rate limited — recovered from `git show 2d8a9acb6` (NOT
-// `630eeb5e9`, a wrong citation that was sitting in this file's own
-// now-rewritten comment). Applied UNCONDITIONALLY now, not scoped by
-// session identity: preview is the only guest type this handler ever
-// sees, and the old "preview's own trusted dev server" exemption doesn't
+// browser, rate limited — recovered from `git show 630eeb5e9` (the last
+// tree state before `f82da4876` deleted this mechanism, and the citation
+// this file's own now-rewritten comment already had right). Applied
+// UNCONDITIONALLY now, not scoped by session identity: preview is the
+// only guest type this handler ever sees, and the old "preview's own
+// trusted dev server" exemption doesn't
 // hold for a running game build that pulls npm packages, CDN scripts, and
 // remote asset hosts — see `handlePopupNavigation`'s own comment in
 // Manager.ts. `window.open` still needs SOME handler regardless (G2's

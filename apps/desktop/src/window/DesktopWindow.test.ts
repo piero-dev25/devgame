@@ -1014,9 +1014,10 @@ describe("DesktopWindow", () => {
   // #88 (2026-08-04): restores G3/#80's `did-attach-webview` guest-
   // navigation guard (same-origin allow, cross-origin deny-and-deflect,
   // `will-navigate`/`will-redirect`, a minimal guest context menu) —
-  // recovered from `git show 2d8a9acb6` (NOT `630eeb5e9`, a wrong citation
-  // that was sitting in this file's own now-removed comment) — but applied
-  // UNCONDITIONALLY, not scoped by session identity: preview is the only
+  // recovered from `git show 630eeb5e9` (the last tree state before
+  // `f82da4876` deleted this mechanism, and the citation this file's own
+  // now-removed comment already had right) — but applied UNCONDITIONALLY,
+  // not scoped by session identity: preview is the only
   // guest type left, and the old "preview's guest loads the user's own,
   // fully-trusted dev server" carve-out doesn't hold for a running game
   // build that pulls npm packages, CDN scripts, and remote asset hosts.

@@ -483,10 +483,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // `DesktopWindow.ts`'s guest guard (which listens for exactly that event)
   // never saw this path either (H1).
   //
-  // #88 (2026-08-04): restores the same-origin/deflect/rate-limited policy
-  // (`git show 2d8a9acb6` for the full history and the probe that proved
-  // it — NOT `630eeb5e9`, an earlier, wrong citation in this comment and in
-  // the ticket both) — but applies it UNCONDITIONALLY, not scoped by
+  // #88 (2026-08-04): restores the same-origin/deflect/rate-limited policy —
+  // `git show 630eeb5e9` for the full history and the probe that proved it.
+  // The ticket's own citation was right; a mid-fix correction here
+  // second-guessed it against the WRONG check (that commit's own MESSAGE is
+  // unrelated docs — but `git show <sha>:<path>` reads a file's content AT
+  // THAT TREE, not that commit's own diff, and the tree is what matters for
+  // recovery). `630eeb5e9` is the last tree state before `f82da4876` deleted
+  // this mechanism, and it's more complete than the commit that originally
+  // introduced the code (`2d8a9acb6`): two later commits corrected several
+  // of its comments — see `ElectronShell.ts`'s cross-origin-hop invariant
+  // note, which survived untouched there the whole time since `f82da4876`
+  // never touched that file. Applied UNCONDITIONALLY here, not scoped by
   // session identity, because preview is now the only guest type this
   // handler ever sees. See `DesktopWindow.ts`'s `did-attach-webview` guard
   // for why the old "preview loads the user's own trusted dev server"
