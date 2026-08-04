@@ -1,7 +1,8 @@
 [application]
 
-config/name="T3 Editor Presence — addon test project"
+config/name="DevGame Editor Presence — addon test project"
 config/features=PackedStringArray("4.7")
+run/main_scene="res://main.tscn"
 
 [editor_plugins]
 

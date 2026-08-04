@@ -1,0 +1,18 @@
+; Minimal main scene so the fixture project can actually RUN.
+;
+; The fixture was built to validate the editor-presence SELECTION path, which
+; needs no scene at all — so it shipped without one, and without
+; `run/main_scene`. That is fine until Play/Stop (task #48), at which point
+; `play_main_scene()` has nothing to launch and Godot prompts the user instead
+; of running, which is indistinguishable from our command silently failing.
+;
+; The attached script prints a line on _ready and on exit. That is the point:
+; a Godot window appearing proves a window appeared. The stdout line proves the
+; GAME actually started, which is the claim Play/Stop has to make.
+
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://main.gd" id="1"]
+
+[node name="Main" type="Node2D"]
+script = ExtResource("1")
