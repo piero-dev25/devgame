@@ -343,11 +343,19 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
    * `PublisherRecord` is the authenticated identity that FIRST claimed a
    * given `sessionId`; a later claim from a KNOWN, DIFFERENT subject is
    * refused outright (`reason: "subject_mismatch"`, logged, no
-   * `supersededClose` — nothing was superseded) rather than reaching the
-   * takeover path at all. A claim with no subject, or a claim whose
-   * subject matches the existing record's, is unaffected — that is
-   * exactly the legitimate reconnect case above, plus every existing
-   * test/caller that never threads a subject through.
+   * `supersededClose` — nothing was superseded — but the IMPOSTOR's own
+   * connection is closed with `invalidCredential`, 4401, reusing the
+   * existing credential-class code rather than minting a new one; see the
+   * close call below for why) rather than reaching the takeover path at
+   * all. A claim with no subject, or a claim whose subject matches the
+   * existing record's, is unaffected — that is exactly the legitimate
+   * reconnect case above (Unity domain-reload, Godot reconnect), plus
+   * every existing test/caller that never threads a subject through. This
+   * is load-bearing in the OTHER direction too: over-tightening this check
+   * to refuse a SAME-subject reconnect would permanently disconnect the
+   * editor on every ordinary Play press — see EditorPresenceRoute.test.ts's
+   * "reconnect by the SAME authenticated subject" test, which exists
+   * specifically to catch that regression, not just the takeover itself.
    */
   const registerPublisher: EditorPresenceRegistry["Service"]["registerPublisher"] = (
     sessionId,
@@ -431,6 +439,28 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
           yield* Effect.logWarning(
             "editor-presence: refused a publisher takeover claimed by a different authenticated subject",
             { sessionId },
+          );
+          // Close the IMPOSTOR's own connection (the `close` param above is
+          // always this call's own connection, never someone else's — see
+          // its doc comment) with `invalidCredential` (4401), NOT a new
+          // code. The close-code taxonomy is a named, saturated set —
+          // 4400/4401/4402/4403/4500 — and every engine client treats any
+          // UNRECOGNISED code >= 4000 as keep-retrying, so inventing a new
+          // one here would make a rejected impostor (and, if the taxonomy
+          // ever changed shape, any legitimate client hitting a future new
+          // code) reconnect-loop forever against a server that will never
+          // accept it — a self-inflicted DoS shipped as a security fix.
+          // 4401 is the right REUSE, not 4402 (sessionSuperseded): 4402
+          // means "you were legitimately superseded," the opposite of what
+          // happened here, where "you presented a session id that isn't
+          // yours" genuinely is a credential-class failure — the same
+          // class every engine client already stops retrying on.
+          //
+          // EditorPresenceCloseConnection's own type guarantees it never
+          // fails (see the doc on that type) — no catch needed here.
+          yield* close(
+            EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+            "session_id already claimed by a different authenticated identity",
           );
         } else {
           yield* Effect.logWarning(

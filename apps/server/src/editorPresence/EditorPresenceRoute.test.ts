@@ -1124,13 +1124,17 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
 
   /** Auto-replies to any `command` frame with `commandResult{ok:true}`,
    * exactly like the wire-roundtrip test above's fake engine — needed on
-   * BOTH sockets in the takeover test below, not just whichever one is
-   * "supposed to" receive the command: `dispatchEditorCommand` awaits a
-   * real `commandResult` with a 10s bound that never elapses under
-   * `it.effect`'s virtual clock, so if the RED (vulnerable) state routes
-   * the frame to the socket that ISN'T wired to reply, the test hangs
-   * instead of failing — which would make a real vulnerability look like
-   * a timeout, not a finding.
+   * the victim socket in the takeover test below: `dispatchEditorCommand`
+   * awaits a real `commandResult` with a 10s bound that never elapses
+   * under `it.effect`'s virtual clock, so if the command routes to the
+   * victim (the correct, fixed behavior) and nothing replies, the test
+   * hangs instead of passing.
+   *
+   * The impostor side originally needed this too, back when a refused
+   * takeover left the impostor's connection open but silently ignored —
+   * it no longer does: the fix now closes the impostor's connection
+   * outright (see the `publishFrameAndObserveClose` call below), so
+   * there's no longer a second socket here to attach a replier to.
    *
    * Attached DIRECTLY to the raw `ws` socket's own "message" event
    * (`connectPublisherAndConfirmRegistered`'s own `onMessage` callback is
@@ -1200,28 +1204,31 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         // made a genuine RED result look like a hang.
         yield* Effect.addFinalizer(() => Effect.sync(() => victimSocket.close()));
 
-        const attackerMessages: Array<string> = [];
-        const attackerSocket = yield* connectPublisherAndConfirmRegistered(
+        // The impostor's own connection is expected to be CLOSED by the
+        // takeover guard, not left open-but-ignored — so this can't use
+        // `connectPublisherAndConfirmRegistered` (it waits for a `pong`
+        // that will now never arrive: the server closes the connection
+        // instead of finishing the hello/ping/pong sequence). It uses
+        // `publishFrameAndObserveClose` instead, which sends one frame and
+        // waits for exactly the close the server sends back.
+        const attackerOutcome = yield* publishFrameAndObserveClose(
           publisherUrl,
           attackerIssued.token,
-          sharedSessionId,
-          undefined,
-          () => {},
+          helloFrameText(sharedSessionId),
         );
-        attackerSocket.on("message", makeCommandAutoReplier(attackerSocket, attackerMessages));
-        yield* Effect.addFinalizer(() => Effect.sync(() => attackerSocket.close()));
+        // THE property this test exists for: the impostor's connection
+        // must be refused with a credential-class close, not silently
+        // ignored and not superseded — not "some check rejected the
+        // takeover", the actual bytes on the actual wire. Assert the
+        // EFFECT, not a precondition. 4401, not 4402: 4402
+        // (sessionSuperseded) would claim the impostor was LEGITIMATELY
+        // superseded, the opposite of what happened; see
+        // EditorPresenceRegistry.ts's own doc on why 4401 is the deliberate
+        // reuse here, not a new code.
+        assert.strictEqual(attackerOutcome.closeCode, 4401);
+        assert.isTrue(attackerOutcome.closeReason.length > 0);
 
         const outcome = yield* dispatchEditorCommand(dispatcherSession, sharedSessionId, "play");
-
-        // THE property this test exists for: the impostor's connection
-        // must never receive so much as one command frame — not "some
-        // check rejected the takeover", the actual bytes on the actual
-        // wire. Assert the EFFECT, not a precondition.
-        const attackerCommandFrames = attackerMessages.filter((raw) => {
-          const parsed = decodeUnknownJson(raw) as { readonly type?: string };
-          return parsed.type === "command";
-        });
-        assert.deepStrictEqual(attackerCommandFrames, []);
 
         // The command must still reach the LEGITIMATE, original
         // publisher — proving this isn't "nobody gets it" (which would
@@ -1248,5 +1255,87 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
           ),
         ),
       ),
+    // A short explicit timeout, not the 60s default: if the takeover guard
+    // ever regresses to silently ALLOW the impostor's claim (instead of
+    // closing it), `publishFrameAndObserveClose` above waits for a close
+    // that will simply never come — a regression here is hang-shaped, not
+    // failure-shaped, and a hang is strictly worse than a fast failure (it
+    // was measured directly: mutating the guard away during this fix's own
+    // development turned a would-be assertion failure into a 60s timeout).
+    8_000,
+  );
+
+  it.effect(
+    "a session-id reconnect by the SAME authenticated subject still succeeds and supersedes cleanly — the takeover guard must not over-tighten (task #60 regression guard)",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        // The case the takeover guard above must NOT break: Unity's domain
+        // reload, or a Godot reconnect, re-`hello`s with the SAME session
+        // id from the SAME authenticated identity. `issueSession` with no
+        // `scopes` gets the broad default (used elsewhere in this file for
+        // both roles off one token) — this test isn't exercising scopes,
+        // only identity, so there's no reason to narrow them here.
+        const issued = yield* serverAuth.issueSession({ subject: "same-subject-owner" });
+        const publisherUrl = yield* getPublisherWsUrl();
+        const subscriberUrl = yield* getSubscriberWsUrl();
+        const sharedSessionId = "reconnect-same-subject-repro";
+
+        const firstSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => firstSocket.close()));
+
+        // THE assertion this test exists for: reconnecting with the SAME
+        // subject must complete hello -> ping -> pong normally — i.e. NOT
+        // be refused and closed the way the sibling test above's
+        // different-subject takeover is. If the guard were ever
+        // over-tightened to treat ANY known claimant as a mismatch
+        // (same-subject included), this would hang instead of resolving,
+        // since the server would close the connection instead of ever
+        // replying to `ping` — which is exactly why this test also carries
+        // the short explicit timeout below, not the 60s default.
+        const secondSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => secondSocket.close()));
+
+        // "Supersedes cleanly," not just "wasn't refused": a fresh
+        // subscriber connecting now must see exactly ONE entry for this
+        // session id, not two — the same ghost-entry regression this
+        // file's very first takeover-adjacent test (`capabilities-default`
+        // above) was written to catch via `connectSubscriberAndReadFirstFrame`,
+        // re-proven here specifically through the NEW subject-aware code
+        // path so a duplicate-entry regression in THAT path doesn't slip
+        // through unnoticed.
+        const frame = yield* connectSubscriberAndReadFirstFrame(subscriberUrl, issued.token);
+        const matching = frame.editors.filter((entry) => entry.session.id === sharedSessionId);
+        assert.strictEqual(matching.length, 1);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+    // Same reasoning as the sibling takeover test's explicit timeout above
+    // — a regression in THIS direction (over-tightening) is also
+    // hang-shaped, not failure-shaped, via the second `connectPublisherAndConfirmRegistered` call.
+    8_000,
   );
 });
