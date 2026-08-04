@@ -63,7 +63,16 @@ what they can do and new actions will be added; an unknown action must be
 answered `ok: false` with `error: "unsupported_action"`, never dropped. A
 dropped command is indistinguishable from a hung editor.
 
-## Capability advertisement — required, not a nice-to-have
+## Capability advertisement
+
+**The feature is required; the field is optional.** Those are not in tension,
+and an earlier draft of this heading said only "required", which was ambiguous
+enough that an implementer had to stop and ask which was meant.
+
+- Required: the app MUST discover what each engine can do, and the toolbar MUST
+  NOT offer a control an engine cannot honour.
+- Optional: the `capabilities` key itself, so a plugin built before this
+  existed keeps working rather than appearing capability-less.
 
 The `hello` frame gains an optional `capabilities: string[]`.
 
