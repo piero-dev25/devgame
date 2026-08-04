@@ -13,12 +13,29 @@ const RECONNECT_MAX_MS = 30_000;
 /**
  * Close codes >= 4000 are the application-specific range (RFC 6455 §7.4.2).
  * The server authenticates AFTER accepting the WebSocket upgrade and rejects
- * by closing with a 4xxx code plus a human-readable reason — it never
- * refuses the upgrade with an HTTP 401 (see
- * docs/workbench/godot-probe-findings.md, measured against a real engine: an
- * HTTP-layer refusal and "nothing listening" are indistinguishable to a
- * WebSocket client, so the server deliberately always completes the
- * handshake before it can say why it's rejecting the connection).
+ * by closing with a 4xxx code plus a human-readable reason.
+ *
+ * This comment used to assert the server "never refuses the upgrade with an
+ * HTTP 401." That was false for this route's subscriber path from the day it
+ * shipped until task #57 — the credential check ran pre-upgrade and answered
+ * a real HTTP 401, which is invisible here. It is true NOW because that
+ * check was moved, not because it was ever true.
+ *
+ * Why the server has to complete the handshake before it can say why it is
+ * rejecting: an HTTP-layer refusal and "nothing listening" are the same
+ * event to a WebSocket client. Measured in a real Chrome against the real
+ * route — a 401-refused upgrade and a dead port BOTH arrive here as
+ * `code 1006`, `reason ""`, `wasClean false`, while an accepted-then-closed
+ * rejection arrives as `code 4400`, `reason "missing_credential"`. Same
+ * finding as docs/workbench/godot-probe-findings.md measured against a real
+ * engine.
+ *
+ * The practical consequence, and why `classifyEditorPresenceClose` below
+ * cannot fix this on its own: 1006 is not in the application range, so it
+ * classifies as `no-session` and keeps retrying. That is correct for a dead
+ * port and wrong for a permanent credential failure — and from here the two
+ * are indistinguishable. Only the server can tell them apart, which is why
+ * the fix was server-side.
  */
 const APPLICATION_CLOSE_CODE_THRESHOLD = 4000;
 /**

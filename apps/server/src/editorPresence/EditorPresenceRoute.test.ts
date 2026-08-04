@@ -48,7 +48,11 @@ import {
   runPublisherConnection,
 } from "./EditorPresenceRoute.ts";
 import * as EditorPresenceRegistry from "./EditorPresenceRegistry.ts";
-import { buildPongFrame, DEFAULT_EDITOR_PRESENCE_CAPABILITIES } from "./protocol.ts";
+import {
+  buildPongFrame,
+  DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+  EDITOR_PRESENCE_CLOSE_CODE,
+} from "./protocol.ts";
 
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
@@ -564,13 +568,17 @@ it.layer(NodeServices.layer)("EditorPresenceRoute per-role scope enforcement", (
     ),
   );
 
-  // The credential check runs strictly BEFORE the upgrade and the scope
-  // check runs strictly AFTER it — this proves the credential path is
-  // untouched by the scope check directly, rather than just by code
-  // inspection: a missing credential still never reaches the upgrade at
-  // all, and still surfaces as a plain pre-upgrade 401, not the scope
-  // check's post-upgrade 4401 close.
-  it.effect("still returns a pre-upgrade 401 for a missing-credential subscriber, unchanged", () =>
+  // Task #57 INVERTED this test. It previously asserted a pre-upgrade HTTP
+  // 401, on the premise that a browser could see it. It cannot: measured in
+  // a real Chrome against this real route, a 401-refused upgrade and a dead
+  // port BOTH arrive as code 1006 / reason "" / wasClean false, while an
+  // accepted-then-closed rejection arrives as 4400 with its reason intact.
+  // So the credential check now runs POST-upgrade for subscribers, exactly
+  // as it already did for publishers.
+  //
+  // Asserting the EFFECT a client can act on — the upgrade completed and a
+  // credential-class close code arrived — not the internal ordering.
+  it.effect("accepts the upgrade then closes 4400 for a missing-credential subscriber", () =>
     Effect.gen(function* () {
       yield* HttpRouter.serve(editorPresenceRouteLayer, {
         disableListenLog: true,
@@ -578,10 +586,34 @@ it.layer(NodeServices.layer)("EditorPresenceRoute per-role scope enforcement", (
       }).pipe(Layer.build);
 
       const url = yield* getSubscriberWsUrl();
-      const outcome = yield* probeSubscriberUpgrade(url, {});
+      const outcome = yield* probePublisherUpgrade(url, {});
 
-      assert.isFalse(outcome.opened);
-      assert.strictEqual(outcome.httpStatus, 401);
+      assert.isTrue(outcome.opened);
+      assert.isNull(outcome.httpStatus);
+      assert.strictEqual(outcome.closeCode, EDITOR_PRESENCE_CLOSE_CODE.missingCredential);
+      assert.isTrue((outcome.closeReason ?? "").length > 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest))),
+    ),
+  );
+
+  it.effect("accepts the upgrade then closes 4401 for an invalid-credential subscriber", () =>
+    Effect.gen(function* () {
+      yield* HttpRouter.serve(editorPresenceRouteLayer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.build);
+
+      const url = yield* getSubscriberWsUrl();
+      const outcome = yield* probePublisherUpgrade(url, {
+        authorization: "Bearer not-a-real-token",
+      });
+
+      assert.isTrue(outcome.opened);
+      assert.isNull(outcome.httpStatus);
+      assert.strictEqual(outcome.closeCode, EDITOR_PRESENCE_CLOSE_CODE.invalidCredential);
+      assert.isTrue((outcome.closeReason ?? "").length > 0);
     }).pipe(
       Effect.scoped,
       Effect.provide(makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest))),
