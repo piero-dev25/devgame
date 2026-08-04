@@ -244,7 +244,24 @@ describe("ProviderRuntimeIngestion", () => {
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      // #82: this was `process.cwd()` as baseDir (not a temp dir, unlike
+      // `workspaceRoot` two lines up) — deriveServerPaths joins that into
+      // `<cwd>/userdata/...`, a REAL absolute path anchored wherever the
+      // test runner's cwd happens to be. The "persists an assistant_image
+      // content delta" test below actually writes a PNG through the real
+      // AssistantImageAttachmentPersistence.ts/attachmentStore.ts path, so
+      // every run left a stray file at the repo root's `userdata/attachments/`
+      // — 10 accumulated before this was traced. Production's own baseDir
+      // default (os-jank.ts's resolveBaseDir) is always absolute, anchored
+      // under `~/.t3`, so this was test-only; confirmed rather than assumed
+      // before landing this fix. `{ prefix }` matches the `layerTest` usage
+      // already established for this exact call in ProjectionPipeline.test.ts,
+      // OrchestrationEngine.test.ts, and CheckpointReactor.test.ts — a scoped
+      // temp dir that `runtime.dispose()` (afterEach, above) cleans up, same
+      // as `workspaceRoot`'s own `makeTempDir`.
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-provider-serverconfig-" }),
+      ),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
