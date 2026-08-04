@@ -192,8 +192,6 @@ function surfaceTitle(
   terminalLabelsById: ReadonlyMap<string, string>,
 ): string {
   switch (surface.kind) {
-    case "diff":
-      return "Diff";
     case "files":
       return "Files";
     case "file":
@@ -249,8 +247,6 @@ function SurfaceIcon({
       const url = !snapshot || snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
       return <PreviewFavicon url={url} />;
     }
-    case "diff":
-      return <FileDiff className="size-3.5 shrink-0" />;
     case "files":
       return <Files className="size-3.5 shrink-0" />;
     case "file":

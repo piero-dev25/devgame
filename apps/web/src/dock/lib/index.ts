@@ -42,6 +42,11 @@ export { TAB_COMPONENT_NO_CLOSE, TAB_COMPONENT_WITH_CLOSE } from "./tabComponent
 // functions — see their own files for the finding each one closes.
 export { decideImportedLayoutAction, type ImportedLayoutAction } from "./importDecision";
 export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
+// spec-surfaces-as-dock-panels.md, Part B: the core decision behind
+// DockviewLayout.tsx's `openPanel`/`togglePanel` imperative handle actions,
+// extracted for the same "no jsdom to drive the ref" reason as
+// decideImportedLayoutAction.
+export { openPanelInDock, togglePanelInDock } from "./openPanel";
 // Fix round after 7606dff45: migrates a saved layout forward when the
 // catalog has grown, instead of the workspaceId-bump-and-discard pattern
 // that used to be the only way this dock handled that case.

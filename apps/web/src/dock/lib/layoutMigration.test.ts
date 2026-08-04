@@ -86,6 +86,127 @@ function userLayoutBeforeFiles(): SerializedDockview {
   };
 }
 
+// Mirrors buildChatDockPreset()'s REAL current shape (ChatDock.tsx, after the
+// Diff-as-dock-panel promotion, spec-surfaces-as-dock-panels.md Part B): a
+// flat HORIZONTAL branch of single-view leaves, sidebar (256, i.e.
+// THREAD_SIDEBAR_DEFAULT_WIDTH) | chat (640) | diff (400) — unlike
+// DEFAULT_TREE above, whose "files" third leaf predates that panel's Part A
+// deletion, this one is checked against ChatDock.tsx's live numbers so a
+// future width change there has to update this fixture consciously.
+const DIFF_DEFAULT_TREE: SerializedDockview = {
+  grid: {
+    orientation: Orientation.HORIZONTAL,
+    width: 1296,
+    height: 800,
+    root: {
+      type: "branch",
+      size: 1296,
+      data: [
+        {
+          type: "leaf",
+          size: 256,
+          data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+        },
+        {
+          type: "leaf",
+          size: 640,
+          data: { id: "group-chat", views: ["chat"], activeView: "chat" },
+        },
+        {
+          type: "leaf",
+          size: 400,
+          data: { id: "group-diff", views: ["diff"], activeView: "diff" },
+        },
+      ],
+    },
+  },
+  panels: {
+    sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
+    chat: { id: "chat", contentComponent: "chat", title: "Chat" },
+    diff: { id: "diff", contentComponent: "diff", title: "Diff" },
+  },
+  activeGroup: "group-chat",
+};
+
+// A pre-Diff layout — sidebar dragged wider (392 instead of the preset's
+// 256) as the user's own customization to prove survives migration, same
+// convention as userLayoutBeforeFiles() above.
+function userLayoutBeforeDiff(): SerializedDockview {
+  return {
+    grid: {
+      orientation: Orientation.HORIZONTAL,
+      width: 1120,
+      height: 800,
+      root: {
+        type: "branch",
+        size: 1120,
+        data: [
+          {
+            type: "leaf",
+            size: 392,
+            data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+          },
+          {
+            type: "leaf",
+            size: 728,
+            data: { id: "group-chat", views: ["chat"], activeView: "chat" },
+          },
+        ],
+      },
+    },
+    panels: {
+      sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
+      chat: { id: "chat", contentComponent: "chat", title: "Chat" },
+    },
+    activeGroup: "group-sidebar",
+  };
+}
+
+describe("migrateLoadedLayout — proof bar: diff panel promotion (spec-surfaces-as-dock-panels.md, Part B)", () => {
+  it("inserts the newly-registered diff panel at its default-preset position while leaving every existing panel's size/order/active-state untouched", () => {
+    const registry = registryWith("sidebar", "chat", "diff");
+    const loaded = userLayoutBeforeDiff();
+    const loadedRoot = loaded.grid.root;
+    if (loadedRoot.type !== "branch" || !Array.isArray(loadedRoot.data)) {
+      throw new Error("fixture must be a branch root");
+    }
+    const loadedChildren = loadedRoot.data;
+
+    const result = migrateLoadedLayout({
+      loaded,
+      knownPanelIds: ["sidebar", "chat"], // diff didn't exist when this was saved
+      panelRegistry: registry,
+      defaultTree: DIFF_DEFAULT_TREE,
+    });
+
+    expect(result.addedPanelIds).toEqual(["diff"]);
+    expect(result.unplaceablePanelIds).toEqual([]);
+
+    // The person's positions survived: sidebar's dragged 392 width, chat's
+    // 728 width, both still first and second, activeGroup unchanged.
+    const root = result.tree.grid.root;
+    if (root.type !== "branch" || !Array.isArray(root.data)) {
+      throw new Error("expected a branch root");
+    }
+    const children = root.data;
+    expect(children).toHaveLength(3);
+    expect(children[0]).toEqual(loadedChildren[0]);
+    expect(children[1]).toEqual(loadedChildren[1]);
+    expect(result.tree.activeGroup).toBe("group-sidebar");
+
+    // The new panel is present, at the default preset's own position (last),
+    // as its OWN leaf (views.length === 1) rather than tabbed into chat's
+    // group, and using the default preset's own panels-map entry verbatim.
+    const diffLeaf = children[2];
+    expect(diffLeaf).toEqual({
+      type: "leaf",
+      size: 400,
+      data: { id: "group-diff", views: ["diff"], activeView: "diff" },
+    });
+    expect(result.tree.panels.diff).toEqual(DIFF_DEFAULT_TREE.panels.diff);
+  });
+});
+
 describe("migrateLoadedLayout — proof bar: positions survive AND the new panel appears", () => {
   it("inserts the newly-registered panel at its default-preset position while leaving every existing panel's size/order/active-state untouched", () => {
     const registry = registryWith("sidebar", "chat", "files");

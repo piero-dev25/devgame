@@ -42,6 +42,60 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("drops a stale diff surface during migration (diff moved to a dock panel)", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            activeSurfaceId: "diff",
+            surfaces: [
+              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "diff", kind: "diff" },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: false,
+          activeSurfaceId: null,
+          surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+        },
+      },
+    });
+  });
+
+  it("closes the panel when the ONLY surface was diff — a persisted isOpen: true must not survive its one surface being stripped", () => {
+    // Review fix (#56): the v8 migration used to carry `isOpen` straight
+    // through from what was persisted, so a thread whose sole surface was
+    // "diff" migrated to {isOpen: true, activeSurfaceId: null, surfaces:
+    // []} — a visibly-open, silently-empty right panel on resume, since
+    // ChatView.tsx's `rightPanelOpen` reads `isOpen` with no surfaces-length
+    // guard. This fixture is deliberately the single-surface case the
+    // earlier "drops a stale diff surface" test (with a browser tab still
+    // present) doesn't exercise.
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "diff",
+            surfaces: [{ id: "diff", kind: "diff" }],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: false,
+          activeSurfaceId: null,
+          surfaces: [],
+        },
+      },
+    });
+  });
+
   it("upgrades saved single-session terminal surfaces to split-capable surfaces", () => {
     expect(
       migratePersistedRightPanelState({
@@ -118,15 +172,15 @@ describe("rightPanelStore", () => {
   });
 
   it("reopening an inactive singleton activates its existing surface", () => {
-    useRightPanelStore.getState().open(refA, "diff");
+    useRightPanelStore.getState().open(refA, "files");
     useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().open(refA, "diff");
+    useRightPanelStore.getState().open(refA, "files");
 
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: true,
-      activeSurfaceId: "diff",
+      activeSurfaceId: "files",
       surfaces: [
-        { id: "diff", kind: "diff" },
+        { id: "files", kind: "files" },
         { id: "plan", kind: "plan" },
       ],
     });
@@ -251,14 +305,14 @@ describe("rightPanelStore", () => {
   });
 
   it("toggle hides the panel without discarding the active surface", () => {
-    useRightPanelStore.getState().toggle(refA, "diff");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("diff");
-    useRightPanelStore.getState().toggle(refA, "diff");
+    useRightPanelStore.getState().toggle(refA, "files");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("files");
+    useRightPanelStore.getState().toggle(refA, "files");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
-      activeSurfaceId: "diff",
-      surfaces: [{ id: "diff", kind: "diff" }],
+      activeSurfaceId: "files",
+      surfaces: [{ id: "files", kind: "files" }],
     });
   });
 

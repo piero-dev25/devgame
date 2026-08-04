@@ -14,7 +14,17 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-export const RIGHT_PANEL_KINDS = ["plan", "diff", "files", "file", "preview", "terminal"] as const;
+// "diff" is deliberately NOT a member — spec-surfaces-as-dock-panels.md,
+// Part B moved it to a first-class dock panel (see dock/ChatDock.tsx's
+// registration), and removing it from this union (rather than leaving it
+// unused) is what let the compiler find both stale call sites a review
+// caught: onToggleDiff (Cmd+D) and activateRightPanelSurface's dead
+// "diff" branch, neither of which a runtime check alone would have
+// flagged. The persisted-data side of "diff" still exists — see
+// migratePersistedRightPanelState's own comment on why that ONE spot is
+// exempt. This is the template for Files/Terminal/Browser's own eventual
+// promotion: move the surface, then delete its kind here.
+export const RIGHT_PANEL_KINDS = ["plan", "files", "file", "preview", "terminal"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
 export type RightPanelSurface =
@@ -28,7 +38,6 @@ export type RightPanelSurface =
       activeTerminalId: string;
       splitDirection?: "horizontal" | "vertical";
     }
-  | { id: "diff"; kind: "diff" }
   | { id: "files"; kind: "files" }
   | {
       id: `file:${string}`;
@@ -40,7 +49,7 @@ export type RightPanelSurface =
   | { id: "plan"; kind: "plan" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 7;
+const RIGHT_PANEL_STORAGE_VERSION = 8;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -86,8 +95,6 @@ const singletonSurface = (
   kind: Exclude<RightPanelKind, "file" | "preview" | "terminal">,
 ): RightPanelSurface => {
   switch (kind) {
-    case "diff":
-      return { id: "diff", kind };
     case "files":
       return { id: "files", kind };
     case "plan":
@@ -170,6 +177,33 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                 threadState && typeof threadState === "object" ? threadState : null;
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
+                    // v8: Diff moved to a first-class dock panel (spec-
+                    // surfaces-as-dock-panels.md, Part B) and is no longer a
+                    // right-panel surface kind ChatView renders — its
+                    // visibility now lives in the dock's own layout state.
+                    // Drop any persisted "diff" entry rather than resurrect
+                    // a tab with nothing behind it; activeSurfaceId below
+                    // already falls back to null when its target surface is
+                    // gone, so this is a non-destructive strip of just this
+                    // one surface, same as the terminal-validation drops
+                    // further down.
+                    //
+                    // Cast past RightPanelSurface's CURRENT union
+                    // deliberately: a persisted surface can be an OLDER
+                    // shape than what this build's type allows — that is
+                    // the entire reason migration exists — and "diff" is
+                    // exactly such a shape, real in every v7-and-earlier
+                    // save, no longer a member of RightPanelSurface at all
+                    // as of this type's own v8 narrowing (see its comment).
+                    // This is the one spot in the file deliberately exempt
+                    // from the compiler proof the rest of the union now
+                    // gets — a review specifically asked for that proof
+                    // everywhere ELSE, which is what caught the two stale
+                    // ChatView.tsx call sites this same migration doesn't
+                    // touch.
+                    if ((surface as { kind: string }).kind === "diff") {
+                      return [];
+                    }
                     if (surface.kind === "file") {
                       const revealLine =
                         typeof surface.revealLine === "number" &&
@@ -223,10 +257,22 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
               )
                 ? (validThreadState?.activeSurfaceId ?? null)
                 : null;
+              // Recomputed from the SURVIVING surfaces, not blindly carried
+              // over from what was persisted: a thread whose only surface
+              // was "diff" (stripped above) would otherwise keep whatever
+              // `isOpen: true` it was saved with even though `surfaces` is
+              // now empty — the exact shape that resumed a user into a
+              // visibly-open, silently-empty right panel they never asked
+              // for. Zero surviving surfaces means never open, full stop;
+              // the persisted value (or the activeSurfaceId fallback) only
+              // applies once there is at least one surface for it to mean
+              // anything about.
               const isOpen =
-                typeof validThreadState?.isOpen === "boolean"
-                  ? validThreadState.isOpen
-                  : activeSurfaceId !== null;
+                surfaces.length === 0
+                  ? false
+                  : typeof validThreadState?.isOpen === "boolean"
+                    ? validThreadState.isOpen
+                    : activeSurfaceId !== null;
               return [threadKey, { isOpen, surfaces, activeSurfaceId }];
             },
           ),

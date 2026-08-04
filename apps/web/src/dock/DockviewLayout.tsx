@@ -49,8 +49,10 @@ import {
   findUnknownPanelIds,
   isEmptyDockviewTree,
   migrateLoadedLayout,
+  openPanelInDock,
   parseLayoutFile,
   syncFloatingConstraints,
+  togglePanelInDock,
   type LayoutPresetFactory,
   type LayoutStorage,
   type LoadLayoutResult,
@@ -181,6 +183,31 @@ export interface DockviewLayoutHandle {
   reset(): void;
   exportLayout(): void;
   importLayoutFile(file: File): void;
+  /**
+   * spec-surfaces-as-dock-panels.md, Part B: opens a panel by its registered
+   * id, for callers OUTSIDE the dock (see `chatDockHandle.ts`) that need
+   * "make this panel visible" without caring whether it's already open.
+   * Get-or-add-then-setActive: if the panel is already live anywhere in this
+   * layout, just activates it; otherwise adds it (mirroring
+   * `tabContextMenu.ts`'s "Add tab" — same `api.addPanel()` shape, same
+   * `closeable` handling) and THEN activates it. No-ops, silently, for an id
+   * that isn't in `panelRegistry` at all — nothing to add, nothing to
+   * activate.
+   */
+  openPanel(id: string): void;
+  /**
+   * spec-surfaces-as-dock-panels.md, Part B, review fix after #56: a GENUINE
+   * toggle, unlike `openPanel` above (deliberately open-only, so a caller
+   * that just wants "make sure this is visible" — e.g. clicking a turn's
+   * diff button twice — never has its second click close the thing it's
+   * looking at). This is for a caller that means toggle, like a keyboard
+   * shortcut named after toggling: already open anywhere -> closes it
+   * (`IDockviewPanel.api.close()`, dockview's own close primitive, the same
+   * one the tab's × button already uses); not open -> defers to the same
+   * open-then-activate behaviour as `openPanel`. No-ops, silently, for an id
+   * that isn't in `panelRegistry` at all, same as `openPanel`.
+   */
+  togglePanel(id: string): void;
 }
 
 /**
@@ -791,14 +818,44 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       [storage, workspaceId, panelRegistry, applyPreset, reportSaveResult],
     );
 
+    const handleOpenPanel = useCallback(
+      (id: string) => {
+        const api = apiRef.current;
+        // "No live DockviewApi yet" is a timing issue (this ref action fired
+        // before the mount effect's dockview instance exists) — silent,
+        // same as every other guard in this file that checks apiRef.current
+        // first. The actual get-or-add-then-setActive decision is
+        // lib/openPanel.ts's `openPanelInDock` — see that file's own doc for
+        // why it's extracted rather than inlined here.
+        if (!api) return;
+        openPanelInDock(id, { api, panelRegistry });
+      },
+      [panelRegistry],
+    );
+
+    const handleTogglePanel = useCallback(
+      (id: string) => {
+        const api = apiRef.current;
+        // Same "no live DockviewApi yet" timing guard as handleOpenPanel
+        // above. The actual open-vs-close decision is lib/openPanel.ts's
+        // `togglePanelInDock` — see that file's own doc for why it's
+        // extracted the same way.
+        if (!api) return;
+        togglePanelInDock(id, { api, panelRegistry });
+      },
+      [panelRegistry],
+    );
+
     useImperativeHandle(
       forwardedRef,
       () => ({
         reset: handleReset,
         exportLayout: handleExport,
         importLayoutFile: handleImportFile,
+        openPanel: handleOpenPanel,
+        togglePanel: handleTogglePanel,
       }),
-      [handleReset, handleExport, handleImportFile],
+      [handleReset, handleExport, handleImportFile, handleOpenPanel, handleTogglePanel],
     );
 
     // Fix-round finding #1: recomputed every render — cheap (a linear scan

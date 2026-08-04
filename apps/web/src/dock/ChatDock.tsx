@@ -17,30 +17,34 @@
 // placeholder panel itself was REMOVED (finding #7 — see its own removal
 // comment further down).
 //
-// DELETED again — spec-surfaces-as-dock-panels.md, Part A: our Files panel
-// itself is gone. A fresh critic proved it wrong on the same screen T3's own
-// file tree and diff surface were correct: ours listed a file that did not
-// exist and reported changes to a file identical to HEAD, with no refresh
-// control and no way to know it was stale. T3's own surfaces are strictly
-// better at the thing ours existed to do, so ours is deleted rather than
-// fixed — the goal's own definition of a win. (Part B — promoting T3's
-// `RightPanelTabs` surfaces, including its OWN files/diff view, into this
-// dock as first-class panels — is real future work, explicitly DEFERRED by
-// the owner: "let's delete our files for now, dont need to make the other
-// ones full tabs yet." Not started here.) The default preset is now sidebar
-// | chat — two columns, not three, and not backfilled with the placeholder
-// finding #7 already removed for its own reasons. See buildChatDockPreset's
-// own comment for why two is the honest answer for now rather than
-// reinventing a third slot to fill.
+// DELETED — spec-surfaces-as-dock-panels.md, Part A: our Files panel itself
+// is gone. A fresh critic proved it wrong on the same screen T3's own file
+// tree and diff surface were correct: ours listed a file that did not exist
+// and reported changes to a file identical to HEAD, with no refresh control
+// and no way to know it was stale. T3's own surfaces are strictly better at
+// the thing ours existed to do, so ours is deleted rather than fixed — the
+// goal's own definition of a win.
+//
+// PROMOTED — spec-surfaces-as-dock-panels.md, Part B, first slice: T3's own
+// Diff surface (`RightPanelTabs`'s `diff` kind, previously rendered inline
+// by `ChatView`'s own right panel) is now a real dock panel — `DIFF_PANEL_ID`
+// below. `RightPanelTabs`/`DiffPanel` themselves are NOT touched — the
+// spec's rule that we delete our code, never theirs, applies here exactly
+// as it did to Files. Files, Terminal and Browser are real future work
+// (each needs more than Diff did — see `DiffDockPanel.tsx`'s own doc
+// comment on why Diff went first), not started here.
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { MessageCircle, PanelLeft } from "lucide-react";
+import { FileDiff, MessageCircle, PanelLeft } from "lucide-react";
+import { useEffect, useRef } from "react";
 
+import { DIFF_PANEL_ID, registerChatDockHandle } from "./chatDockHandle";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
-import { DockviewLayout } from "./DockviewLayout";
+import DiffDockPanel from "./DiffDockPanel";
+import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -55,6 +59,7 @@ const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
+const DIFF_GROUP_ID = "group-diff";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -187,31 +192,45 @@ chatDockPanelRegistry.register({
 // panel reading this fork's REAL data") is DELETED —
 // spec-surfaces-as-dock-panels.md, Part A. See the top-of-file doc comment
 // for why: T3's own file tree and diff surface were proven correct where
-// ours lied, on the same screen, at the same moment. Nothing replaces this
-// registration; the default preset below is sidebar | chat, not a
-// re-filled third slot.
+// ours lied, on the same screen, at the same moment. Nothing replaces THIS
+// registration — the third column below is Diff (T3's OWN surface), not a
+// revival of ours.
 
 /**
- * The default preset: sidebar on the left, chat filling the rest.
+ * Part B, first slice: T3's own Diff surface as an ordinary dock panel.
+ * `DiffDockPanel.tsx` is a thin wrapper — see its own doc comment for why it
+ * exists and what it derives that a dock panel has no ChatView to hand it.
  *
- * TWO columns, not three — spec-surfaces-as-dock-panels.md, Part A. The
- * third slot (placeholder, then Files) is not backfilled with anything:
- * finding #7 already ruled out putting the placeholder back (it shipped as
- * the ONLY "Add tab" entry with copy describing a splitter that doesn't
- * exist in the state you reach it from), and Files is deleted outright, not
- * replaced by a stand-in. Two is the honest answer for what this dock
- * actually has right now — a fabricated third column would be the same
- * mistake the placeholder already was, just wearing a different label.
- * Nothing stops a real third panel from filling this slot again later (Part
- * B's promoted T3 surfaces are the likely candidate), but that is
- * deliberately NOT this change — the owner deferred it explicitly.
+ * `singleton: true`: same reasoning as Files had — a read-only diff view of
+ * one thread's changes has no case for two simultaneous instances the way
+ * multi-agent `session` panels do.
+ *
+ * `closeable: true` (the default — no `closeable: false` here, unlike
+ * sidebar/chat above): nothing depends on this panel staying mounted the
+ * way the sidebar's window keydown listeners do, so there is no reason to
+ * take away the user's ability to close it. Matches what Files was before
+ * it was deleted.
+ */
+chatDockPanelRegistry.register({
+  id: DIFF_PANEL_ID,
+  title: "Diff",
+  icon: FileDiff,
+  component: DiffDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Diff further
+ * right — the same third-column slot Files occupied before Part A deleted
+ * it, now occupied by T3's own Diff surface instead of a re-filled stand-in.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
  * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
- * number. Chat takes the rest; dockview stretches this initial tree to fit
- * the real container, so only the SIDEBAR:CHAT ratio matters, not the
- * absolute pixels.
+ * number. No measured mock exists for the chat:diff split — dockview
+ * stretches this initial tree to fit the real container, so only the
+ * RATIOS matter, not the absolute pixels.
  *
  * Sidebar and chat get the no-close tab component, for the same reason step
  * 1 gave them both: no "+"/catalog UI exists yet to reopen a closed panel
@@ -219,7 +238,8 @@ chatDockPanelRegistry.register({
  * open. For the sidebar specifically this is load-bearing, not just
  * convenient — see SidebarPanel.tsx/this file's registration comment on why
  * a panel that can never unmount is what keeps the sidebar's window keydown
- * listeners (thread prev/next, Cmd+1..9) alive.
+ * listeners (thread prev/next, Cmd+1..9) alive. Diff is NOT no-close — see
+ * its own registration comment above for why that's deliberate.
  *
  * `presetPanelEntry` below reads `closeable` off the REGISTRY rather than
  * this function choosing `tabComponent` independently — fix round after the
@@ -228,6 +248,16 @@ chatDockPanelRegistry.register({
  * exactly how "no-close" silently stopped meaning anything. Now there is
  * one place (`PanelDefinition.closeable`, set at registration above), and
  * every caller reads it.
+ *
+ * Diff is its own SEPARATE leaf in this flat branch (own `views: [id]`
+ * array, length 1) — a SEPARATE PANEL IN A ROW, not tabbed into chat's
+ * group. That's not just this function's choice: `lib/layoutMigration.ts`'s
+ * `locatePanelInFlatBranch` only recognizes a leaf as a newly-registered
+ * panel's home when `views.length === 1` — grafting Diff into an existing
+ * TABBED group here would make it unrecognizable to migration (reported as
+ * unplaceable) for every user who saved a layout before this shipped. The
+ * "separate row" rule enforces itself structurally; it isn't something a
+ * future edit here could quietly break without migration noticing.
  */
 function presetPanelEntry(id: string, title: string): SerializedDockview["panels"][string] {
   const definition = chatDockPanelRegistry.get(id);
@@ -242,8 +272,9 @@ function presetPanelEntry(id: string, title: string): SerializedDockview["panels
 function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
-  const CHAT_WIDTH = 944;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH;
+  const CHAT_WIDTH = 640;
+  const DIFF_WIDTH = 400;
+  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH;
 
   return {
     grid: {
@@ -264,12 +295,18 @@ function buildChatDockPreset(): SerializedDockview {
             size: CHAT_WIDTH,
             data: { id: CHAT_GROUP_ID, views: [CHAT_PANEL_ID], activeView: CHAT_PANEL_ID },
           },
+          {
+            type: "leaf",
+            size: DIFF_WIDTH,
+            data: { id: DIFF_GROUP_ID, views: [DIFF_PANEL_ID], activeView: DIFF_PANEL_ID },
+          },
         ],
       },
     },
     panels: {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
+      [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
     },
     activeGroup: CHAT_GROUP_ID,
   };
@@ -354,6 +391,22 @@ export type ChatDockProps = ChatDockRouteProps & {
  */
 export function ChatDock(props: ChatDockProps) {
   const { className } = props;
+  // spec-surfaces-as-dock-panels.md, Part B: registers this dock instance's
+  // `DockviewLayoutHandle` into `chatDockHandle.ts`'s module-scope slot, so
+  // code OUTSIDE the dock (ChatView's `addDiffSurface`/`onOpenTurnDiff`) can
+  // open a panel by id without a ref drilled through `ChatPanel` (a circular
+  // import — ChatView is a DESCENDANT of this component, not a sibling; see
+  // chatDockHandle.ts's own doc comment). Set on mount, CLEARED on unmount —
+  // a stale handle pointing at a disposed dock is worse than a null one.
+  // Only one `ChatDock` is ever live at a time (`workspaceId`/`presetId` are
+  // module-scope constants, same "exactly one dock" precedent as
+  // `chatDockPanelRegistry` above), so there is no multi-instance case to
+  // reconcile here.
+  const dockviewLayoutRef = useRef<DockviewLayoutHandle>(null);
+  useEffect(() => {
+    registerChatDockHandle(dockviewLayoutRef.current);
+    return () => registerChatDockHandle(null);
+  }, []);
   // Not memoized: step 1 memoized this object, but constructing a
   // 3-4-field plain object is cheap enough that the memo bought nothing
   // beyond a slightly harder-to-read deps array once a second `routeKind`
@@ -379,6 +432,7 @@ export function ChatDock(props: ChatDockProps) {
   return (
     <ThreadRouteContext.Provider value={contextValue}>
       <DockviewLayout
+        ref={dockviewLayoutRef}
         workspaceId={CHAT_DOCK_WORKSPACE_ID}
         workspaceName={CHAT_DOCK_WORKSPACE_NAME}
         presetId={CHAT_DOCK_PRESET_ID}

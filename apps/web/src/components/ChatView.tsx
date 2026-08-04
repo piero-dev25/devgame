@@ -134,6 +134,8 @@ import { closePreviewSession } from "./preview/closePreviewSession";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
 import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
+import { triggerAutoOpenPreview } from "./preview/autoOpenPreviewForScript";
+import { useTerminalDiscoveredPorts } from "~/portDiscoveryState";
 import {
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
@@ -153,6 +155,7 @@ import {
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
+import { DIFF_PANEL_ID, openChatDockPanel, toggleChatDockPanel } from "~/dock/chatDockHandle";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
@@ -390,7 +393,6 @@ function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
 const PreviewPanel = lazy(() =>
   import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
 );
-const DiffPanel = lazy(() => import("./DiffPanel"));
 const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
@@ -1514,7 +1516,6 @@ function ChatViewContent(props: ChatViewProps) {
   const activeRightPanelKind = useRightPanelStore((state) =>
     selectActiveRightPanel(state.byThreadKey, activeThreadRef),
   );
-  const diffOpen = activeRightPanelKind === "diff";
   const rightPanelState = useRightPanelStore((state) =>
     selectThreadRightPanelState(state.byThreadKey, activeThreadRef),
   );
@@ -2504,9 +2505,6 @@ function ChatViewContent(props: ChatViewProps) {
   // Default true while loading to avoid toolbar flicker.
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
   const showComposerContextStrip = isGitRepo && activeProject !== null;
-  const initialDiffPanelGitScope =
-    gitStatusQuery.data?.hasWorkingTreeChanges === true ? "unstaged" : "branch";
-  const diffPanelGitStatusResolutionKey = gitStatusQuery.data ? "resolved" : "pending";
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -2533,17 +2531,29 @@ function ChatViewContent(props: ChatViewProps) {
     () => shortcutLabelForCommand(keybindings, "terminal.close", terminalShortcutLabelOptions),
     [keybindings, terminalShortcutLabelOptions],
   );
+  // Review fix (#56): this used to write "diff" into the legacy
+  // rightPanelStore via .toggle(...) — a real bug, not just stale code,
+  // since it's wired to the diff.toggle command, bound to Cmd/Ctrl+D by
+  // default (keybindings.ts). Diff moved to a dock panel; RightPanelTabs
+  // still rendered a tab for whatever the legacy store said was active,
+  // but rightPanelContent's own "diff" render case is gone — so pressing
+  // Cmd+D produced a visible Diff tab that rendered nothing.
+  //
+  // Second review fix, same round: an interim version of this called
+  // `openChatDockPanel` (open/focus only, matching addDiffSurface/
+  // onOpenTurnDiff), which regressed Cmd+D from a genuine toggle to
+  // open-only — a real behaviour loss for a shortcut literally named after
+  // toggling. Now routes through `toggleChatDockPanel`
+  // (chatDockHandle.ts -> DockviewLayout.tsx's `togglePanel` ->
+  // lib/openPanel.ts's `togglePanelInDock`), which closes an already-open
+  // Diff panel via dockview's own `IDockviewPanel.api.close()` — the same
+  // primitive the panel's tab × already uses.
   const onToggleDiff = useCallback(() => {
     if (!isServerThread) {
       return;
     }
-    if (!diffOpen) {
-      onDiffPanelOpen?.();
-    }
-    if (activeThreadRef) {
-      useRightPanelStore.getState().toggle(activeThreadRef, "diff");
-    }
-  }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
+    toggleChatDockPanel(DIFF_PANEL_ID);
+  }, [isServerThread]);
 
   const envLocked = Boolean(
     activeThread &&
@@ -2791,6 +2801,38 @@ function ChatViewContent(props: ChatViewProps) {
       writeTerminal,
     ],
   );
+  // Task P1-E ("wire the dead autoOpenPreview field"): the terminal a
+  // just-started autoOpenPreview script is running in, watched until the
+  // port scanner (apps/server/src/preview/PortScanner.ts, reached here via
+  // useTerminalDiscoveredPorts) reports a listener attributed to it — see
+  // preview/autoOpenPreviewForScript.ts for the actual open-vs-wait
+  // decision. `threadId` is captured explicitly (NOT re-read from
+  // activeThreadId at open time) because the user can navigate to a
+  // different thread while this is still waiting; the preview must open
+  // against the thread the script actually ran on.
+  const [pendingAutoOpenPreview, setPendingAutoOpenPreview] = useState<{
+    threadId: ThreadId;
+    terminalId: string;
+    previewUrl: string;
+  } | null>(null);
+  const pendingAutoOpenPreviewDiscoveredServers = useTerminalDiscoveredPorts({
+    environmentId,
+    threadId: pendingAutoOpenPreview?.threadId ?? null,
+    terminalId: pendingAutoOpenPreview?.terminalId ?? null,
+  });
+  useEffect(() => {
+    if (!pendingAutoOpenPreview) return;
+    const pending = pendingAutoOpenPreview;
+    void triggerAutoOpenPreview({
+      script: { autoOpenPreview: true, previewUrl: pending.previewUrl },
+      discoveredServers: pendingAutoOpenPreviewDiscoveredServers,
+      threadRef: scopeThreadRef(environmentId, pending.threadId),
+      terminalId: pending.terminalId,
+      openPreview,
+    }).then((opened) => {
+      if (opened) setPendingAutoOpenPreview(null);
+    });
+  }, [pendingAutoOpenPreview, pendingAutoOpenPreviewDiscoveredServers, environmentId, openPreview]);
   const runProjectScript = useCallback(
     async (
       script: ProjectScript,
@@ -2882,12 +2924,34 @@ function ChatViewContent(props: ChatViewProps) {
           data: `${script.command}\r`,
         },
       });
-      if (writeResult._tag === "Failure" && !isAtomCommandInterrupted(writeResult)) {
-        const error = squashAtomCommandFailure(writeResult);
-        setThreadError(
-          activeThreadId,
-          error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
-        );
+      if (writeResult._tag === "Failure") {
+        if (!isAtomCommandInterrupted(writeResult)) {
+          const error = squashAtomCommandFailure(writeResult);
+          setThreadError(
+            activeThreadId,
+            error instanceof Error ? error.message : `Failed to run script "${script.name}".`,
+          );
+        }
+        return;
+      }
+
+      // Task P1-E: "Play" for a script with no editor to command (three.js,
+      // Vite, ...) is "run it, then show the preview". Desktop-only (the
+      // preview panel has nowhere to render in a plain browser tab, per
+      // PreviewPanel.tsx's own "only available in the DevGame desktop app"
+      // empty state) and ignored without a configured previewUrl, matching
+      // ProjectScript.autoOpenPreview's own doc comment — see
+      // preview/autoOpenPreviewForScript.ts for why previewUrl is required
+      // rather than discovered. Starts a watch, not an immediate open: the
+      // dev server is never listening the instant this command lands in the
+      // terminal, so the effect above keeps checking the port scanner until
+      // THIS terminal has a listener.
+      if (isPreviewSupportedInRuntime() && script.autoOpenPreview === true && script.previewUrl) {
+        setPendingAutoOpenPreview({
+          threadId: activeThreadId,
+          terminalId: targetTerminalId,
+          previewUrl: script.previewUrl,
+        });
       }
     },
     [
@@ -2908,6 +2972,7 @@ function ChatViewContent(props: ChatViewProps) {
       runningTerminalIds,
       terminalUiState.activeTerminalId,
       writeTerminal,
+      setPendingAutoOpenPreview,
     ],
   );
 
@@ -3120,7 +3185,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (planSidebarOpen) {
       dismissPlanSidebarForCurrentTurn();
     }
-    useRightPanelStore.getState().open(activeThreadRef, "diff");
+    openChatDockPanel(DIFF_PANEL_ID);
     onDiffPanelOpen?.();
   }, [
     activeThreadRef,
@@ -3273,11 +3338,13 @@ function ChatViewContent(props: ChatViewProps) {
       if (surface.kind === "terminal") {
         setTerminalFocusRequestId((value) => value + 1);
       }
-      if (surface.kind === "diff" && !diffOpen) {
-        onDiffPanelOpen?.();
-      }
+      // Review fix (#56): dropped the `surface.kind === "diff"` branch that
+      // used to live here. It's now unreachable by construction — "diff" is
+      // no longer a member of RightPanelSurface (rightPanelStore.ts), so a
+      // surface passed here can never have that kind; the compiler catching
+      // this comparison is exactly the point of that removal.
     },
-    [activeThreadRef, diffOpen, dismissPlanSidebarForCurrentTurn, onDiffPanelOpen, planSidebarOpen],
+    [activeThreadRef, dismissPlanSidebarForCurrentTurn, planSidebarOpen],
   );
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
@@ -5617,7 +5684,7 @@ function ChatViewContent(props: ChatViewProps) {
     (turnId: TurnId, filePath?: string) => {
       if (!isServerThread || !activeThreadRef) return;
       useDiffPanelStore.getState().selectTurn(activeThreadRef, turnId, filePath);
-      useRightPanelStore.getState().open(activeThreadRef, "diff");
+      openChatDockPanel(DIFF_PANEL_ID);
       onDiffPanelOpen?.();
     },
     [activeThreadRef, isServerThread, onDiffPanelOpen],
@@ -5693,15 +5760,6 @@ function ChatViewContent(props: ChatViewProps) {
         newShortcutLabel={newTerminalShortcutLabel ?? undefined}
         closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
       />
-    ) : activeRightPanelSurface?.kind === "diff" ? (
-      <Suspense fallback={null}>
-        <DiffPanel
-          key={`${activeThreadKey}:${diffPanelGitStatusResolutionKey}`}
-          mode="embedded"
-          composerDraftTarget={composerDraftTarget}
-          initialGitScope={initialDiffPanelGitScope}
-        />
-      </Suspense>
     ) : activeRightPanelSurface?.kind === "plan" ? (
       <PlanSidebar
         activePlan={activePlan}
