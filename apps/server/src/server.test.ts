@@ -6,6 +6,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import {
   AuthAccessTokenType,
+  AuthDesktopOwnerScopes,
   AuthEnvironmentBootstrapTokenType,
   AuthTokenExchangeGrantType,
   CommandId,
@@ -1010,9 +1011,14 @@ const exchangeAccessToken = (
         subject_token: credential,
         subject_token_type: AuthEnvironmentBootstrapTokenType,
         requested_token_type: AuthAccessTokenType,
-        scope:
-          options?.scope ??
-          "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+        // Derived from the real constant, not a hand-duplicated literal
+        // string — see EnvironmentAuth.test.ts's equivalent comment for
+        // why a hardcoded copy silently drifts out of sync.
+        // AuthDesktopOwnerScopes, not AuthAdministrativeScopes — the
+        // default `credential` here is `defaultDesktopBootstrapToken`,
+        // exchanging the desktop bootstrap seed's OWN grant, which is
+        // exactly the one grant that carries `presence:command`.
+        scope: options?.scope ?? AuthDesktopOwnerScopes.join(" "),
         ...(options?.clientMetadata?.label ? { client_label: options.clientMetadata.label } : {}),
         ...(options?.clientMetadata?.deviceType
           ? { client_device_type: options.clientMetadata.deviceType }
@@ -1518,10 +1524,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(tokenResponse.status, 200);
       assert.equal(tokenBody.issued_token_type, AuthAccessTokenType);
       assert.equal(tokenBody.token_type, "Bearer");
-      assert.equal(
-        tokenBody.scope,
-        "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
-      );
+      assert.equal(tokenBody.scope, AuthDesktopOwnerScopes.join(" "));
       assert.equal(typeof tokenBody.access_token, "string");
 
       const sessionUrl = yield* getHttpServerUrl("/api/auth/session");
@@ -1539,16 +1542,9 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(sessionResponse.status, 200);
       assert.equal(sessionBody.authenticated, true);
       assert.equal(sessionBody.sessionMethod, "bearer-access-token");
-      assert.deepEqual(sessionBody.scopes, [
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      // The real constant, not a hand-duplicated literal list — see
+      // apps/server/src/auth/EnvironmentAuth.test.ts's equivalent comment.
+      assert.deepEqual(sessionBody.scopes, AuthDesktopOwnerScopes);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

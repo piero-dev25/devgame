@@ -4,6 +4,7 @@ import {
   AuthStandardClientScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthPresenceCommandScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
   AuthReviewWriteScope,
@@ -262,6 +263,17 @@ export const authHttpApiLayer = HttpApiBuilder.group(
                 ? undefined
                 : parseAllowedOAuthScope({
                     value: args.payload.scope,
+                    // `presence:command` is listed here (making it a
+                    // requestable token-exchange scope) but stays OUT of
+                    // `AuthStandardClientScopes` — this allowlist only
+                    // decides what a caller may ASK for; whether the
+                    // request actually succeeds still depends on the
+                    // underlying bootstrap grant carrying that scope (see
+                    // `exchangeBootstrapCredentialForAccessToken`'s
+                    // `grantedScopes.every(...)` check), which nothing
+                    // gets unless a pairing credential was explicitly
+                    // minted with it — see `AuthPresenceCommandScope`'s own
+                    // doc comment in @t3tools/contracts.
                     allowedScopes: new Set<AuthEnvironmentScope>([
                       AuthOrchestrationReadScope,
                       AuthOrchestrationOperateScope,
@@ -271,6 +283,7 @@ export const authHttpApiLayer = HttpApiBuilder.group(
                       AuthAccessWriteScope,
                       AuthRelayReadScope,
                       AuthRelayWriteScope,
+                      AuthPresenceCommandScope,
                     ]),
                   });
             if (requestedScopes === null) {

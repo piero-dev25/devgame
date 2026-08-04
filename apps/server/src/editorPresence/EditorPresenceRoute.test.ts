@@ -15,6 +15,7 @@
 import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthPresenceCommandScope,
   AuthSessionId,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
@@ -24,6 +25,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { HttpRouter, HttpServer } from "effect/unstable/http";
 import * as Socket from "effect/unstable/socket/Socket";
 
@@ -32,9 +34,15 @@ import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
-import { editorPresenceRouteLayer, runPublisherConnection } from "./EditorPresenceRoute.ts";
+import {
+  dispatchEditorCommand,
+  editorPresenceRouteLayer,
+  runPublisherConnection,
+} from "./EditorPresenceRoute.ts";
 import * as EditorPresenceRegistry from "./EditorPresenceRegistry.ts";
-import { buildPongFrame } from "./protocol.ts";
+import { buildPongFrame, DEFAULT_EDITOR_PRESENCE_CAPABILITIES } from "./protocol.ts";
+
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 
 const makeEnvironmentAuthLayer = () =>
   EnvironmentAuth.layer.pipe(
@@ -60,7 +68,10 @@ const getSubscriberWsUrl = () =>
   });
 
 interface PresenceFrame {
-  readonly editors: ReadonlyArray<{ readonly session: { readonly id: string } }>;
+  readonly editors: ReadonlyArray<{
+    readonly session: { readonly id: string };
+    readonly capabilities: ReadonlyArray<string>;
+  }>;
 }
 
 /** Connects a fresh subscriber and resolves with the FIRST `presence`
@@ -100,8 +111,14 @@ function rawDataToString(data: NodeSocket.NodeWS.RawData): string {
 /** Builds a `hello` frame's wire text for a given session id — a plain
  * JSON string, matching the raw text this route actually receives on the
  * wire (there is deliberately no packages/contracts schema for this
- * protocol; see EditorPresenceRoute.ts's module doc). */
-function helloFrameText(sessionId: string, omitVersion = false): string {
+ * protocol; see EditorPresenceRoute.ts's module doc). `capabilities`
+ * defaults to omitted (undefined) rather than the protocol's own default —
+ * so a caller that wants to exercise the DEFAULTING behavior itself just
+ * doesn't pass it, matching how a real pre-commands plugin's hello looks.
+ * Typed `unknown` rather than `ReadonlyArray<string>` so a caller can ALSO
+ * exercise the malformed-capabilities rejection path with this same
+ * helper, instead of hand-building raw JSON. */
+function helloFrameText(sessionId: string, omitVersion = false, capabilities?: unknown): string {
   const editor: Record<string, string> = { id: "unity", name: "Unity Editor" };
   if (!omitVersion) editor.version = "6000.3.14f1";
   return JSON.stringify({
@@ -110,6 +127,7 @@ function helloFrameText(sessionId: string, omitVersion = false): string {
     editor,
     session: { id: sessionId },
     workspace: { root: "/Users/piero/Projects/Deepmind" },
+    ...(capabilities !== undefined ? { capabilities } : {}),
   });
 }
 
@@ -618,6 +636,8 @@ function makePublisherRegistrySpy(): {
     removePublisher: () => Effect.void,
     addSubscriber: () => Effect.succeed("{}"),
     removeSubscriber: () => Effect.void,
+    sendCommand: () => Effect.succeed({ ok: false, error: "not_implemented_in_spy" }),
+    resolveCommand: () => Effect.void,
   };
   return { registry, registerPublisherCallCount: () => calls };
 }
@@ -819,5 +839,285 @@ it.layer(NodeServices.layer)("EditorPresenceRoute registry bug fixes", (it) => {
       Effect.scoped,
       Effect.provide(makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest))),
     ),
+  );
+
+  // Missing a `capabilities` array entirely is fine (defaults) — but a
+  // PRESENT, malformed one is a hello field fault like any other, per
+  // protocol.test.ts's own coverage. This proves it end-to-end over the
+  // wire, the same way the other six field faults already are above.
+  it.effect(
+    "malformed hello.capabilities closes the connection with 4403, same as any other bad field",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const issued = yield* serverAuth.issueSession();
+        const url = yield* getPublisherWsUrl();
+
+        // "play,stop" — a comma-joined string, not an array — is the fault.
+        const badHello = helloFrameText("bad-capabilities-repro", false, "play,stop");
+        const outcome = yield* publishFrameAndObserveClose(url, issued.token, badHello);
+
+        assert.strictEqual(outcome.closeCode, 4403);
+        assert.isTrue(outcome.closeReason.length > 0);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest)),
+        ),
+      ),
+  );
+});
+
+/**
+ * Task #47 — commands (server -> engine). See
+ * docs/workbench/spec-editor-presence-commands.md (frozen). Registry-level
+ * dispatch mechanics (rate limiting, correlation, disconnect handling, the
+ * connectionToken guard on replies) are covered in
+ * EditorPresenceRegistry.test.ts, where they can be proven deterministically
+ * without real network timing — see that file's own comment on why. This
+ * suite covers what's specific to the ROUTE: `capabilities` actually
+ * reaching a subscriber over the wire, the dedicated-scope gate on
+ * `dispatchEditorCommand`, and one full real-WebSocket round trip proving
+ * the route and registry are actually wired together correctly, not just
+ * independently correct.
+ */
+/**
+ * Connects a publisher, sends `hello`, and resolves once registration is
+ * CONFIRMED via ping/pong (processed by the same serial per-connection
+ * message loop as `hello`) — WITHOUT closing the connection, unlike
+ * `publishFramesThenClose`. Every listener is attached in the SAME
+ * synchronous callback that constructs the socket, before the event loop
+ * gets a chance to run at all — a fast loopback connection can otherwise
+ * fire "open" before a listener attached even one macrotask later is there
+ * to catch it. (Measured: getting this ordering wrong — constructing the
+ * socket, then attaching its "open" listener via a LATER, separate
+ * `Effect.callback` — hung two of this suite's tests for the full 60s test
+ * timeout on the first attempt.) `onMessage` keeps firing for every frame
+ * received AFTER the ready pong, which is how the command tests below
+ * observe a `command` frame arriving.
+ */
+const connectPublisherAndConfirmRegistered = (
+  url: string,
+  bearerToken: string,
+  sessionId: string,
+  capabilities: unknown,
+  onMessage: (raw: string) => void,
+): Effect.Effect<NodeSocket.NodeWS.WebSocket> =>
+  Effect.callback<NodeSocket.NodeWS.WebSocket>((resume) => {
+    const socket = new NodeSocket.NodeWS.WebSocket(url, {
+      headers: { authorization: `Bearer ${bearerToken}` },
+    });
+    socket.on("open", () => {
+      socket.send(helloFrameText(sessionId, false, capabilities));
+      socket.send(JSON.stringify({ v: 1, type: "ping" }));
+    });
+    socket.on("message", (data) => {
+      const text = rawDataToString(data);
+      if (text === buildPongFrame()) {
+        resume(Effect.succeed(socket));
+        return;
+      }
+      onMessage(text);
+    });
+    socket.on("error", () => {});
+  });
+
+it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
+  it.effect(
+    "a hello with no capabilities key defaults to no capabilities in what a subscriber sees",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const issued = yield* serverAuth.issueSession();
+        const publisherUrl = yield* getPublisherWsUrl();
+        const subscriberUrl = yield* getSubscriberWsUrl();
+
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          "capabilities-default-repro",
+          undefined,
+          () => {},
+        );
+
+        const presence = yield* connectSubscriberAndReadFirstFrame(subscriberUrl, issued.token);
+        assert.deepStrictEqual(
+          presence.editors[0]?.capabilities,
+          DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+        );
+        socket.close();
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest)),
+        ),
+      ),
+  );
+
+  it.effect(
+    "a hello with a declared capability list reflects it exactly in what a subscriber sees",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const issued = yield* serverAuth.issueSession();
+        const publisherUrl = yield* getPublisherWsUrl();
+        const subscriberUrl = yield* getSubscriberWsUrl();
+
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          "capabilities-custom-repro",
+          ["play", "stop", "step", "pause"],
+          () => {},
+        );
+
+        const presence = yield* connectSubscriberAndReadFirstFrame(subscriberUrl, issued.token);
+        assert.deepStrictEqual(presence.editors[0]?.capabilities, [
+          "play",
+          "stop",
+          "step",
+          "pause",
+        ]);
+        socket.close();
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest)),
+        ),
+      ),
+  );
+
+  it.effect(
+    "dispatchEditorCommand refuses a session without the dedicated presence:command scope, without ever writing a frame to the connected engine",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        // Operate-only: sufficient to CONNECT as a publisher, but
+        // deliberately missing the dedicated command scope — the review
+        // finding this scope exists to close: orchestration:operate must
+        // NOT be enough to make an editor run code.
+        const issued = yield* serverAuth.issueSession({ scopes: [AuthOrchestrationOperateScope] });
+        const dispatcherSession = makeFakeAuthenticatedSession([AuthOrchestrationOperateScope]);
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const messagesAfterReady: Array<string> = [];
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          "scope-gate-repro",
+          undefined,
+          (raw) => messagesAfterReady.push(raw),
+        );
+
+        const outcome = yield* dispatchEditorCommand(dispatcherSession, "scope-gate-repro", "play");
+
+        assert.deepStrictEqual(outcome, { ok: false, error: "insufficient_scope" });
+        // The property this check exists for: an unscoped dispatcher must
+        // never cause so much as one frame to reach the engine — not just
+        // "dispatchEditorCommand returned the right error."
+        assert.deepStrictEqual(messagesAfterReady, []);
+        socket.close();
+      }).pipe(
+        Effect.scoped,
+        // `EditorPresenceRegistry.layer` provided here too, alongside
+        // `editorPresenceRouteLayer`'s own INTERNAL use of the exact same
+        // layer reference — Effect memoizes a layer by identity within one
+        // resolution, so `dispatchEditorCommand`'s own `yield*
+        // EditorPresenceRegistry.EditorPresenceRegistry` resolves to the
+        // SAME registry instance the real WS route builds and registers
+        // into, not a second, disconnected one that has never heard of
+        // the publisher this test just connected.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "dispatchEditorCommand's frame reaches the real connected engine over the wire, and the engine's real commandResult resolves it",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const issued = yield* serverAuth.issueSession({ scopes: [AuthOrchestrationOperateScope] });
+        const dispatcherSession = makeFakeAuthenticatedSession([AuthPresenceCommandScope]);
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const receivedCommandFrames: Array<string> = [];
+        // The real engine's own job, per spec: parse the command and reply
+        // with its OWN outcome. This fake engine always succeeds, proving
+        // the happy path; the registry suite's own "unsupported_action"
+        // test already proves an engine's failure reply is relayed
+        // verbatim, so it isn't repeated here.
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          "wire-roundtrip-repro",
+          undefined,
+          (raw) => {
+            receivedCommandFrames.push(raw);
+            const command = decodeUnknownJson(raw) as { readonly id: string };
+            socket.send(JSON.stringify({ v: 1, type: "commandResult", id: command.id, ok: true }));
+          },
+        );
+
+        const outcome = yield* dispatchEditorCommand(
+          dispatcherSession,
+          "wire-roundtrip-repro",
+          "play",
+          { sceneIndex: 2 },
+        );
+
+        assert.deepStrictEqual(outcome, { ok: true });
+        assert.strictEqual(receivedCommandFrames.length, 1);
+        const receivedCommand = decodeUnknownJson(receivedCommandFrames[0]!) as {
+          readonly v: 1;
+          readonly type: "command";
+          readonly action: string;
+          readonly params: unknown;
+        };
+        assert.strictEqual(receivedCommand.v, 1);
+        assert.strictEqual(receivedCommand.type, "command");
+        assert.strictEqual(receivedCommand.action, "play");
+        assert.deepStrictEqual(receivedCommand.params, { sceneIndex: 2 });
+        socket.close();
+      }).pipe(
+        Effect.scoped,
+        // See the sibling scope-gate test above for why
+        // `EditorPresenceRegistry.layer` is provided here too.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
   );
 });

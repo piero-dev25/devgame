@@ -1,5 +1,5 @@
 import {
-  AuthAdministrativeScopes,
+  AuthDesktopOwnerScopes,
   AuthStandardClientScopes,
   type AuthEnvironmentScope,
   type AuthPairingLink,
@@ -315,7 +315,14 @@ export const make = Effect.gen(function* () {
     const now = yield* DateTime.now;
     yield* seedGrant(config.desktopBootstrapToken, {
       method: "desktop-bootstrap",
-      scopes: AuthAdministrativeScopes,
+      // `AuthDesktopOwnerScopes`, not `AuthAdministrativeScopes` — this is
+      // the ONE session that starts on the same machine as the editors it
+      // may command, so it's the one place `presence:command` is minted
+      // ambiently. See `AuthDesktopOwnerScopes`'s own doc comment for why
+      // `AuthAdministrativeScopes` itself must NOT carry it (that set is
+      // also what `t3 auth session issue` mints for remote/headless
+      // callers).
+      scopes: AuthDesktopOwnerScopes,
       subject: "desktop-bootstrap",
       expiresAt: DateTime.add(now, {
         milliseconds: Duration.toMillis(DESKTOP_BOOTSTRAP_TTL_HOURS),

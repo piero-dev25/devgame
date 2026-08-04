@@ -20,6 +20,13 @@ export interface EditorPresenceSelection {
   readonly items: ReadonlyArray<EditorPresenceItem>;
 }
 
+// Server-side entries also carry `capabilities: string[]` (task #47's
+// spec-editor-presence-commands.md) — deliberately NOT parsed or exposed
+// here yet. This client has no command-dispatch UI to gate on it: that is
+// task #52 (engine selector + Play/Stop toolbar), which is the surface
+// that actually needs to know what an engine can do before offering a
+// control for it. Wiring the field through with nothing yet reading it
+// would be dead code; adding it lands together with #52.
 export interface EditorPresenceEntry {
   readonly editor: { readonly id: string; readonly name: string; readonly version: string };
   readonly session: { readonly id: string };

@@ -79,7 +79,12 @@
  * scope check, precisely so the scope check doesn't widen this same blind
  * spot.
  */
-import { AuthOrchestrationOperateScope, AuthOrchestrationReadScope } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
+  AuthPresenceCommandScope,
+} from "@t3tools/contracts";
+import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -99,6 +104,7 @@ import {
   buildPongFrame,
   describeHelloValidationFailure,
   EDITOR_PRESENCE_CLOSE_CODE,
+  type EditorPresenceCommandOutcome,
   parseEditorPresenceInboundFrame,
 } from "./protocol.ts";
 
@@ -222,8 +228,13 @@ export const runPublisherConnection = (
                 yield* registry.registerPublisher(
                   frame.session.id,
                   token,
-                  { editor: frame.editor, workspace: frame.workspace },
+                  {
+                    editor: frame.editor,
+                    workspace: frame.workspace,
+                    capabilities: frame.capabilities,
+                  },
                   (code, reason) => rejectUpgrade(code, reason),
+                  (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
                 );
                 return;
               }
@@ -239,6 +250,21 @@ export const runPublisherConnection = (
               }
               case "ping": {
                 yield* write(buildPongFrame()).pipe(Effect.catch(() => Effect.void));
+                return;
+              }
+              case "commandResult": {
+                // No `registeredSessionIds` gate, unlike `selection` — this
+                // doesn't need a known session id at all. `resolveCommand`
+                // looks the pending command up by `frame.id` and checks it
+                // against `token` (this connection's own identity, already
+                // gated non-null above) directly; a forged or stale id
+                // simply misses and is a silent no-op, same as any other
+                // unrecognised frame.
+                yield* registry.resolveCommand(
+                  frame.id,
+                  token,
+                  frame.ok ? { ok: true } : { ok: false, error: frame.error },
+                );
                 return;
               }
             }
@@ -359,6 +385,62 @@ const runSubscriberConnection = (
       );
   });
 
+/**
+ * Dispatches ONE command (Play/Stop/Step/Pause) to the editor currently
+ * registered under `sessionId`, gated by `AuthPresenceCommandScope` — see
+ * `@t3tools/contracts`'s own doc comment on that scope and
+ * docs/workbench/spec-editor-presence-commands.md's dedicated-scope
+ * decision: `AuthOrchestrationOperateScope` already authorizes
+ * `dispatchCommand`/`projectsWriteFile`/`vcsPull`/`sourceControlCloneRepository`
+ * and is granted to every standard client by default, so reusing it here
+ * would let "make the user's editor execute code" ride on a scope every
+ * already-paired client already holds. A missing scope answers
+ * `{ ok: false, error: "insufficient_scope" }` — the SAME short,
+ * machine-readable shape `EditorPresenceRegistry.ts`'s `sendCommand` uses
+ * for every other rejection (not connected, rate limited, timed out), so a
+ * caller never needs to special-case "why did this fail" by source.
+ *
+ * No RPC method calls this yet — task #47's scope is the server + protocol
+ * side of commands, not the dock/toolbar trigger that will eventually call
+ * it (a later task, per the owner's "server + protocol first" sequencing).
+ * Exported so the scope gate can be proven now, before that caller exists,
+ * rather than retrofitted once clients are already relying on the
+ * unguarded behaviour.
+ *
+ * `registry` is pulled from EFFECT CONTEXT rather than taken as a
+ * parameter — a live-critic finding (this repo's own "looks wired, does
+ * nothing" pattern, twice already): a registry passed as a plain argument
+ * lets a future RPC handler build or provide a SECOND, independently
+ * constructed `EditorPresenceRegistry.layer` instance (an empty one, with
+ * no publishers ever registered into it) and pass THAT in instead of the
+ * one the live WS route actually populates — every dispatch would then
+ * silently and permanently fail `editor_not_connected`, with no error
+ * that points at the real cause. Sourcing it from context instead means a
+ * caller only has to compose `EditorPresenceRegistry.layer` (the same
+ * module-level layer `editorPresenceRouteLayer` itself provides, via
+ * `Layer.provideMerge` below so it stays part of that layer's own output)
+ * into its own layer graph — Effect's memoization then guarantees the
+ * SAME instance, by construction, not by a convention a caller has to
+ * remember.
+ */
+export const dispatchEditorCommand = (
+  session: EnvironmentAuth.AuthenticatedSession,
+  sessionId: string,
+  action: string,
+  params?: Record<string, unknown>,
+): Effect.Effect<
+  EditorPresenceCommandOutcome,
+  never,
+  Crypto.Crypto | EditorPresenceRegistry.EditorPresenceRegistry
+> =>
+  Effect.gen(function* () {
+    if (!session.scopes.includes(AuthPresenceCommandScope)) {
+      return { ok: false, error: "insufficient_scope" } as const;
+    }
+    const registry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
+    return yield* registry.sendCommand(sessionId, action, params);
+  });
+
 export const editorPresenceRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const registry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
@@ -425,4 +507,12 @@ export const editorPresenceRouteLayer = Layer.unwrap(
       ),
     );
   }),
-).pipe(Layer.provide(EditorPresenceRegistry.layer));
+  // `provideMerge`, not `provide`: this layer's OWN internal use of
+  // `EditorPresenceRegistry.layer` above must stay reachable to whatever
+  // composes `editorPresenceRouteLayer` into a bigger graph (a future RPC
+  // layer that also needs the registry for `dispatchEditorCommand`, per
+  // its own doc comment above) — `provide` would seal the dependency,
+  // satisfying it here but hiding it from every sibling layer, which is
+  // exactly the setup that lets a sibling accidentally build its own,
+  // second, empty registry instead of sharing this one.
+).pipe(Layer.provideMerge(EditorPresenceRegistry.layer));

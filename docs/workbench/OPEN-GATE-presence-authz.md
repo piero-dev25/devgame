@@ -73,6 +73,39 @@ before the scope work above.
 
 ## What is still open
 
+- **Commands inherit the same `workspace.root` gap, and make it worse in
+  kind, not just in degree.** Task #47 added `sendCommand` (server → engine
+  Play/Stop/Step/Pause), gated on a new, dedicated `presence:command` scope
+  — but that scope, like the read/operate scopes above, is per-role, not
+  per-workspace. `sendCommand` addresses purely by `sessionId`
+  (`EditorPresenceRegistry.ts`), with **zero** check that the caller's
+  workspace matches the target editor's — and every reader already receives
+  every publisher's `session.id` for free via `presence` broadcasts
+  (`toEntry`), so a session that holds `presence:command` for its OWN
+  workspace can enumerate every OTHER connected editor's session id from the
+  presence feed and dispatch commands to it too. That is a **category**
+  change from the read/write leak documented above, not merely a bigger
+  version of it: the read/write gap lets a wrongly-scoped session see or
+  spoof STATE for a workspace that isn't theirs; this lets a
+  correctly-scoped session make a STRANGER'S EDITOR EXECUTE CODE. Closing
+  `workspace.root` scoping for commands is at least as urgent as closing it
+  for presence, and arguably more so.
+- **Session-id takeover doubles as command interception once commands
+  exist.** The existing "reconnect replaces the stale connection" design
+  (any caller claiming an existing `session.id` supersedes the prior
+  connection, which is closed with 4402) was written for presence, where
+  the worst case is a spoofed/duplicated state broadcast. With commands, the
+  SAME mechanism lets an attacker who reads a victim's `session.id` from the
+  presence feed open a NEW connection claiming that same id: the victim is
+  evicted (4402, and reconnect-loops), and the attacker's connection now
+  RECEIVES that session's command frames and can reply to them
+  (`{ok:true}`) as if it were the real editor. Not fixed in task #47 —
+  flagged by review as needing its own design pass, since a correct fix
+  (binding a `session.id` to its first claimant's credential subject and
+  workspace root, rather than trusting whoever asserts it next) reaches
+  into `EditorPresenceRegistry.ts`'s deliberately auth-agnostic data model,
+  and a workspace-root-only binding would break legitimate multi-session
+  same-workspace setups. Tracked as follow-up work, not closed here.
 - **`workspace.root` scoping.** A session with the right role-scope can see
   (subscriber) or publish as (publisher) presence for **every** workspace on
   the machine, not just its own — `AuthOrchestrationReadScope` /
@@ -101,4 +134,8 @@ Local single-user development only. Do not expose this route over a tunnel, a
 relay, or a LAN binding, and do not enable it for a multi-user environment —
 a caller who correctly holds a read or operate scope, but for a DIFFERENT
 project, can still see or publish presence for a workspace that isn't
-theirs.
+theirs. This applies with EQUAL force to `presence:command`: it is a
+per-role scope, not a per-workspace one, so granting it to any client at
+all — even under the "consciously tick it in Connections settings" flow —
+means that client can, in principle, address commands to any editor
+connected to this server, not just the ones in its own workspace.

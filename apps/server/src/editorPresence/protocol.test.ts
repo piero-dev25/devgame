@@ -1,6 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { describeHelloValidationFailure, parseEditorPresenceInboundFrame } from "./protocol.ts";
+import {
+  buildCommandFrame,
+  DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+  describeHelloValidationFailure,
+  parseEditorPresenceInboundFrame,
+} from "./protocol.ts";
 
 const VALID_HELLO = {
   v: 1,
@@ -68,7 +73,8 @@ describe("describeHelloValidationFailure (bug #3: a malformed hello must be loud
     expect(describeHelloValidationFailure(JSON.stringify({ v: 2, type: "hello" }))).toBeNull();
   });
 
-  // The seven field faults named in the live critic pass.
+  // The seven field faults named in the live critic pass, plus the two new
+  // `capabilities` faults task #47 adds.
   const malformedCases: ReadonlyArray<readonly [string, unknown]> = [
     ["missing editor.version", { ...VALID_HELLO, editor: { id: "unity", name: "Unity Editor" } }],
     ["empty workspace.root", { ...VALID_HELLO, workspace: { root: "" } }],
@@ -77,6 +83,8 @@ describe("describeHelloValidationFailure (bug #3: a malformed hello must be loud
     ["missing session entirely", { ...VALID_HELLO, session: undefined }],
     ["missing workspace entirely", { ...VALID_HELLO, workspace: undefined }],
     ["blank editor.id", { ...VALID_HELLO, editor: { ...VALID_HELLO.editor, id: "   " } }],
+    ["capabilities is not an array", { ...VALID_HELLO, capabilities: "play,stop" }],
+    ["capabilities contains a non-string entry", { ...VALID_HELLO, capabilities: ["play", 42] }],
   ];
 
   for (const [name, malformed] of malformedCases) {
@@ -86,4 +94,130 @@ describe("describeHelloValidationFailure (bug #3: a malformed hello must be loud
       expect(typeof reason).toBe("string");
     });
   }
+});
+
+describe("hello.capabilities (task #47: the toolbar must not offer what an engine can't do)", () => {
+  it("defaults to no capabilities when the key is absent — an older plugin keeps working, but claims nothing it can't do", () => {
+    // VALID_HELLO itself has no `capabilities` key — JSON.stringify omits
+    // any key whose value is `undefined`, so this is the "key genuinely
+    // absent" case, not "key present but undefined" (which isn't
+    // representable in JSON at all).
+    expect(Object.hasOwn(VALID_HELLO, "capabilities")).toBe(false);
+    const frame = parseEditorPresenceInboundFrame(JSON.stringify(VALID_HELLO));
+    expect(frame?.type === "hello" && frame.capabilities).toEqual(
+      DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+    );
+  });
+
+  it("parses a declared capability list exactly as sent", () => {
+    const frame = parseEditorPresenceInboundFrame(
+      JSON.stringify({ ...VALID_HELLO, capabilities: ["play", "stop", "step", "pause"] }),
+    );
+    expect(frame?.type === "hello" && frame.capabilities).toEqual([
+      "play",
+      "stop",
+      "step",
+      "pause",
+    ]);
+  });
+
+  it("rejects the whole hello (not a silent default) when capabilities is malformed", () => {
+    // Loud, not silent — same treatment as every other hello field. A
+    // publisher that thinks it correctly declared ["play","stop","step"]
+    // deserves to find out its shape was wrong, not have it silently
+    // downgraded to the empty default.
+    expect(
+      parseEditorPresenceInboundFrame(
+        JSON.stringify({ ...VALID_HELLO, capabilities: "play,stop" }),
+      ),
+    ).toBeNull();
+    expect(
+      parseEditorPresenceInboundFrame(
+        JSON.stringify({ ...VALID_HELLO, capabilities: ["play", ""] }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("commandResult parsing (server -> engine command's reply)", () => {
+  it("parses a successful reply", () => {
+    const frame = parseEditorPresenceInboundFrame(
+      JSON.stringify({ v: 1, type: "commandResult", id: "cmd-1", ok: true }),
+    );
+    expect(frame).toEqual({ type: "commandResult", id: "cmd-1", ok: true });
+  });
+
+  it("parses a failed reply with its machine-readable error", () => {
+    const frame = parseEditorPresenceInboundFrame(
+      JSON.stringify({
+        v: 1,
+        type: "commandResult",
+        id: "cmd-1",
+        ok: false,
+        error: "unsupported_action",
+      }),
+    );
+    expect(frame).toEqual({
+      type: "commandResult",
+      id: "cmd-1",
+      ok: false,
+      error: "unsupported_action",
+    });
+  });
+
+  it("drops (not loudly rejects) a commandResult missing its id", () => {
+    expect(
+      parseEditorPresenceInboundFrame(JSON.stringify({ v: 1, type: "commandResult", ok: true })),
+    ).toBeNull();
+  });
+
+  it("drops a failed reply with no error string — spec requires a machine-readable reason", () => {
+    expect(
+      parseEditorPresenceInboundFrame(
+        JSON.stringify({ v: 1, type: "commandResult", id: "cmd-1", ok: false }),
+      ),
+    ).toBeNull();
+  });
+
+  it("drops a commandResult whose ok field is neither true nor false", () => {
+    expect(
+      parseEditorPresenceInboundFrame(
+        JSON.stringify({ v: 1, type: "commandResult", id: "cmd-1", ok: "yes" }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("buildCommandFrame (server -> engine, FLAT per the module doc's wire-shape note)", () => {
+  it("builds a flat frame with no params key when params is omitted", () => {
+    const raw = buildCommandFrame("cmd-1", "2026-08-03T00:00:00.000Z", "play");
+    expect(JSON.parse(raw)).toEqual({
+      v: 1,
+      type: "command",
+      id: "cmd-1",
+      at: "2026-08-03T00:00:00.000Z",
+      action: "play",
+    });
+    expect(Object.hasOwn(JSON.parse(raw), "params")).toBe(false);
+  });
+
+  it("includes params verbatim when provided", () => {
+    const raw = buildCommandFrame("cmd-2", "2026-08-03T00:00:00.000Z", "step", { frames: 1 });
+    expect(JSON.parse(raw)).toEqual({
+      v: 1,
+      type: "command",
+      id: "cmd-2",
+      at: "2026-08-03T00:00:00.000Z",
+      action: "step",
+      params: { frames: 1 },
+    });
+  });
+
+  it("action is an open string — an engine-specific action round-trips unchanged", () => {
+    // Consistent with editor.id / items[].kind: the SERVER does not
+    // validate or constrain action names — see dispatchEditorCommand /
+    // sendCommand, which never inspect `action` beyond forwarding it.
+    const raw = buildCommandFrame("cmd-3", "t", "unity.frameStepBackward");
+    expect(JSON.parse(raw).action).toBe("unity.frameStepBackward");
+  });
 });

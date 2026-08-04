@@ -1,4 +1,5 @@
 import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as HttpApiSchema from "effect/unstable/httpapi/HttpApiSchema";
 
 import { AuthSessionId, TrimmedNonEmptyString } from "./baseSchemas.ts";
@@ -81,6 +82,24 @@ export const AuthAccessReadScope = "access:read" as const;
 export const AuthAccessWriteScope = "access:write" as const;
 export const AuthRelayReadScope = "relay:read" as const;
 export const AuthRelayWriteScope = "relay:write" as const;
+/**
+ * Authorizes sending an Editor Presence COMMAND (Play/Stop/Step/Pause) to a
+ * connected engine — see `EditorPresenceRoute.ts`'s `dispatchEditorCommand`
+ * and docs/workbench/spec-editor-presence-commands.md. Deliberately its own
+ * scope, NOT folded into `orchestration:operate`: that scope already
+ * authorizes `dispatchCommand`, `projectsWriteFile`, `vcsPull`, and
+ * `sourceControlCloneRepository`, and `AuthStandardClientScopes` grants
+ * read+operate to every standard client by default — the browser app, every
+ * `t3 pair` token, the Unity plugin's own token exchange. Reusing that scope
+ * would mean "make the user's editor execute code" is authorized by a scope
+ * every already-paired client already holds, with no way to grant presence
+ * read/write without ALSO granting command dispatch. This scope is
+ * deliberately excluded from BOTH `AuthStandardClientScopes` AND
+ * `AuthAdministrativeScopes` below — see `AuthDesktopOwnerScopes` for where
+ * it actually lives, and why `AuthAdministrativeScopes` itself is the wrong
+ * place for it.
+ */
+export const AuthPresenceCommandScope = "presence:command" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -90,10 +109,46 @@ export const AuthEnvironmentScope = Schema.Literals([
   AuthAccessWriteScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthPresenceCommandScope,
 ]);
 export type AuthEnvironmentScope = typeof AuthEnvironmentScope.Type;
 export const AuthEnvironmentScopes = Schema.Array(AuthEnvironmentScope);
 export type AuthEnvironmentScopes = typeof AuthEnvironmentScopes.Type;
+
+const AUTH_ENVIRONMENT_SCOPE_VALUES: ReadonlySet<string> = new Set(AuthEnvironmentScope.literals);
+
+/**
+ * A tolerant decode of a scope LIST: unrecognized scope strings are DROPPED
+ * rather than failing the whole decode. `AuthEnvironmentScope` is a closed
+ * `Schema.Literals` union, so `AuthEnvironmentScopes` (a strict array of it)
+ * fails to decode ENTIRELY the moment the array contains even one value the
+ * decoding build doesn't recognize — which is exactly what happens when an
+ * OLDER client (built before a new scope literal like `presence:command`
+ * existed) decodes a NEWER server's response for a session that now carries
+ * it: "one scope I don't understand" becomes "this client session's state
+ * failed to load," for every field in the same payload, not just the scope
+ * list.
+ *
+ * Used ONLY for scope lists a client READS — describing a session, pairing
+ * link, or client that already exists. Dropping an unrecognized entry there
+ * is safe: the client simply doesn't know about a capability it can't act
+ * on anyway. `AuthCreatePairingCredentialInput.scopes` deliberately keeps
+ * the STRICT `AuthEnvironmentScopes` — a WRITE request specifying scopes by
+ * name should be rejected outright if it names one the server doesn't
+ * recognize, not silently narrowed.
+ */
+export const AuthEnvironmentScopesLenient = Schema.Array(Schema.String).pipe(
+  Schema.decodeTo(
+    AuthEnvironmentScopes,
+    SchemaTransformation.transform<ReadonlyArray<AuthEnvironmentScope>, ReadonlyArray<string>>({
+      decode: (scopes) =>
+        scopes.filter((scope): scope is AuthEnvironmentScope =>
+          AUTH_ENVIRONMENT_SCOPE_VALUES.has(scope),
+        ),
+      encode: (scopes) => [...scopes],
+    }),
+  ),
+);
 
 export const AuthStandardClientScopes = [
   AuthOrchestrationReadScope,
@@ -107,6 +162,35 @@ export const AuthAdministrativeScopes = [
   AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthRelayWriteScope,
+] as const;
+
+/**
+ * `AuthAdministrativeScopes`, plus `AuthPresenceCommandScope` — used at
+ * EXACTLY ONE mint site: the desktop app's own bootstrap seed
+ * (`PairingGrantStore.ts`'s `desktopBootstrapToken` seeding). This is
+ * deliberately NOT the same set `AuthAdministrativeScopes` itself grants,
+ * because `AuthAdministrativeScopes` has other mint sites that are NOT the
+ * machine owner sitting at their own desktop — most notably `t3 auth
+ * session issue` (apps/server/src/cli/auth.ts), which mints bearer tokens
+ * "for headless or REMOTE clients." Folding `presence:command` into
+ * `AuthAdministrativeScopes` itself would hand every one of those
+ * remote/headless tokens the ability to make a connected editor execute
+ * code too — the same "capability riding ambiently on a broad grant" shape
+ * as the #46 finding this scope exists to answer, just at a smaller radius.
+ *
+ * The desktop bootstrap session is different in kind: it is the one
+ * session that starts on the SAME machine as the editors it would be
+ * commanding, seeded once at process start, never minted on demand for a
+ * remote caller. That is the one place "may DELEGATE engine control" is a
+ * property PairingGrantStore's `pairingCredential` HTTP path can then hand
+ * out consciously, one explicit checkbox at a time (Settings > Connections)
+ * — see `AuthPresenceCommandScope`'s own doc comment for why a session must
+ * already hold a scope to delegate it, and why that would otherwise make
+ * this scope permanently unmintable.
+ */
+export const AuthDesktopOwnerScopes = [
+  ...AuthAdministrativeScopes,
+  AuthPresenceCommandScope,
 ] as const;
 
 export const AuthTokenExchangeGrantType =
@@ -150,7 +234,10 @@ export type AuthBrowserSessionRequest = typeof AuthBrowserSessionRequest.Type;
 
 export const AuthBrowserSessionResult = Schema.Struct({
   authenticated: Schema.Literal(true),
-  scopes: AuthEnvironmentScopes,
+  // Lenient: this describes a session that already exists — see
+  // `AuthEnvironmentScopesLenient`'s own doc for why a READ of scopes
+  // tolerates an unrecognized literal instead of failing outright.
+  scopes: AuthEnvironmentScopesLenient,
   sessionMethod: ServerAuthSessionMethod,
   expiresAt: Schema.DateTimeUtc,
 });
@@ -210,7 +297,8 @@ export type AuthPairingCredentialResult = typeof AuthPairingCredentialResult.Typ
 export const AuthPairingLink = Schema.Struct({
   id: TrimmedNonEmptyString,
   credential: TrimmedNonEmptyString,
-  scopes: AuthEnvironmentScopes,
+  // Lenient — see `AuthBrowserSessionResult`'s comment above.
+  scopes: AuthEnvironmentScopesLenient,
   subject: TrimmedNonEmptyString,
   label: Schema.optionalKey(TrimmedNonEmptyString),
   createdAt: Schema.DateTimeUtc,
@@ -231,7 +319,8 @@ export type AuthClientMetadata = typeof AuthClientMetadata.Type;
 export const AuthClientSession = Schema.Struct({
   sessionId: AuthSessionId,
   subject: TrimmedNonEmptyString,
-  scopes: AuthEnvironmentScopes,
+  // Lenient — see `AuthBrowserSessionResult`'s comment above.
+  scopes: AuthEnvironmentScopesLenient,
   method: ServerAuthSessionMethod,
   client: AuthClientMetadata,
   issuedAt: Schema.DateTimeUtc,
@@ -337,7 +426,8 @@ export type AuthCreatePairingCredentialInput = typeof AuthCreatePairingCredentia
 export const AuthSessionState = Schema.Struct({
   authenticated: Schema.Boolean,
   auth: ServerAuthDescriptor,
-  scopes: Schema.optionalKey(AuthEnvironmentScopes),
+  // Lenient — see `AuthBrowserSessionResult`'s comment above.
+  scopes: Schema.optionalKey(AuthEnvironmentScopesLenient),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
 });

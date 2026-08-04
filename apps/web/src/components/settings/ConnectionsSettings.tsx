@@ -15,6 +15,7 @@ import {
   AuthAdministrativeScopes,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
+  AuthPresenceCommandScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
   AuthReviewWriteScope,
@@ -206,6 +207,12 @@ const PAIRING_SCOPE_OPTIONS: ReadonlyArray<{
     scope: AuthRelayWriteScope,
     title: "Manage relay",
     description: "Change managed tunnel connectivity.",
+  },
+  {
+    scope: AuthPresenceCommandScope,
+    title: "Control connected editors",
+    description:
+      "Send Play/Stop/Step/Pause commands to a connected game engine. Not required to view editor presence — only to make it act.",
   },
 ];
 

@@ -2,16 +2,19 @@
  * Editor Presence Protocol (EPP) v1 — wire types and frame parsing.
  *
  * Transport: WebSocket, one JSON object per text frame. See
- * docs/workbench/spec-editor-presence.md for the full protocol writeup; this
- * file implements only what step 1 needs: `hello` / `selection` / `ping` from
- * a publisher (an editor plugin), and the `presence` fan-out frame sent to
- * subscribers (the chat client).
+ * docs/workbench/spec-editor-presence.md for the one-way (publish/subscribe)
+ * protocol writeup and docs/workbench/spec-editor-presence-commands.md
+ * (frozen) for the two-way command extension this file also implements:
+ * `hello` (now with `capabilities`) / `selection` / `ping` / `commandResult`
+ * inbound from a publisher (an editor plugin), and the `presence` fan-out
+ * frame plus the `command` frame outbound to it.
  *
  * Deliberately schema-light: this is an external, third-party-extensible
- * protocol (`editor.id` and `items[].kind` are open strings, not a closed
- * union — see the spec's "Deliberately left out" section), so we validate
- * shape defensively and drop malformed frames rather than failing the whole
- * connection on one bad message from an in-development plugin.
+ * protocol (`editor.id`, `items[].kind`, and `command.action` are open
+ * strings, not a closed union — see the spec's "Deliberately left out"
+ * section), so we validate shape defensively and drop malformed frames
+ * rather than failing the whole connection on one bad message from an
+ * in-development plugin.
  *
  * THE WIRE SHAPE IS ASYMMETRIC — read this before touching either side.
  * A publisher's inbound `selection` frame is FLAT:
@@ -28,6 +31,12 @@
  * connection looks healthy while no selection ever arrives. This has already
  * cost a wrong implementation once (see the "docs: the chain works" commit
  * for the live repro) — get the shape right the first time.
+ *
+ * The outbound `command` frame follows the SAME rule as inbound `selection`,
+ * not outbound `presence`: it addresses exactly ONE editor (the connection
+ * it's written to), so it is FLAT — `{ v, type: "command", id, at, action,
+ * params? }` — no wrapper, same as `selection`, unlike `presence`'s
+ * per-editor nesting. See spec-editor-presence-commands.md's "Wire shape".
  */
 
 /** Defensive cap on `items[]` — `GlobalObjectId.GetGlobalObjectIdSlow` is
@@ -44,6 +53,13 @@ export const EDITOR_PRESENCE_MAX_ITEMS = 64;
  * credential-class set (stop retrying); everything else here is
  * deliberately outside that set so engine clients keep retrying — the
  * server said why, and none of these mean "fix your token."
+ *
+ * DELIBERATELY NOT extended for commands. This set is SATURATED: every
+ * shipped client (Godot, Unity, the web app) treats an unrecognised code
+ * >= 4000 as "keep retrying," so a new code cannot be introduced without
+ * shipping client updates first — see spec-editor-presence-commands.md's
+ * "Rules that are easy to get wrong". A failed or refused command is an
+ * in-band `commandResult` with `ok: false`, never a close code.
  */
 export const EDITOR_PRESENCE_CLOSE_CODE = {
   missingCredential: 4400,
@@ -52,6 +68,38 @@ export const EDITOR_PRESENCE_CLOSE_CODE = {
   malformedHello: 4403,
   internalError: 4500,
 } as const;
+
+/** A publisher's declared capability set (`hello.capabilities`) — see
+ * spec-editor-presence-commands.md's "Capability advertisement" table.
+ * Open strings, matching `editor.id` / `items[].kind`'s existing
+ * open-string philosophy: engines differ in what they can do, and new
+ * actions will be added without a protocol version bump. */
+export type EditorPresenceCapability = string;
+
+/** Applied when a `hello` frame omits `capabilities` entirely. This is
+ * deliberately EMPTY, not `["play", "stop"]` — no shipped plugin (Godot,
+ * Unity, Unreal) implements commands yet, so a permissive default would
+ * advertise play/stop for every publisher currently in the field, none of
+ * which can honour it: an enabled Play button, a ten-second wait, and a
+ * timeout — precisely what the capability table exists to prevent. See
+ * spec-editor-presence-commands.md's "Capability advertisement": "A `hello`
+ * with no `capabilities` key means `[]` — no commands." An older plugin
+ * still keeps working under `[]` — it does exactly what it could already
+ * do (publish selection); it just doesn't claim a capability it doesn't
+ * have. A default that claims a capability is a lie whenever it's wrong; a
+ * default that claims none is merely conservative. */
+export const DEFAULT_EDITOR_PRESENCE_CAPABILITIES: ReadonlyArray<EditorPresenceCapability> = [];
+
+/** Result of one command round-trip, mirroring the inbound `commandResult`
+ * frame shape — used both for the parsed wire frame and for the outcome the
+ * server-side dispatcher (`EditorPresenceRoute.ts`'s `dispatchEditorCommand`)
+ * resolves with, whether that outcome came from the engine, from a local
+ * rejection (missing scope, rate limit, no connected editor), or from a
+ * timeout. `error` is a short, machine-readable reason — spec's own words —
+ * never a human sentence. */
+export type EditorPresenceCommandOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly error: string };
 
 export interface EditorPresenceEditorIdentity {
   readonly id: string;
@@ -79,9 +127,11 @@ export type EditorPresenceInboundFrame =
       readonly editor: EditorPresenceEditorIdentity;
       readonly session: { readonly id: string };
       readonly workspace: { readonly root: string };
+      readonly capabilities: ReadonlyArray<EditorPresenceCapability>;
     }
   | { readonly type: "selection"; readonly selection: EditorPresenceSelection }
-  | { readonly type: "ping" };
+  | { readonly type: "ping" }
+  | ({ readonly type: "commandResult"; readonly id: string } & EditorPresenceCommandOutcome);
 
 export interface EditorPresenceEntry {
   readonly editor: EditorPresenceEditorIdentity;
@@ -90,6 +140,7 @@ export interface EditorPresenceEntry {
   readonly connected: true;
   readonly lastSeenAt: string;
   readonly selection: EditorPresenceSelection | null;
+  readonly capabilities: ReadonlyArray<EditorPresenceCapability>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -137,6 +188,27 @@ function parseItem(value: unknown): EditorPresenceItem | null {
   };
 }
 
+/**
+ * `undefined` (the key was absent) resolves to
+ * `DEFAULT_EDITOR_PRESENCE_CAPABILITIES` — an older plugin that predates
+ * commands keeps working instead of appearing capability-less. Anything
+ * PRESENT but malformed (not an array, or containing a non-string /
+ * blank-string entry) returns `null`, the same "fail loud" treatment every
+ * other hello field gets — a publisher that thinks it correctly declared
+ * `["play","stop","step"]` deserves to find out its shape was wrong, not
+ * have it silently downgraded to the empty default.
+ */
+function parseCapabilities(value: unknown): ReadonlyArray<EditorPresenceCapability> | null {
+  if (value === undefined) return DEFAULT_EDITOR_PRESENCE_CAPABILITIES;
+  if (!Array.isArray(value)) return null;
+  const capabilities: string[] = [];
+  for (const item of value) {
+    if (!isNonEmptyString(item)) return null;
+    capabilities.push(item);
+  }
+  return capabilities;
+}
+
 function parseHello(value: Record<string, unknown>): EditorPresenceInboundFrame | null {
   const editor = value.editor;
   const session = value.session;
@@ -151,11 +223,14 @@ function parseHello(value: Record<string, unknown>): EditorPresenceInboundFrame 
   }
   if (!isRecord(session) || !isNonEmptyString(session.id)) return null;
   if (!isRecord(workspace) || !isNonEmptyString(workspace.root)) return null;
+  const capabilities = parseCapabilities(value.capabilities);
+  if (capabilities === null) return null;
   return {
     type: "hello",
     editor: { id: editor.id, name: editor.name, version: editor.version },
     session: { id: session.id },
     workspace: { root: workspace.root },
+    capabilities,
   };
 }
 
@@ -201,6 +276,14 @@ export function describeHelloValidationFailure(raw: string): string | null {
     return "hello.workspace.root must be a non-empty string";
   }
 
+  const capabilities = parsed.capabilities;
+  if (
+    capabilities !== undefined &&
+    (!Array.isArray(capabilities) || capabilities.some((item) => !isNonEmptyString(item)))
+  ) {
+    return "hello.capabilities must be an array of non-empty strings when present";
+  }
+
   return null; // valid hello — nothing to describe
 }
 
@@ -219,6 +302,25 @@ function parseSelection(value: Record<string, unknown>): EditorPresenceInboundFr
     if (items.length >= EDITOR_PRESENCE_MAX_ITEMS) break;
   }
   return { type: "selection", selection: { seq: value.seq, at: value.at, items } };
+}
+
+/**
+ * `{ id, ok: true }` or `{ id, ok: false, error }` — dropped (not loudly
+ * rejected) if malformed, same treatment as `selection`/`ping`: a
+ * `commandResult` isn't part of the connection-establishment handshake the
+ * way `hello` is, so there's no equivalent "publisher thinks it worked but
+ * silently didn't" failure mode to guard against here — the CALLER awaiting
+ * this specific command's outcome (see `EditorPresenceRegistry.ts`'s
+ * `sendCommand`) simply times out instead, which is already surfaced.
+ */
+function parseCommandResult(value: Record<string, unknown>): EditorPresenceInboundFrame | null {
+  if (!isNonEmptyString(value.id)) return null;
+  if (value.ok === true) return { type: "commandResult", id: value.id, ok: true };
+  if (value.ok === false) {
+    if (!isNonEmptyString(value.error)) return null;
+    return { type: "commandResult", id: value.id, ok: false, error: value.error };
+  }
+  return null;
 }
 
 /**
@@ -250,6 +352,8 @@ export function parseEditorPresenceInboundFrame(raw: string): EditorPresenceInbo
       return parseSelection(parsed);
     case "ping":
       return { type: "ping" };
+    case "commandResult":
+      return parseCommandResult(parsed);
     default:
       return null;
   }
@@ -258,6 +362,32 @@ export function parseEditorPresenceInboundFrame(raw: string): EditorPresenceInbo
 /** Server → subscriber `presence` frame: full state of every connected publisher. */
 export function buildPresenceFrame(editors: ReadonlyArray<EditorPresenceEntry>): string {
   return JSON.stringify({ v: 1, type: "presence", editors });
+}
+
+/**
+ * Server → engine `command` frame — FLAT, not nested, per the module doc's
+ * wire-shape note: a command addresses exactly ONE editor (the connection
+ * it's written to), the same rule that makes inbound `selection` flat.
+ * `at` is caller-supplied rather than computed here (`new Date()` inside a
+ * "pure" builder is exactly the kind of hidden wall-clock dependency this
+ * codebase avoids — see `EditorPresenceRegistry.ts`'s `nowIso`, which goes
+ * through Effect's `DateTime.now` so callers stay testable against a
+ * controllable clock). `params` is omitted from the frame entirely when
+ * absent, rather than serialized as `params: undefined`. */
+export function buildCommandFrame(
+  id: string,
+  at: string,
+  action: string,
+  params?: Record<string, unknown>,
+): string {
+  return JSON.stringify({
+    v: 1,
+    type: "command",
+    id,
+    at,
+    action,
+    ...(params !== undefined ? { params } : {}),
+  });
 }
 
 export function buildPongFrame(): string {

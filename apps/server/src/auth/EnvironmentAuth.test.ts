@@ -1,5 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { AuthAdministrativeScopes } from "@t3tools/contracts";
+import {
+  AuthAdministrativeScopes,
+  AuthDesktopOwnerScopes,
+  AuthPresenceCommandScope,
+  AuthStandardClientScopes,
+} from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -143,6 +148,53 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
   );
 
+  // Task #47 review (F1): `presence:command` is deliberately excluded from
+  // BOTH `AuthStandardClientScopes` (no paired client gets it by default —
+  // the whole point of a DEDICATED scope) AND `AuthAdministrativeScopes`
+  // itself (that set is also what `t3 auth session issue` mints for
+  // remote/headless callers — folding this scope into it would hand THOSE
+  // ambient reach too). It lives ONLY in `AuthDesktopOwnerScopes`, minted
+  // at exactly one site (the desktop bootstrap seed) — see
+  // `AuthDesktopOwnerScopes`'s own doc comment in @t3tools/contracts for
+  // the full reasoning, including why excluding it from every scope set
+  // would leave it permanently unmintable by any code path.
+  it.effect(
+    "grants presence:command via token exchange ONLY when the underlying pairing grant carries it",
+    () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+
+        // The grant carries it (an AuthDesktopOwnerScopes-scoped pairing
+        // credential — what the desktop bootstrap seed carries, and
+        // therefore what Settings > Connections can delegate FROM when a
+        // user ticks "Control connected editors").
+        const grantedCredential = yield* serverAuth.issuePairingCredential({
+          scopes: AuthDesktopOwnerScopes,
+        });
+        const grantedToken = yield* serverAuth.exchangeBootstrapCredentialForAccessToken(
+          grantedCredential.credential,
+          [AuthPresenceCommandScope],
+          requestMetadata,
+        );
+        expect(grantedToken.scope).toBe(AuthPresenceCommandScope);
+
+        // The grant does NOT carry it (the ordinary default every existing
+        // standard client already gets) — requesting it explicitly must be
+        // refused, not silently downgraded or silently granted anyway.
+        const ungrantedCredential = yield* serverAuth.issuePairingCredential({
+          scopes: AuthStandardClientScopes,
+        });
+        const error = yield* serverAuth
+          .exchangeBootstrapCredentialForAccessToken(
+            ungrantedCredential.credential,
+            [AuthPresenceCommandScope],
+            requestMetadata,
+          )
+          .pipe(Effect.flip);
+        expect(error._tag).toBe("ServerAuthScopeNotGrantedError");
+      }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
+  );
+
   it.effect("keeps user-issued administrative pairing links manageable", () =>
     Effect.gen(function* () {
       const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
@@ -177,16 +229,11 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         makeCookieRequest(sessions.cookieName, exchanged.sessionToken),
       );
 
-      expect(verified.scopes).toEqual([
-        "orchestration:read",
-        "orchestration:operate",
-        "terminal:operate",
-        "review:write",
-        "relay:read",
-        "access:read",
-        "access:write",
-        "relay:write",
-      ]);
+      // The real constant, not a hand-duplicated literal list — a hardcoded
+      // copy is exactly what silently drifted out of sync with
+      // `AuthAdministrativeScopes` when task #47 added `presence:command`
+      // to it.
+      expect(verified.scopes).toEqual(AuthAdministrativeScopes);
       expect(verified.subject).toBe("administrative-bootstrap");
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),
   );

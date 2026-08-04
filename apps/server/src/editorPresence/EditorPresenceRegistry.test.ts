@@ -1,8 +1,15 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { expect, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as EditorPresenceRegistry from "./EditorPresenceRegistry.ts";
+import type { EditorPresenceCommandOutcome } from "./protocol.ts";
 
 interface ParsedPresenceFrame {
   readonly editors: ReadonlyArray<{
@@ -19,6 +26,15 @@ interface ParsedPresenceFrame {
 
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
 const parseFrame = (raw: string) => decodeUnknownJson(raw) as ParsedPresenceFrame;
+const parseCommandFrame = (raw: string) =>
+  decodeUnknownJson(raw) as {
+    readonly v: 1;
+    readonly type: "command";
+    readonly id: string;
+    readonly at: string;
+    readonly action: string;
+    readonly params?: unknown;
+  };
 
 const HELLO = {
   editor: { id: "unity", name: "Unity Editor", version: "6000.3.14f1" },
@@ -34,13 +50,26 @@ function makeRecorder() {
   return { frames, send };
 }
 
-const withRegistry = <A>(
-  f: (registry: EditorPresenceRegistry.EditorPresenceRegistry["Service"]) => Effect.Effect<A>,
+// `sendCommand` needs `Crypto.Crypto` (for the command id — see
+// EditorPresenceRegistry.ts's own doc on why `randomUUIDv4`, not a bare
+// `crypto.randomUUID()`) in the CALLER's context, every time it's invoked —
+// that's a property of the SERVICE INTERFACE's declared type, not
+// something satisfied by how `EditorPresenceRegistry.layer` itself was
+// built (its own construction needs no external services at all). So
+// `NodeCrypto.layer` — the SAME layer the app's real entrypoint (`bin.ts`,
+// via `NodeServices.layer`) provides in production — has to wrap the WHOLE
+// `withRegistry` effect, not just the registry layer, so it's in scope
+// wherever `f`'s body calls `registry.sendCommand(...)`. Existing
+// (non-command) tests are unaffected either way.
+const withRegistry = <A, R>(
+  f: (
+    registry: EditorPresenceRegistry.EditorPresenceRegistry["Service"],
+  ) => Effect.Effect<A, never, R>,
 ) =>
   Effect.gen(function* () {
     const registry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
     return yield* f(registry);
-  }).pipe(Effect.provide(EditorPresenceRegistry.layer));
+  }).pipe(Effect.provide(Layer.mergeAll(EditorPresenceRegistry.layer, NodeCrypto.layer)));
 
 it.effect("a new subscriber gets an empty presence frame with no publishers connected", () =>
   withRegistry((registry) =>
@@ -275,4 +304,299 @@ it.effect("refuses a new publisher session once at capacity, without touching ex
       expect(parsed.editors.some((e) => e.session.id === "session-overflow")).toBe(false);
     }),
   ),
+);
+
+// ============================================================================
+// Task #47 — commands (server -> engine). See
+// docs/workbench/spec-editor-presence-commands.md (frozen).
+// ============================================================================
+
+/** A publisher's `send` handle that AUTOMATICALLY answers every command it
+ * receives, computing the reply from the parsed frame — sidesteps needing
+ * to fork+race `sendCommand` against a manual reply: by the time
+ * `sendCommand`'s `yield* decision.send(frame)` returns, `resolveCommand`
+ * has already run as a side effect of that same call, so `sendCommand`'s
+ * own subsequent `Deferred.await` resolves immediately without ever truly
+ * suspending. */
+function makeAutoReplyingPublisher(
+  registry: EditorPresenceRegistry.EditorPresenceRegistry["Service"],
+  token: EditorPresenceRegistry.EditorPresenceConnectionToken,
+  reply: (command: {
+    readonly id: string;
+    readonly action: string;
+    readonly params?: unknown;
+  }) => EditorPresenceCommandOutcome,
+) {
+  const frames: string[] = [];
+  const send = (frame: string) =>
+    Effect.gen(function* () {
+      frames.push(frame);
+      const command = parseCommandFrame(frame);
+      yield* registry.resolveCommand(command.id, token, reply(command));
+    });
+  return { frames, send };
+}
+
+it.effect(
+  "sendCommand to a session with no connected publisher fails immediately, never queues",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const outcome = yield* registry.sendCommand("never-connected", "play");
+        expect(outcome).toEqual({ ok: false, error: "editor_not_connected" });
+      }),
+    ),
+);
+
+it.effect(
+  "sendCommand writes the REAL command frame to the connected publisher and resolves with its actual reply",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const publisher = makeAutoReplyingPublisher(registry, token, () => ({ ok: true }));
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const outcome = yield* registry.sendCommand("session-1", "play", { sceneIndex: 0 });
+
+        // Assert the EFFECT — the exact frame the engine actually
+        // received — not merely that `send` was called some number of
+        // times.
+        expect(outcome).toEqual({ ok: true });
+        expect(publisher.frames).toHaveLength(1);
+        const sentFrame = parseCommandFrame(publisher.frames[0]!);
+        expect(sentFrame).toMatchObject({
+          v: 1,
+          type: "command",
+          action: "play",
+          params: { sceneIndex: 0 },
+        });
+        expect(typeof sentFrame.id).toBe("string");
+        expect(sentFrame.id.length).toBeGreaterThan(0);
+      }),
+    ),
+);
+
+it.effect(
+  "relays the engine's unsupported_action reply verbatim — the server never validates action names itself",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const publisher = makeAutoReplyingPublisher(registry, token, () => ({
+          ok: false,
+          error: "unsupported_action",
+        }));
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const outcome = yield* registry.sendCommand(
+          "session-1",
+          "an.action.this.fake.engine.does.not.recognise",
+        );
+
+        expect(outcome).toEqual({ ok: false, error: "unsupported_action" });
+      }),
+    ),
+);
+
+it.effect(
+  "two commands in flight are each resolved with THEIR OWN reply, even answered out of order",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const sentFrames = yield* Queue.unbounded<string>();
+        const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const fiberA = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
+        const frameA = parseCommandFrame(yield* Queue.take(sentFrames));
+        const fiberB = yield* Effect.forkChild(registry.sendCommand("session-1", "stop"));
+        const frameB = parseCommandFrame(yield* Queue.take(sentFrames));
+
+        expect(frameA.id).not.toBe(frameB.id);
+
+        // Reply to B FIRST, deliberately out of order — the correlation
+        // must be by id, not by dispatch order.
+        yield* registry.resolveCommand(frameB.id, token, { ok: true });
+        yield* registry.resolveCommand(frameA.id, token, {
+          ok: false,
+          error: "unsupported_action",
+        });
+
+        const outcomeA = yield* Fiber.join(fiberA);
+        const outcomeB = yield* Fiber.join(fiberB);
+
+        expect(outcomeA).toEqual({ ok: false, error: "unsupported_action" });
+        expect(outcomeB).toEqual({ ok: true });
+      }),
+    ),
+);
+
+it.effect(
+  "bounds the command rate per session — a burst beyond the cap is rejected immediately, not queued",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const sentFrames = yield* Queue.unbounded<string>();
+        // Deliberately never auto-replies — every dispatched command in
+        // this test stays pending, so the ONLY way the overflow call can
+        // resolve fast is if the rate limit itself short-circuits before
+        // ever waiting on a reply.
+        const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const pendingFibers: Array<Fiber.Fiber<EditorPresenceCommandOutcome>> = [];
+        for (let i = 0; i < EditorPresenceRegistry.COMMAND_RATE_LIMIT_MAX; i++) {
+          pendingFibers.push(yield* Effect.forkChild(registry.sendCommand("session-1", "play")));
+          // Deterministically wait for THIS dispatch's send to have
+          // happened (proving its rate-limit timestamp was recorded)
+          // before firing the next one — no reliance on scheduler timing.
+          yield* Queue.take(sentFrames);
+        }
+
+        const overflowOutcome = yield* registry.sendCommand("session-1", "play");
+        expect(overflowOutcome).toEqual({ ok: false, error: "rate_limited" });
+
+        // Assert the EFFECT, not just the return value: a mutant that
+        // still WRITES the frame and only fakes the rejection in its
+        // return value would pass the assertion above but fail this one.
+        // The loop above already drained the queue down to empty (one
+        // `Queue.take` per accepted dispatch), so a non-blocking poll
+        // finding NOTHING here proves the rejected call wrote no frame —
+        // `sendCommand` isn't forked, so by the time it has already
+        // returned the rejection, any write it might have made is
+        // already in the queue, not still in flight.
+        expect((yield* Queue.poll(sentFrames))._tag).toBe("None");
+
+        // The window is a SLIDING bound, not a permanent lockout once a
+        // session has ever hit the cap — advance the virtual clock past it
+        // and confirm a fresh command is dispatched for real (its frame
+        // actually reaches the engine). A mutant that dropped the
+        // `nowMs - t < WINDOW_MS` filter (rate-limiting every session that
+        // ever hit the cap, forever) would stay rejected here too.
+        yield* TestClock.adjust(
+          Duration.millis(EditorPresenceRegistry.COMMAND_RATE_LIMIT_WINDOW_MS),
+        );
+        const afterWindowFiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
+        yield* Queue.take(sentFrames);
+
+        yield* Effect.forEach(
+          [...pendingFibers, afterWindowFiber],
+          (fiber) => Fiber.interrupt(fiber),
+          {
+            discard: true,
+          },
+        );
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect(
+  "sendCommand resolves { ok: false, error: 'timeout' } when the engine never replies — the 10s bound covers a hung write, not just a hung reply",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const sentFrames = yield* Queue.unbounded<string>();
+        // Deliberately never replies — deleting the `Effect.raceFirst`
+        // timeout race (or narrowing it to wrap only `Deferred.await`,
+        // not the write) would leave this test hanging with no other
+        // path to resolution, proving the bound is real rather than
+        // merely documented.
+        const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
+        yield* Queue.take(sentFrames); // the write actually reached the engine
+        yield* TestClock.adjust(Duration.millis(EditorPresenceRegistry.COMMAND_TIMEOUT_MS));
+
+        const outcome = yield* Fiber.join(fiber);
+        expect(outcome).toEqual({ ok: false, error: "timeout" });
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+);
+
+it.effect(
+  "a command still pending when its editor disconnects resolves as disconnected, not a hang",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const sentFrames = yield* Queue.unbounded<string>();
+        const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
+        yield* Queue.take(sentFrames); // the pending entry now exists
+
+        yield* registry.removePublisher("session-1", token);
+
+        const outcome = yield* Fiber.join(fiber);
+        expect(outcome).toEqual({ ok: false, error: "disconnected" });
+      }),
+    ),
+);
+
+it.effect(
+  "resolveCommand with the WRONG connectionToken is a silent no-op — a superseded connection cannot resolve a command meant for its replacement",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const token = registry.newConnectionToken();
+        const sentFrames = yield* Queue.unbounded<string>();
+        const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
+        const sentFrame = parseCommandFrame(yield* Queue.take(sentFrames));
+
+        const wrongToken = registry.newConnectionToken();
+        yield* registry.resolveCommand(sentFrame.id, wrongToken, { ok: true });
+
+        // If the wrong-token resolve HAD (incorrectly) succeeded, the
+        // Deferred would already be settled as `{ ok: true }`, and this
+        // second, CORRECTLY-tokened resolve would be a silent no-op
+        // (Effect's Deferred only ever settles once) — so the outcome
+        // below proves which one actually won.
+        yield* registry.resolveCommand(sentFrame.id, token, {
+          ok: false,
+          error: "unsupported_action",
+        });
+
+        const outcome = yield* Fiber.join(fiber);
+        expect(outcome).toEqual({ ok: false, error: "unsupported_action" });
+      }),
+    ),
+);
+
+it.effect(
+  "a command dispatched while disconnected never fires when that session reconnects later — commands are edges, not levels",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        // Genuinely never connected at dispatch time.
+        const outcome = yield* registry.sendCommand("session-1", "play");
+        expect(outcome).toEqual({ ok: false, error: "editor_not_connected" });
+
+        // The "reconnect" — a publisher now claims the SAME session id,
+        // well after the command above already failed.
+        const token = registry.newConnectionToken();
+        const publisher = makeAutoReplyingPublisher(registry, token, () => ({ ok: true }));
+        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+
+        // Give any background fiber a chance to run before asserting
+        // nothing arrived — without this, a hypothetical mutant that
+        // replayed the dropped command from a FORKED fiber (rather than
+        // inline during registerPublisher) could slip past this
+        // assertion simply because that fiber hadn't been scheduled yet,
+        // not because it never fires at all.
+        yield* Effect.yieldNow;
+
+        // No command frame ever arrives — there was never a queue to
+        // replay from; the dispatch above is simply gone.
+        expect(publisher.frames).toHaveLength(0);
+      }),
+    ),
 );
