@@ -132,16 +132,10 @@ import {
   selectThreadTerminalDockState,
   useTerminalDockStore,
 } from "~/terminalDockStore";
-import {
-  isPreviewSupportedInRuntime,
-  setActivePreviewTab,
-  useThreadPreviewState,
-} from "../previewStateStore";
+import { isPreviewSupportedInRuntime, useThreadPreviewState } from "../previewStateStore";
 import { addBrowserSurface } from "./preview/addBrowserSurface";
-import { closePreviewSession } from "./preview/closePreviewSession";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
-import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { triggerAutoOpenPreview } from "./preview/autoOpenPreviewForScript";
 import { resolveThreeJsPlayScript } from "./preview/resolveThreeJsPlayScript";
 import { resolveEngineToolbarView, type EngineToolbarAction } from "./EngineToolbar.logic";
@@ -166,6 +160,7 @@ import {
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
 import {
+  BROWSER_PANEL_ID,
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
   openChatDockPanel,
@@ -417,9 +412,11 @@ function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
 
   return [attachTransitionGroupRef, attachComposerAnchorRef, captureComposerRect] as const;
 }
-const PreviewPanel = lazy(() =>
-  import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
-);
+// Task #53: the lazy `PreviewPanel` binding that used to live here is
+// DELETED — its only render site was `rightPanelContent`'s own now-removed
+// "preview" branch. `dock/BrowserDockPanel.tsx` imports
+// `~/components/preview/PreviewPanel` directly instead (not through this
+// file at all).
 // Files moved to a first-class dock panel (task #61) — RightPanelTabs' own
 // pendingSurfaceIds mechanism stays (generic infrastructure a future surface
 // could still use), but nothing here populates it anymore, so this constant
@@ -1062,7 +1059,6 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
-  const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
@@ -1403,37 +1399,39 @@ function ChatViewContent(props: ChatViewProps) {
     () => [...new Set([...activeKnownTerminalIds, ...panelTerminalIds])],
     [activeKnownTerminalIds, panelTerminalIds],
   );
-  const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
   const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
   const rightPanelMaximized =
     canMaximizeRightPanel && maximizedRightPanelThreadKey === routeThreadKey;
   const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
 
-  useEffect(() => {
-    if (!activeThreadRef) return;
-    useRightPanelStore
-      .getState()
-      .reconcileBrowserSurfaces(activeThreadRef, Object.keys(activePreviewState.sessions));
-  }, [activePreviewState.sessions, activeThreadRef]);
+  // Task #53: the `reconcileBrowserSurfaces` effect that used to live here
+  // is DELETED, not ported — `BrowserDockPanel.tsx` reads
+  // `previewStateStore`'s own `sessions` directly (see its own doc
+  // comment), so there is no separate right-panel surface list left to
+  // keep in sync with the server's known tabs.
 
   useEffect(() => {
     if (!activeThreadRef || !activePreviewMiniPlayer) return;
     const miniTabStillExists = Boolean(activePreviewState.sessions[activePreviewMiniPlayer.tabId]);
-    const sameTabOpenInPanel =
-      previewPanelOpen &&
-      activeRightPanelSurface?.kind === "preview" &&
-      activeRightPanelSurface.resourceId === activePreviewMiniPlayer.tabId;
-    if (!miniTabStillExists || sameTabOpenInPanel) {
+    // Task #53: used to also check `previewPanelOpen && activeRightPanel-
+    // Surface?.kind === "preview" && ....resourceId === tabId` — whether
+    // the SAME tab was ALSO the active surface in the (then-shared) right
+    // panel. Now that Browser is its own dock panel, there is no
+    // synchronous way to ask dockview "is this panel currently open" (no
+    // such query exists on `chatDockHandle.ts`/`DockviewLayout.tsx`,
+    // unlike the old `rightPanelStore`'s plain `isOpen` boolean). This
+    // compares against `previewStateStore`'s own `activeTabId` instead —
+    // directionally the same signal ("this tab became the one showing
+    // elsewhere"), just without the extra "and the panel is visible"
+    // guard. Slightly more eager to auto-close the mini-player than
+    // before; never wrong in the other direction (never leaves a
+    // duplicate-content mini-player open when it shouldn't).
+    const sameTabActiveElsewhere = activePreviewState.activeTabId === activePreviewMiniPlayer.tabId;
+    if (!miniTabStillExists || sameTabActiveElsewhere) {
       usePreviewMiniPlayerStore.getState().close(activeThreadRef);
     }
-  }, [
-    activePreviewMiniPlayer,
-    activePreviewState.sessions,
-    activeRightPanelSurface,
-    activeThreadRef,
-    previewPanelOpen,
-  ]);
+  }, [activePreviewMiniPlayer, activePreviewState, activeThreadRef]);
 
   const planSidebarOpen = activeRightPanelKind === "plan";
 
@@ -1492,10 +1490,6 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread ? environmentShell.stateAtom(activeThread.environmentId) : null,
   );
   const activeEnvironmentBootstrapComplete = activeEnvironmentShell.data?.snapshot._tag === "Some";
-  const configuredPreviewUrls = useMemo(
-    () => getConfiguredPreviewUrls(activeProject?.scripts),
-    [activeProject?.scripts],
-  );
 
   // Task #52 (Play/Stop toolbar): a SECOND `useEditorPresence` connection,
   // alongside the one `EditorPresenceChips.tsx` already opens inside
@@ -3214,24 +3208,18 @@ function ChatViewContent(props: ChatViewProps) {
     if (!activeThreadRef || !activeProject) return;
     openChatDockPanel(FILES_PANEL_ID);
   }, [activeProject, activeThreadRef]);
+  // Task #53: used to branch on `previewPanelOpen` and manually decide
+  // between reusing `activePreviewState.activeTabId` or creating a new tab
+  // — all of that decision now lives inside `BrowserDockPanel.tsx` itself
+  // (its own empty-state-vs-active-tab branch, reading the exact same
+  // `previewStateStore` state). `toggleChatDockPanel` is the correct
+  // primitive here, same as `onToggleDiff`'s precedent: it opens the panel
+  // (which shows whichever tab is already active, or the empty state if
+  // none) when closed, and closes it via dockview's own `api.close()` when
+  // already open — a genuine toggle, not open-only.
   const togglePreviewPanel = useCallback(() => {
     if (!activeThreadRef || !isPreviewSupportedInRuntime()) return;
-    if (previewPanelOpen) {
-      useRightPanelStore.getState().close(activeThreadRef);
-      return;
-    }
-    const activeTabId = activePreviewState.activeTabId;
-    if (activeTabId) {
-      useRightPanelStore.getState().openBrowser(activeThreadRef, activeTabId);
-    } else {
-      createBrowserSurface();
-    }
-  }, [activePreviewState.activeTabId, activeThreadRef, createBrowserSurface, previewPanelOpen]);
-  const closePreviewPanel = useCallback(() => {
-    if (activeThreadRef) {
-      setMaximizedRightPanelThreadKey(null);
-      useRightPanelStore.getState().close(activeThreadRef);
-    }
+    toggleChatDockPanel(BROWSER_PANEL_ID);
   }, [activeThreadRef]);
   // Task #53: `addTerminalSurface` is now the open-only redirect
   // `addDiffSurface`/`addFilesSurface` already established for their own
@@ -3358,85 +3346,71 @@ function ChatViewContent(props: ChatViewProps) {
         dismissPlanSidebarForCurrentTurn();
       }
       useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
-      if (surface.kind === "preview" && surface.resourceId) {
-        setActivePreviewTab(activeThreadRef, surface.resourceId);
-      }
       // Review fix (#56): dropped the `surface.kind === "diff"` branch that
-      // used to live here; task #53 drops the `surface.kind === "terminal"`
-      // one the same way. Both are now unreachable by construction — neither
-      // is a member of RightPanelSurface (rightPanelStore.ts) any more, so a
-      // surface passed here can never have that kind; the compiler catching
-      // this comparison is exactly the point of that removal.
+      // used to live here; task #53 drops `surface.kind === "terminal"` the
+      // same way, and its own fourth slice drops `surface.kind ===
+      // "preview"` (which used to call `setActivePreviewTab` here) too. All
+      // three are now unreachable by construction — none is a member of
+      // RightPanelSurface (rightPanelStore.ts) any more, so a surface
+      // passed here can never have that kind; the compiler catching this
+      // comparison is exactly the point of that removal. "plan" is the
+      // only kind this function can ever actually receive.
     },
     [activeThreadRef, dismissPlanSidebarForCurrentTurn, planSidebarOpen],
   );
+  // Task #53: dropped the `planSidebarOpen ? closePlanSidebar() :
+  // closePreviewPanel()` branch that used to live here. Browser no longer
+  // shares this right panel with Plan — "plan" is the ONLY surface kind
+  // left (see rightPanelStore.ts's own comment) — so `rightPanelOpen` can
+  // now only ever mean "the plan sidebar is open" (or briefly open-but-
+  // empty, which `closePlanSidebar` also closes correctly; dismissing a
+  // plan sidebar that wasn't showing is a harmless no-op, same as every
+  // other place this codebase already calls it unconditionally).
+  // `closePreviewPanel` itself is deleted — this was its only caller.
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
     if (rightPanelOpen) {
-      if (planSidebarOpen) {
-        closePlanSidebar();
-      } else {
-        closePreviewPanel();
-      }
+      closePlanSidebar();
       return;
     }
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
-  }, [activeThreadRef, closePlanSidebar, closePreviewPanel, planSidebarOpen, rightPanelOpen]);
+  }, [activeThreadRef, closePlanSidebar, rightPanelOpen]);
   const toggleRightPanelMaximized = useCallback(() => {
     if (!canMaximizeRightPanel) return;
     setMaximizedRightPanelThreadKey((threadKey) =>
       threadKey === routeThreadKey ? null : routeThreadKey,
     );
   }, [canMaximizeRightPanel, routeThreadKey]);
+  // Task #53: `cleanupRightPanelSurfaces` used to also walk `surfaces` for
+  // any "preview" (closing that browser tab's server session) or
+  // "terminal" (destroying its PTY) entries — both dropped, same reasoning
+  // as `activateRightPanelSurface` above: neither kind can appear in a
+  // `RightPanelSurface[]` any more, so the loop body was unreachable dead
+  // code. What's left is genuinely just the plan-sidebar-dismissal side
+  // effect; kept as its own function for call-site continuity rather than
+  // inlining it at all four callers below.
   const cleanupRightPanelSurfaces = useCallback(
     (surfaces: readonly RightPanelSurface[]) => {
-      if (!activeThreadRef) return;
       if (surfaces.some((surface) => surface.kind === "plan")) {
         dismissPlanSidebarForCurrentTurn();
       }
-
-      // Task #53: dropped the `surface.kind === "terminal"` branch that used
-      // to live here, same reasoning as `activateRightPanelSurface` above —
-      // unreachable by construction now that "terminal" is no longer a
-      // member of RightPanelSurface.
-      for (const surface of surfaces) {
-        if (surface.kind === "preview" && surface.resourceId) {
-          void closePreviewSession({
-            closePreview,
-            snapshot: activePreviewState.sessions[surface.resourceId] ?? null,
-            tabId: surface.resourceId,
-            threadRef: activeThreadRef,
-          });
-        }
-      }
     },
-    [
-      activeThreadRef,
-      activePreviewState.sessions,
-      closePreview,
-      closeTerminalMutation,
-      dismissPlanSidebarForCurrentTurn,
-      storeCloseTerminal,
-    ],
+    [dismissPlanSidebarForCurrentTurn],
   );
-  const syncActivePreviewSurface = useCallback(() => {
-    if (!activeThreadRef) return;
-    const nextActiveSurface = selectActiveRightPanelSurface(
-      useRightPanelStore.getState().byThreadKey,
-      activeThreadRef,
-    );
-    if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
-      setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
-    }
-  }, [activeThreadRef]);
+  // `syncActivePreviewSurface`, which used to live here and get called
+  // from all four close-surface callbacks below, is DELETED — its entire
+  // body (`nextActiveSurface?.kind === "preview" && ...resourceId` calling
+  // `setActivePreviewTab`) is unreachable now that "preview" is no longer
+  // a member of RightPanelSurface, same as everything else this task
+  // touched. There is no browser-tab activation left for closing a "plan"
+  // surface to trigger.
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       cleanupRightPanelSurfaces([surface]);
       useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [activeThreadRef, cleanupRightPanelSurfaces],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
@@ -3444,14 +3418,8 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
       cleanupRightPanelSurfaces(surfaces);
       useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeRightPanelSurfacesToRight = useCallback(
     (surface: RightPanelSurface) => {
@@ -3461,14 +3429,8 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
       cleanupRightPanelSurfaces(surfaces);
       useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
@@ -5725,18 +5687,13 @@ function ChatViewContent(props: ChatViewProps) {
       {panelToggleControls}
     </div>
   );
+  // Task #53: dropped the `activeRightPanelSurface?.kind === "preview"`
+  // branch that used to render `<PreviewPanel>` here — Browser is now
+  // `dock/BrowserDockPanel.tsx`, rendered by dockview itself, not by this
+  // ternary. "plan" is the only kind `rightPanelContent` can ever need to
+  // render now.
   const rightPanelContent = activeThreadRef ? (
-    activeRightPanelSurface?.kind === "preview" ? (
-      <Suspense fallback={null}>
-        <PreviewPanel
-          mode="embedded"
-          threadRef={activeThreadRef}
-          tabId={activeRightPanelSurface.resourceId}
-          configuredUrls={configuredPreviewUrls}
-          visible
-        />
-      </Suspense>
-    ) : activeRightPanelSurface?.kind === "plan" ? (
+    activeRightPanelSurface?.kind === "plan" ? (
       <PlanSidebar
         activePlan={activePlan}
         activeProposedPlan={sidebarProposedPlan}
@@ -6154,7 +6111,6 @@ function ChatViewContent(props: ChatViewProps) {
           surfaces={rightPanelState.surfaces}
           activeSurfaceId={activeRightPanelSurface?.id ?? null}
           pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
-          previewSessions={activePreviewState.sessions}
           onActivate={activateRightPanelSurface}
           onCloseSurface={closeRightPanelSurface}
           onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
@@ -6172,14 +6128,18 @@ function ChatViewContent(props: ChatViewProps) {
         </RightPanelTabs>
       ) : null}
       {shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef ? (
-        <RightPanelSheet open onClose={planSidebarOpen ? closePlanSidebar : closePreviewPanel}>
+        // Task #53: this sheet's `onClose` used to be
+        // `planSidebarOpen ? closePlanSidebar : closePreviewPanel` —
+        // `closePreviewPanel` is deleted (see `toggleRightPanel`'s own
+        // comment for why: "plan" is the only kind this panel can show
+        // now, so the non-plan branch was already unreachable).
+        <RightPanelSheet open onClose={closePlanSidebar}>
           <RightPanelTabs
             mode="sheet"
             layoutControls={panelToggleControls}
             surfaces={rightPanelState.surfaces}
             activeSurfaceId={activeRightPanelSurface?.id ?? null}
             pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
-            previewSessions={activePreviewState.sessions}
             onActivate={activateRightPanelSurface}
             onCloseSurface={closeRightPanelSurface}
             onCloseOtherSurfaces={closeOtherRightPanelSurfaces}

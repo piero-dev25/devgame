@@ -23,7 +23,7 @@ import { useEnvironment, useEnvironmentHttpBaseUrl } from "~/state/environments"
 import { previewEnvironment } from "~/state/preview";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { selectThreadPreviewMiniPlayer, usePreviewMiniPlayerStore } from "~/previewMiniPlayerStore";
-import { useRightPanelStore } from "~/rightPanelStore";
+import { BROWSER_PANEL_ID, toggleChatDockPanel } from "~/dock/chatDockHandle";
 
 import { previewBridge } from "./previewBridge";
 import { subscribePreviewAction } from "./previewActionBus";
@@ -250,7 +250,14 @@ export function PreviewView({ threadRef, tabId: requestedTabId, configuredUrls, 
       return;
     }
     usePreviewMiniPlayerStore.getState().open(threadRef, tabId);
-    useRightPanelStore.getState().close(threadRef);
+    // Task #53: used to be `rightPanelStore.close(threadRef)` — collapsing
+    // the WHOLE right panel while preview lived inside it. Now that Browser
+    // is its own dock panel, that call would silently do nothing to it
+    // (only "plan" is left in rightPanelStore). `toggleChatDockPanel`
+    // closes it directly — the same primitive its own tab's × already uses
+    // — and is safe to call knowing it's open (this handler only runs from
+    // inside the panel that's currently showing this tab).
+    toggleChatDockPanel(BROWSER_PANEL_ID);
   }, [miniPlayer?.tabId, tabId, threadRef]);
 
   const handleNativePictureInPicture = useCallback(() => {

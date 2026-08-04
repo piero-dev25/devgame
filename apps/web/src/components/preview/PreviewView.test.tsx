@@ -14,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   miniPlayerTabId: null as string | null,
   openMiniPlayer: vi.fn(),
   closeMiniPlayer: vi.fn(),
-  closeRightPanel: vi.fn(),
+  toggleChatDockPanel: vi.fn(),
   openPictureInPicture: vi.fn(async (_tabId: string): Promise<void> => undefined),
   closePictureInPicture: vi.fn(async (_tabId: string): Promise<void> => undefined),
   pictureInPicture: false,
@@ -130,10 +130,9 @@ vi.mock("~/previewMiniPlayerStore", () => {
   };
 });
 
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: {
-    getState: () => ({ close: mocks.closeRightPanel }),
-  },
+vi.mock("~/dock/chatDockHandle", () => ({
+  BROWSER_PANEL_ID: "browser",
+  toggleChatDockPanel: mocks.toggleChatDockPanel,
 }));
 
 vi.mock("~/components/ui/toast", () => ({
@@ -210,7 +209,7 @@ describe("PreviewView navigation", () => {
     mocks.miniPlayerTabId = null;
     mocks.openMiniPlayer.mockClear();
     mocks.closeMiniPlayer.mockClear();
-    mocks.closeRightPanel.mockClear();
+    mocks.toggleChatDockPanel.mockClear();
     mocks.openPictureInPicture.mockClear();
     mocks.closePictureInPicture.mockClear();
     mocks.pictureInPicture = false;
@@ -295,7 +294,7 @@ describe("PreviewView navigation", () => {
     expect(mocks.pictureInPicturePressed).toBe(false);
     mocks.togglePictureInPicture?.();
     expect(mocks.openMiniPlayer).toHaveBeenCalledWith(props.threadRef, "tab-1");
-    expect(mocks.closeRightPanel).toHaveBeenCalledWith(props.threadRef);
+    expect(mocks.toggleChatDockPanel).toHaveBeenCalledWith("browser");
 
     mocks.miniPlayerTabId = "tab-1";
     renderToStaticMarkup(<PreviewView {...props} />);

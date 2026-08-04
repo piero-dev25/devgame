@@ -3,15 +3,25 @@
  *
  * This is intentionally a shallow workspace model: it owns an ordered set of
  * surface descriptors and the active surface, while each feature continues to
- * own its durable resource state. Browser surfaces point at preview tab ids,
- * and plan remains a singleton surface. Diff, Files ("files"/"file") and, as
- * of task #53, Terminal used to live here too — all are gone as of
- * spec-surfaces-as-dock-panels.md, Part B: each moved to a first-class dock
- * panel, with its own visibility owned by the dock and its own in-panel
- * selection state owned by a dedicated store (`fileExplorerStore.ts` for
- * Files, `terminalDockStore.ts` for Terminal, mirroring `diffPanelStore.ts`'s
- * own split for Diff) — see `RIGHT_PANEL_KINDS`'s own comment for why each
- * kind is DELETED here rather than left unused.
+ * own its durable resource state. Plan remains a singleton surface — as of
+ * task #53's fourth slice, it is now the ONLY surface kind left. Diff,
+ * Files ("files"/"file"), Terminal, and finally Browser ("preview") used to
+ * live here too — all are gone as of spec-surfaces-as-dock-panels.md, Part
+ * B: each moved to a first-class dock panel, with its own visibility owned
+ * by the dock and its own in-panel selection state owned by a dedicated
+ * store where one was needed (`fileExplorerStore.ts` for Files,
+ * `terminalDockStore.ts` for Terminal — Browser needed none, since
+ * `previewStateStore.ts` already carried its equivalent state; see
+ * `BrowserDockPanel.tsx`'s own doc comment) — see `RIGHT_PANEL_KINDS`'s own
+ * comment for why each kind is DELETED here rather than left unused.
+ *
+ * `RIGHT_PANEL_KINDS` having exactly one member now is a real signal, not
+ * an oversight left for a future pass to notice: this store could
+ * plausibly collapse into a plain per-thread boolean (plan open/closed)
+ * instead of a general surface-array model built for N kinds. NOT done
+ * here — that's a bigger, separate decision than "finish the migration
+ * template," and the owner asked to be told before it happens rather than
+ * have it happen silently inside a slice that was framed as "move Browser."
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -20,27 +30,27 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-// "diff", as of task #61 "files"/"file", and as of task #53 "terminal" are
-// deliberately NOT members — spec-surfaces-as-dock-panels.md, Part B moved
-// each to a first-class dock panel (see dock/ChatDock.tsx's registrations),
-// and removing a kind from this union (rather than leaving it unused) is
-// what let the compiler find every stale call site on the Diff pass — six
-// of them across two files, including onToggleDiff's Cmd+D binding, none of
+// "diff", as of task #61 "files"/"file", as of task #53's third slice
+// "terminal", and as of task #53's fourth slice "preview" are deliberately
+// NOT members — spec-surfaces-as-dock-panels.md, Part B moved each to a
+// first-class dock panel (see dock/ChatDock.tsx's registrations), and
+// removing a kind from this union (rather than leaving it unused) is what
+// let the compiler find every stale call site on the Diff pass — six of
+// them across two files, including onToggleDiff's Cmd+D binding, none of
 // which a runtime check alone would have flagged; on Files it found 36
-// across 7 files. The persisted-data side of each retired kind still
-// exists — see migratePersistedRightPanelState's own comment on why those
-// spots are exempt. This is the template Browser's own eventual promotion
-// follows too: move the surface, then delete its kind here.
-export const RIGHT_PANEL_KINDS = ["plan", "preview"] as const;
+// across 7 files; on Browser more still, since "open a preview" has far
+// more entry points than any other surface (chat markdown links, script
+// auto-open, terminal links, discovered ports, the mini-player's
+// "restore"). The persisted-data side of each retired kind still exists —
+// see migratePersistedRightPanelState's own comment on why those spots are
+// exempt.
+export const RIGHT_PANEL_KINDS = ["plan"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
-export type RightPanelSurface =
-  | { id: `browser:${string}`; kind: "preview"; resourceId: string }
-  | { id: "browser:new"; kind: "preview"; resourceId: null }
-  | { id: "plan"; kind: "plan" };
+export type RightPanelSurface = { id: "plan"; kind: "plan" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 10;
+const RIGHT_PANEL_STORAGE_VERSION = 11;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -51,13 +61,11 @@ export interface ThreadRightPanelState {
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
   open: (ref: ScopedThreadRef, kind: RightPanelKind) => void;
-  openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   activateSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeOtherSurfaces: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurfacesToRight: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeAllSurfaces: (ref: ScopedThreadRef) => void;
-  reconcileBrowserSurfaces: (ref: ScopedThreadRef, tabIds: readonly string[]) => void;
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
@@ -71,17 +79,12 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
   surfaces: [],
 };
 
-const singletonSurface = (kind: Exclude<RightPanelKind, "preview">): RightPanelSurface => {
+const singletonSurface = (kind: RightPanelKind): RightPanelSurface => {
   switch (kind) {
     case "plan":
       return { id: "plan", kind };
   }
 };
-
-const browserSurface = (tabId: string | null): RightPanelSurface =>
-  tabId
-    ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
-    : { id: "browser:new", kind: "preview", resourceId: null };
 
 const upsertSurface = (
   current: ThreadRightPanelState,
@@ -129,25 +132,25 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
                     // v8 added "diff"; v9 (task #61) added "files" (the
-                    // browser) and "file" (one opened file); v10 (task #53)
-                    // adds "terminal" — each moved to a first-class dock
-                    // panel (spec-surfaces-as-dock-panels.md, Part B) and no
-                    // longer a right-panel surface kind ChatView renders;
-                    // visibility for each now lives in the dock's own layout
-                    // state. Terminal's own payload (terminalIds/
-                    // activeTerminalId/splitDirection, which panes are open)
-                    // moved WITH it, into terminalDockStore.ts's own v1
-                    // store — a fresh store with nothing to migrate FROM
-                    // (same as Files' fileExplorerStore.ts before it), so
-                    // there's no coercion to preserve here, only a strip.
-                    // Drop any persisted entry of a retired kind rather than
-                    // resurrect a tab with nothing behind it; activeSurfaceId
-                    // below already falls back to null when its target
-                    // surface is gone, so this is a non-destructive strip —
-                    // the underlying PTY sessions a persisted "terminal"
-                    // entry pointed at are NOT destroyed by this, only their
-                    // client-side tab position resets (see
-                    // terminalDockStore.ts's own doc comment).
+                    // browser) and "file" (one opened file); v10 (task #53,
+                    // third slice) added "terminal"; v11 (task #53, fourth
+                    // and final slice) adds "preview" — each moved to a
+                    // first-class dock panel (spec-surfaces-as-dock-
+                    // panels.md, Part B) and no longer a right-panel surface
+                    // kind ChatView renders; visibility for each now lives
+                    // in the dock's own layout state. "Preview"'s own
+                    // payload (which tab was active) needs no coercion
+                    // either — it was already duplicated in
+                    // previewStateStore.ts's own activeTabId (see
+                    // BrowserDockPanel.tsx's own doc comment), so there is
+                    // nothing here worth preserving that isn't already live
+                    // elsewhere. Drop any persisted entry of a retired kind
+                    // rather than resurrect a tab with nothing behind it;
+                    // activeSurfaceId below already falls back to null when
+                    // its target surface is gone, so this is a
+                    // non-destructive strip — no underlying session or PTY
+                    // is destroyed by any of this, only client-side tab
+                    // position resets.
                     //
                     // Cast past RightPanelSurface's CURRENT union
                     // deliberately: a persisted surface can be an OLDER
@@ -166,7 +169,8 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                       (surface as { kind: string }).kind === "diff" ||
                       (surface as { kind: string }).kind === "files" ||
                       (surface as { kind: string }).kind === "file" ||
-                      (surface as { kind: string }).kind === "terminal"
+                      (surface as { kind: string }).kind === "terminal" ||
+                      (surface as { kind: string }).kind === "preview"
                     ) {
                       return [];
                     }
@@ -208,23 +212,9 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
       byThreadKey: {},
       open: (ref, kind) =>
         set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            if (kind === "preview") {
-              const existing = current.surfaces.find((surface) => surface.kind === "preview");
-              return upsertSurface(current, existing ?? browserSurface(null));
-            }
-            return upsertSurface(current, singletonSurface(kind));
-          }),
-        })),
-      openBrowser: (ref, tabId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const surface = browserSurface(tabId);
-            const withoutPlaceholder = tabId
-              ? current.surfaces.filter((entry) => entry.id !== "browser:new")
-              : current.surfaces;
-            return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
-          }),
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+            upsertSurface(current, singletonSurface(kind)),
+          ),
         })),
       activateSurface: (ref, surfaceId) =>
         set((state) => ({
@@ -289,35 +279,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               : { ...current, isOpen: false, surfaces: [], activeSurfaceId: null },
           ),
         })),
-      reconcileBrowserSurfaces: (ref, tabIds) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const validIds = new Set(tabIds.map((tabId) => `browser:${tabId}`));
-            const nonBrowser = current.surfaces.filter((surface) => surface.kind !== "preview");
-            const existingBrowser = current.surfaces.filter(
-              (surface): surface is Extract<RightPanelSurface, { kind: "preview" }> =>
-                surface.kind === "preview" &&
-                surface.id !== "browser:new" &&
-                validIds.has(surface.id),
-            );
-            const knownIds = new Set(existingBrowser.map((surface) => surface.id));
-            const added = tabIds
-              .filter((tabId) => !knownIds.has(`browser:${tabId}`))
-              .map((tabId) => browserSurface(tabId));
-            const surfaces = [...nonBrowser, ...existingBrowser, ...added];
-            const activeStillExists = surfaces.some(
-              (surface) => surface.id === current.activeSurfaceId,
-            );
-            const fallbackBrowser = surfaces.find((surface) => surface.kind === "preview");
-            return {
-              ...current,
-              surfaces,
-              activeSurfaceId: activeStillExists
-                ? current.activeSurfaceId
-                : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null),
-            };
-          }),
-        })),
       show: (ref) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
@@ -345,10 +306,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             );
             if (current.isOpen && active?.kind === kind) {
               return { ...current, isOpen: false };
-            }
-            if (kind === "preview") {
-              const existing = current.surfaces.find((surface) => surface.kind === "preview");
-              return upsertSurface(current, existing ?? browserSurface(null));
             }
             return upsertSurface(current, singletonSurface(kind));
           }),

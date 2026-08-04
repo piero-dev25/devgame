@@ -17,7 +17,6 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { resolveShortcutCommand } from "../keybindings";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
-import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
 import { SidebarProvider } from "~/components/ui/sidebar";
@@ -48,14 +47,15 @@ function ChatRouteGlobalShortcuts() {
       ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
       : false,
   );
-  // The `previewOpen` shortcut-context flag here uses the store-only value;
-  // the URL-aware arbitration lives inside ChatView's `onTogglePreview`,
-  // which we invoke via the action bus to avoid duplicating the rule.
-  const previewOpen = useRightPanelStore((state) =>
-    routeThreadRef
-      ? selectActiveRightPanel(state.byThreadKey, routeThreadRef) === "preview"
-      : false,
-  );
+  // Task #53: used to read `rightPanelStore` ("preview" was one of its
+  // surface kinds); now that Browser is its own dock panel, open/closed
+  // lives inside dockview's own layout state, not synchronously reachable
+  // here. Hard-coded `false`, not reconstructed — grep-verified against
+  // packages/contracts and apps/web/src that no keybinding "when" clause
+  // anywhere in this repo actually references `previewOpen` (only
+  // `previewFocus` is), so this was already dead context data before this
+  // migration. See CommandPalette.tsx's matching fix for the same finding.
+  const previewOpen = false;
   useEffect(() => {
     const onWindowKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;

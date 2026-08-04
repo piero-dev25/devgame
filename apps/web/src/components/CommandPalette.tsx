@@ -83,7 +83,6 @@ import {
 import { onOpenCommandPalette } from "../commandPaletteBus";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { selectActiveRightPanel, useRightPanelStore } from "../rightPanelStore";
 import { getLatestThreadForProject, sortThreads } from "../lib/threadSort";
 import { cn, isMacPlatform, isWindowsPlatform, newProjectId } from "../lib/utils";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
@@ -386,11 +385,19 @@ export function CommandPalette({ children }: { children: ReactNode }) {
       ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
       : false,
   );
-  const previewOpen = useRightPanelStore((state) =>
-    routeThreadRef
-      ? selectActiveRightPanel(state.byThreadKey, routeThreadRef) === "preview"
-      : false,
-  );
+  // Task #53: `previewOpen` used to read `rightPanelStore` ("preview" was
+  // one of its surface kinds); now that Browser is its own dock panel,
+  // whether it's open lives inside dockview's own layout state, which
+  // isn't synchronously reachable here the way a Zustand store was. Hard-
+  // coded `false` rather than reconstructed from a different source: no
+  // keybinding "when" clause in this repo currently references
+  // `previewOpen` (grep-verified against packages/contracts and
+  // apps/web/src — only `previewFocus` is ever used), so this was already
+  // dead context data before this migration, kept only "so any documented
+  // when condition... would work" per this file's own comment below. If a
+  // future keybinding needs the true value, it needs a new mechanism, not
+  // a revived read of a store that no longer tracks this.
+  const previewOpen = false;
 
   useEffect(() => {
     if (!state.open || state.mode === "command") return;

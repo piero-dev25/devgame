@@ -55,6 +55,11 @@ export const FILES_PANEL_ID = "files";
  * `addTerminalSurface` needs this id to call `openChatDockPanel` after
  * Terminal moved to the dock. */
 export const TERMINAL_PANEL_ID = "terminal";
+/** Task #53, fourth and final slice: every "open a preview" entry point
+ * (chat markdown links, script auto-open, terminal links, discovered
+ * ports, the mini-player's "restore") needs this id to call
+ * `openChatDockPanel` after Browser moved to the dock. */
+export const BROWSER_PANEL_ID = "browser";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;

@@ -18,6 +18,12 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
+  // Every migration fixture below now shows "plan" as the surviving
+  // surface, not a browser tab — as of v11 (task #53's fourth slice),
+  // "preview" is ALSO a retired kind (see the "drops a stale preview
+  // surface" test), so a persisted browser tab can no longer be the thing
+  // that proves a stripped surface's SIBLINGS survive. "plan" is the only
+  // kind left that can play that role at all.
   it("drops a stale terminal surface during migration (terminal moved to a dock panel, task #53)", () => {
     // Covers BOTH shapes a persisted "terminal" surface could be — the
     // legacy singleton (`{id:"terminal",kind:"terminal"}`, no
@@ -34,7 +40,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "terminal",
             surfaces: [
-              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "plan", kind: "plan" },
               { id: "terminal", kind: "terminal" },
               {
                 id: "terminal:term-1",
@@ -52,7 +58,37 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+          surfaces: [{ id: "plan", kind: "plan" }],
+        },
+      },
+    });
+  });
+
+  it("drops a stale preview (browser) surface during migration (browser moved to a dock panel, task #53)", () => {
+    // v11's own addition, following the exact template every prior kind
+    // set: strip, don't coerce — `previewStateStore.ts` already carries
+    // the equivalent "which tab is open/active" state independently (see
+    // BrowserDockPanel.tsx's own doc comment for why this migration needs
+    // no coercion logic at all, unlike Terminal's v10 pass).
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            activeSurfaceId: "browser:tab-a",
+            surfaces: [
+              { id: "plan", kind: "plan" },
+              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "browser:new", kind: "preview", resourceId: null },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: false,
+          activeSurfaceId: null,
+          surfaces: [{ id: "plan", kind: "plan" }],
         },
       },
     });
@@ -65,7 +101,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "diff",
             surfaces: [
-              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "plan", kind: "plan" },
               { id: "diff", kind: "diff" },
             ],
           },
@@ -76,7 +112,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+          surfaces: [{ id: "plan", kind: "plan" }],
         },
       },
     });
@@ -89,7 +125,7 @@ describe("rightPanelStore", () => {
     // []} — a visibly-open, silently-empty right panel on resume, since
     // ChatView.tsx's `rightPanelOpen` reads `isOpen` with no surfaces-length
     // guard. This fixture is deliberately the single-surface case the
-    // earlier "drops a stale diff surface" test (with a browser tab still
+    // earlier "drops a stale diff surface" test (with a plan surface still
     // present) doesn't exercise.
     expect(
       migratePersistedRightPanelState({
@@ -119,7 +155,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "files",
             surfaces: [
-              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "plan", kind: "plan" },
               { id: "files", kind: "files" },
             ],
           },
@@ -130,7 +166,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+          surfaces: [{ id: "plan", kind: "plan" }],
         },
       },
     });
@@ -166,39 +202,24 @@ describe("rightPanelStore", () => {
   });
 
   it("open sets the active panel for a thread", () => {
-    useRightPanelStore.getState().open(refA, "preview");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("preview");
+    useRightPanelStore.getState().open(refA, "plan");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("plan");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refB)).toBeNull();
   });
 
-  it("opening a different kind keeps both surfaces and activates the new one", () => {
-    useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().open(refA, "preview");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("preview");
-    expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
-    ).toHaveLength(2);
-  });
-
-  it("reopening an inactive singleton activates its existing surface", () => {
-    // "files" was task #61's own replacement for this test's original
-    // "diff" example kind (during #56's review-fix round) — now retired
-    // too. "plan" is the only simple singleton left reachable via open();
-    // "preview" is a genuine second kind to interpose (its own open()
-    // branch, distinct surface shape).
-    useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().open(refA, "preview");
-    useRightPanelStore.getState().open(refA, "plan");
-
-    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
-      isOpen: true,
-      activeSurfaceId: "plan",
-      surfaces: [
-        { id: "plan", kind: "plan" },
-        { id: "browser:new", kind: "preview", resourceId: null },
-      ],
-    });
-  });
+  // "opening a different kind keeps both surfaces and activates the new
+  // one" and "reopening an inactive singleton activates its existing
+  // surface" used to live here, both leaning on "preview" as a second kind
+  // to interpose alongside "plan" — DELETED, not ported, as of task #53's
+  // fourth slice: "preview" is now a retired kind too (see
+  // RIGHT_PANEL_KINDS's own comment), and "plan" is the ONLY kind left.
+  // There is no second kind this store's public API can produce anymore to
+  // exercise "two different surfaces coexisting" with — `open`/`toggle`
+  // only ever resolve to the one singleton surface `{id:"plan",kind:
+  // "plan"}`. This is exactly the "collapse" signal flagged to the owner,
+  // not an oversight: keeping these tests would mean either deleting real
+  // coverage silently or fabricating an impossible surface via a type
+  // cast, and neither is honest about what this store can do today.
 
   it("keeps plan as a singleton surface", () => {
     useRightPanelStore.getState().open(refA, "plan");
@@ -262,11 +283,10 @@ describe("rightPanelStore", () => {
     });
   });
 
-  it("toggle to a different kind switches active", () => {
-    useRightPanelStore.getState().toggle(refA, "preview");
-    useRightPanelStore.getState().toggle(refA, "plan");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("plan");
-  });
+  // "toggle to a different kind switches active" used to live here (toggle
+  // "preview" then toggle "plan", assert "plan" wins) — DELETED for the
+  // same reason as the two `open`-based tests above: there is no second
+  // kind left to toggle between.
 
   it("removeThread clears persisted state", () => {
     useRightPanelStore.getState().open(refA, "plan");
@@ -279,18 +299,13 @@ describe("rightPanelStore", () => {
     expect(useRightPanelStore.getState().byThreadKey).toEqual({});
   });
 
-  it("tracks one surface per browser session", () => {
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
-    useRightPanelStore.getState().openBrowser(refA, "tab-b");
-
-    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
-    expect(state.surfaces.map((surface) => surface.id)).toEqual(["browser:tab-a", "browser:tab-b"]);
-    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
-      id: "browser:tab-b",
-      kind: "preview",
-      resourceId: "tab-b",
-    });
-  });
+  // "tracks one surface per browser session" (openBrowser) and "reconciles
+  // browser surfaces without deleting other surface kinds"
+  // (reconcileBrowserSurfaces) used to live here — DELETED, not moved: both
+  // functions are gone from this store as of task #53's fourth slice.
+  // `BrowserDockPanel.tsx` needs neither — see its own doc comment for why
+  // `previewStateStore.ts` already carried everything a browser tab strip
+  // needs, with no reconciliation into this store required at all.
 
   // "tracks one surface per terminal session", "tracks split panes and the
   // active pane within a terminal surface", "tracks vertical layout for a
@@ -300,20 +315,28 @@ describe("rightPanelStore", () => {
   // longer models at all (see RIGHT_PANEL_KINDS's own comment). The
   // capability itself (which terminal groups are open, split layout, which
   // pane is active) moved to terminalDockStore.ts, with its own equivalent
-  // coverage in terminalDockStore.test.ts. The four "mixed surface kind"
-  // tests below that used to lean on `openTerminal` as their non-preview,
-  // non-plan stand-in now use `open(refA, "plan")` instead — their own
-  // intent was never terminal-specific.
+  // coverage in terminalDockStore.test.ts.
 
-  it("closing the active surface activates a neighboring surface", () => {
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
-    useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().closeSurface(refA, "plan");
-
-    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)?.id).toBe(
-      "browser:tab-a",
-    );
-  });
+  // "closing the active surface activates a neighboring surface", "closing
+  // other surfaces keeps the selected surface active", and "closing
+  // surfaces to the right activates the selected surface when active was
+  // removed" used to live here, each seeding a SECOND surface (a browser
+  // tab, then later `open(ref, "plan")` after Terminal's own promotion) to
+  // exercise `closeSurface`'s neighbor-fallback, `closeOtherSurfaces`, and
+  // `closeSurfacesToRight`. DELETED, not ported to a synthetic two-surface
+  // state: with "plan" as the only kind left AND a singleton, this store's
+  // real public API (`open`/`toggle`) can never produce more than one
+  // surface at a time — `surfaces` physically cannot exceed length 1
+  // through any type-safe call. Constructing a second surface here would
+  // mean type-casting past `RightPanelSurface` to fabricate a kind that
+  // cannot exist, which would test an impossible state rather than real
+  // behaviour. `closeOtherSurfaces` and `closeSurfacesToRight` are
+  // therefore DEAD CODE as of this slice — still exported, still callable,
+  // but unreachable from any real UI action, since `RightPanelTabs`' own
+  // multi-surface tab strip (its context menu's "close others"/"close to
+  // the right" items) can equally never see more than one tab. This is
+  // exactly the "collapse" signal flagged to the owner in
+  // rightPanelStore.ts's own top comment, not an oversight.
 
   it("closing the final surface closes the panel", () => {
     useRightPanelStore.getState().open(refA, "plan");
@@ -326,34 +349,7 @@ describe("rightPanelStore", () => {
     });
   });
 
-  it("closing other surfaces keeps the selected surface active", () => {
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
-    useRightPanelStore.getState().open(refA, "plan");
-
-    useRightPanelStore.getState().closeOtherSurfaces(refA, "plan");
-
-    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
-      isOpen: true,
-      activeSurfaceId: "plan",
-      surfaces: [{ id: "plan", kind: "plan" }],
-    });
-  });
-
-  it("closing surfaces to the right activates the selected surface when active was removed", () => {
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
-    useRightPanelStore.getState().open(refA, "plan");
-
-    useRightPanelStore.getState().closeSurfacesToRight(refA, "browser:tab-a");
-
-    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
-      isOpen: true,
-      activeSurfaceId: "browser:tab-a",
-      surfaces: [{ id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
-    });
-  });
-
   it("closing all surfaces closes the panel", () => {
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
     useRightPanelStore.getState().open(refA, "plan");
 
     useRightPanelStore.getState().closeAllSurfaces(refA);
@@ -365,16 +361,11 @@ describe("rightPanelStore", () => {
     });
   });
 
-  it("reconciles browser surfaces without deleting other surface kinds", () => {
+  it("selectActiveRightPanelSurface returns null when the panel is closed", () => {
     useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().openBrowser(refA, "tab-a");
-    useRightPanelStore.getState().openBrowser(refA, "tab-b");
-    useRightPanelStore.getState().reconcileBrowserSurfaces(refA, ["tab-b", "tab-c"]);
-
+    useRightPanelStore.getState().close(refA);
     expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces.map(
-        (surface) => surface.id,
-      ),
-    ).toEqual(["plan", "browser:tab-b", "browser:tab-c"]);
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+    ).toBeNull();
   });
 });

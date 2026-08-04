@@ -7,10 +7,10 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { resetPreviewStateForTests } from "~/previewStateStore";
-import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
+import { BROWSER_PANEL_ID, registerChatDockHandle } from "~/dock/chatDockHandle";
+import { readThreadPreviewState, resetPreviewStateForTests } from "~/previewStateStore";
 
 import { resolveAutoOpenPreviewUrl, triggerAutoOpenPreview } from "./autoOpenPreviewForScript";
 
@@ -52,7 +52,9 @@ const snapshot = (tabId: string): PreviewSessionSnapshot => ({
 
 beforeEach(() => {
   resetPreviewStateForTests();
-  useRightPanelStore.setState({ byThreadKey: {} });
+});
+afterEach(() => {
+  registerChatDockHandle(null);
 });
 
 describe("resolveAutoOpenPreviewUrl — autoOpenPreview: false", () => {
@@ -140,15 +142,21 @@ describe("resolveAutoOpenPreviewUrl — autoOpenPreview: true, previewUrl set, t
 });
 
 // The composed effect ChatView.tsx's watch effect actually calls — these
-// assert the REAL useRightPanelStore state changed (mirroring
-// addBrowserSurface.test.ts's own bar), not that some function was invoked.
-// This is the specific proof against the failure mode task P1-E exists to
-// fix: a field that looked wired and did nothing.
+// assert the REAL previewStateStore state changed and the Browser dock
+// panel was actually opened (mirroring addBrowserSurface.test.ts's own
+// bar, updated the same way task #53 updated it — `openUrlInPreview`
+// no longer touches `rightPanelStore`, it calls `openChatDockPanel`
+// instead, see openFileInPreview.ts's own doc comment), not that some
+// function was invoked. This is the specific proof against the failure
+// mode task P1-E exists to fix: a field that looked wired and did
+// nothing.
 describe("triggerAutoOpenPreview — autoOpenPreview: false", () => {
   it("does not open a preview surface, and does not call openPreview at all", async () => {
     const openPreview = vi.fn(async (_input: PreviewOpenInput) =>
       AsyncResult.success(snapshot("tab-1")),
     );
+    const openPanel = vi.fn();
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({ autoOpenPreview: false }),
@@ -160,16 +168,17 @@ describe("triggerAutoOpenPreview — autoOpenPreview: false", () => {
 
     expect(opened).toBe(false);
     expect(openPreview).not.toHaveBeenCalled();
-    expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, threadRef).surfaces,
-    ).toEqual([]);
+    expect(readThreadPreviewState(threadRef).sessions).toEqual({});
+    expect(openPanel).not.toHaveBeenCalled();
   });
 });
 
 describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal listening", () => {
-  it("actually opens the preview surface in useRightPanelStore, pointed at previewUrl", async () => {
+  it("actually opens the preview session and the Browser dock panel, pointed at previewUrl", async () => {
     const tab = snapshot("tab-auto");
     const openPreview = vi.fn(async (_input: PreviewOpenInput) => AsyncResult.success(tab));
+    const openPanel = vi.fn();
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({ previewUrl: "http://localhost:5173" }),
@@ -184,12 +193,8 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal listening",
       threadId: THREAD_ID,
       url: "http://localhost:5173",
     });
-    expect(
-      selectThreadRightPanelState(
-        useRightPanelStore.getState().byThreadKey,
-        threadRef,
-      ).surfaces.map((surface) => surface.id),
-    ).toEqual(["browser:tab-auto"]);
+    expect(readThreadPreviewState(threadRef).activeTabId).toBe("tab-auto");
+    expect(openPanel).toHaveBeenCalledExactlyOnceWith(BROWSER_PANEL_ID);
   });
 });
 
@@ -198,6 +203,8 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal NOT listeni
     const openPreview = vi.fn(async (_input: PreviewOpenInput) =>
       AsyncResult.success(snapshot("tab-1")),
     );
+    const openPanel = vi.fn();
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({}),
@@ -209,8 +216,7 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal NOT listeni
 
     expect(opened).toBe(false);
     expect(openPreview).not.toHaveBeenCalled();
-    expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, threadRef).surfaces,
-    ).toEqual([]);
+    expect(readThreadPreviewState(threadRef).sessions).toEqual({});
+    expect(openPanel).not.toHaveBeenCalled();
   });
 });

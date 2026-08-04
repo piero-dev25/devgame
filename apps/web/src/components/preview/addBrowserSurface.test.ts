@@ -1,13 +1,13 @@
 import type { PreviewOpenInput, PreviewSessionSnapshot, ScopedThreadRef } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { BROWSER_PANEL_ID, registerChatDockHandle } from "~/dock/chatDockHandle";
 import {
   applyPreviewServerSnapshot,
   readThreadPreviewState,
   resetPreviewStateForTests,
 } from "~/previewStateStore";
-import { selectThreadRightPanelState, useRightPanelStore } from "~/rightPanelStore";
 
 import { addBrowserSurface } from "./addBrowserSurface";
 
@@ -27,26 +27,30 @@ const snapshot = (tabId: string): PreviewSessionSnapshot => ({
 
 beforeEach(() => {
   resetPreviewStateForTests();
-  useRightPanelStore.setState({ byThreadKey: {} });
+});
+afterEach(() => {
+  registerChatDockHandle(null);
 });
 
 describe("addBrowserSurface", () => {
-  it("creates another preview session when a browser tab is already active", async () => {
+  it("creates another preview session when a browser tab is already active, and opens the Browser dock panel", async () => {
     const first = snapshot("tab-1");
     const second = snapshot("tab-2");
     applyPreviewServerSnapshot(threadRef, first);
-    useRightPanelStore.getState().openBrowser(threadRef, first.tabId);
+    const openPanel = vi.fn();
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
     const openPreview = vi.fn(async (_input: PreviewOpenInput) => AsyncResult.success(second));
 
     await addBrowserSurface({ threadRef, openPreview: ({ input }) => openPreview(input) });
 
     expect(openPreview).toHaveBeenCalledWith({ threadId: "thread-1" });
     expect(Object.keys(readThreadPreviewState(threadRef).sessions)).toEqual(["tab-1", "tab-2"]);
-    expect(
-      selectThreadRightPanelState(
-        useRightPanelStore.getState().byThreadKey,
-        threadRef,
-      ).surfaces.map((surface) => surface.id),
-    ).toEqual(["browser:tab-1", "browser:tab-2"]);
+    // Task #53: previewStateStore's own `applyPreviewServerSnapshot` already
+    // activates the new tab (see addBrowserSurface.ts's own doc comment) —
+    // the only remaining job for this function is making the dock panel
+    // visible, which this asserts directly rather than through
+    // rightPanelStore's now-deleted "preview" surfaces.
+    expect(readThreadPreviewState(threadRef).activeTabId).toBe("tab-2");
+    expect(openPanel).toHaveBeenCalledExactlyOnceWith(BROWSER_PANEL_ID);
   });
 });

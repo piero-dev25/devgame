@@ -38,15 +38,17 @@ import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, Files, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
+import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
+  BROWSER_PANEL_ID,
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
   registerChatDockHandle,
   TERMINAL_PANEL_ID,
 } from "./chatDockHandle";
+import BrowserDockPanel from "./BrowserDockPanel";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
@@ -69,6 +71,7 @@ const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
 const FILES_GROUP_ID = "group-files";
 const TERMINAL_GROUP_ID = "group-terminal";
+const BROWSER_GROUP_ID = "group-browser";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -279,10 +282,38 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * The default preset: sidebar on the left, chat next to it, Diff, Files and
- * Terminal further right — the same third-column slot Files occupied
- * before Part A deleted our own version of it, now occupied by T3's own
- * Diff, Files AND Terminal surfaces instead of a re-filled stand-in.
+ * Part B, fourth and final slice (task #53): T3's own Browser (preview)
+ * surface as an ordinary dock panel. `BrowserDockPanel.tsx` needs no new
+ * store — see its own doc comment for why `previewStateStore.ts` already
+ * carried everything this panel reads.
+ *
+ * `singleton: true`: same reasoning as the other three — one thread's
+ * browser workspace (itself capable of holding several tabs via
+ * `BrowserDockPanel`'s own tab strip) has no case for two simultaneous
+ * PANEL instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as the
+ * other three — closing the panel is a view action, never destructive (see
+ * `BrowserDockPanel.tsx`'s own module doc on desktop-only degradation for
+ * the one place this panel DOES need to behave differently depending on
+ * runtime).
+ */
+chatDockPanelRegistry.register({
+  id: BROWSER_PANEL_ID,
+  title: "Browser",
+  icon: Globe2,
+  component: BrowserDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Diff, Files,
+ * Terminal and Browser further right — the same third-column slot Files
+ * occupied before Part A deleted our own version of it, now occupied by
+ * T3's own Diff, Files, Terminal AND Browser surfaces instead of a
+ * re-filled stand-in. This preset now covers every surface
+ * spec-surfaces-as-dock-panels.md set out to promote.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
@@ -337,7 +368,9 @@ function buildChatDockPreset(): SerializedDockview {
   const DIFF_WIDTH = 400;
   const FILES_WIDTH = 400;
   const TERMINAL_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH + TERMINAL_WIDTH;
+  const BROWSER_WIDTH = 400;
+  const CONTAINER_WIDTH =
+    SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH + TERMINAL_WIDTH + BROWSER_WIDTH;
 
   return {
     grid: {
@@ -377,6 +410,15 @@ function buildChatDockPreset(): SerializedDockview {
               activeView: TERMINAL_PANEL_ID,
             },
           },
+          {
+            type: "leaf",
+            size: BROWSER_WIDTH,
+            data: {
+              id: BROWSER_GROUP_ID,
+              views: [BROWSER_PANEL_ID],
+              activeView: BROWSER_PANEL_ID,
+            },
+          },
         ],
       },
     },
@@ -386,6 +428,7 @@ function buildChatDockPreset(): SerializedDockview {
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
       [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
       [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),
+      [BROWSER_PANEL_ID]: presetPanelEntry(BROWSER_PANEL_ID, "Browser"),
     },
     activeGroup: CHAT_GROUP_ID,
   };

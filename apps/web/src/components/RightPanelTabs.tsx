@@ -1,4 +1,4 @@
-import type { ContextMenuItem, PreviewSessionSnapshot } from "@t3tools/contracts";
+import type { ContextMenuItem } from "@t3tools/contracts";
 import { ClipboardList, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
@@ -7,7 +7,6 @@ import {
   useCallback,
   useEffect,
   useRef,
-  useState,
 } from "react";
 
 import { isElectron } from "~/env";
@@ -17,8 +16,6 @@ import { readLocalApi } from "~/localApi";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import { faviconUrlForOrigin } from "~/lib/favicon";
-import { useTheme } from "~/hooks/useTheme";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { PreviewPanelShell, type PreviewPanelMode } from "./preview/PreviewPanelShell";
@@ -30,7 +27,6 @@ interface RightPanelTabsProps {
   surfaces: readonly RightPanelSurface[];
   activeSurfaceId: string | null;
   pendingSurfaceIds: ReadonlySet<string>;
-  previewSessions: Readonly<Record<string, PreviewSessionSnapshot>>;
   onActivate: (surface: RightPanelSurface) => void;
   onCloseSurface: (surface: RightPanelSurface) => void;
   onCloseOtherSurfaces: (surface: RightPanelSurface) => void;
@@ -182,57 +178,20 @@ function RightPanelEmptyState(props: {
   );
 }
 
-function surfaceTitle(
-  surface: RightPanelSurface,
-  sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
-): string {
+// Task #53: this switch's LAST non-"plan" case ("preview") was removed
+// here — Browser moved to a dock panel, the fourth and final surface kind
+// promoted out of this file. "plan" is now the only member of
+// RightPanelSurface at all (see rightPanelStore.ts's own comment on what
+// that means for this store going forward).
+function surfaceTitle(surface: RightPanelSurface): string {
   switch (surface.kind) {
     case "plan":
       return "Plan";
-    case "preview": {
-      const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
-      if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
-      if (snapshot.navStatus.title.trim().length > 0) return snapshot.navStatus.title;
-      try {
-        return new URL(snapshot.navStatus.url).host || "Browser";
-      } catch {
-        return "Browser";
-      }
-    }
   }
 }
 
-function PreviewFavicon({ url }: { url: string | null }) {
-  const faviconUrl = faviconUrlForOrigin(url, 32);
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  if (!faviconUrl || failedUrl === faviconUrl) return <Globe2 className="size-3.5 shrink-0" />;
-  return (
-    <img
-      src={faviconUrl}
-      alt=""
-      aria-hidden
-      draggable={false}
-      className="size-3.5 shrink-0 rounded-sm"
-      onError={() => setFailedUrl(faviconUrl)}
-    />
-  );
-}
-
-function SurfaceIcon({
-  surface,
-  sessions,
-  theme,
-}: {
-  surface: RightPanelSurface;
-  sessions: Readonly<Record<string, PreviewSessionSnapshot>>;
-  theme: "light" | "dark";
-}) {
+function SurfaceIcon({ surface }: { surface: RightPanelSurface }) {
   switch (surface.kind) {
-    case "preview": {
-      const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
-      const url = !snapshot || snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
-      return <PreviewFavicon url={url} />;
-    }
     case "plan":
       return <ClipboardList className="size-3.5 shrink-0" />;
   }
@@ -240,7 +199,6 @@ function SurfaceIcon({
 
 export function RightPanelTabs(props: RightPanelTabsProps) {
   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
-  const { resolvedTheme } = useTheme();
   const tabListRef = useRef<HTMLDivElement>(null);
 
   const handleTabContextMenu = useCallback(
@@ -339,7 +297,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.map((surface) => {
               const active = surface.id === props.activeSurfaceId;
               const pending = props.pendingSurfaceIds.has(surface.id);
-              const title = surfaceTitle(surface, props.previewSessions);
+              const title = surfaceTitle(surface);
               return (
                 <div
                   key={surface.id}
@@ -362,11 +320,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                           className="flex min-w-0 flex-1 items-center gap-1.5"
                           onClick={() => props.onActivate(surface)}
                         >
-                          <SurfaceIcon
-                            surface={surface}
-                            sessions={props.previewSessions}
-                            theme={resolvedTheme}
-                          />
+                          <SurfaceIcon surface={surface} />
                           <span className="truncate">{title}</span>
                         </button>
                       }

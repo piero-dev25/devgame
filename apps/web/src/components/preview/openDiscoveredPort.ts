@@ -6,7 +6,7 @@ import {
 
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
-import { useRightPanelStore } from "~/rightPanelStore";
+import { BROWSER_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
 import { openPreviewSession } from "./openPreviewSession";
 
 export async function openDiscoveredPort<E>(input: {
@@ -20,7 +20,7 @@ export async function openDiscoveredPort<E>(input: {
     threadRef: input.threadRef,
     url: resolvedUrl,
   });
-  return mapAtomCommandResult(result, (snapshot) => {
-    useRightPanelStore.getState().openBrowser(input.threadRef, snapshot.tabId);
+  return mapAtomCommandResult(result, () => {
+    openChatDockPanel(BROWSER_PANEL_ID);
   });
 }
