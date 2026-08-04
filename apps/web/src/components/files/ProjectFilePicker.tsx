@@ -1,9 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
 import { useMemo, useState, type ReactNode } from "react";
 
+import { FILES_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
+import { useFileExplorerStore } from "~/fileExplorerStore";
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
-import { useRightPanelStore } from "~/rightPanelStore";
 import { primaryServerKeybindingsAtom } from "~/state/server";
 
 import { PierreEntryIcon } from "../chat/PierreEntryIcon";
@@ -107,7 +108,8 @@ function OpenProjectFilePicker(props: ProjectFilePickerProps & { target: ActiveP
         ),
         icon: <PierreEntryIcon pathValue={match.path} kind="file" theme={resolvedTheme} />,
         run: async () => {
-          useRightPanelStore.getState().openFile(target.threadRef, match.path);
+          useFileExplorerStore.getState().openFile(target.threadRef, match.path);
+          openChatDockPanel(FILES_PANEL_ID);
         },
       })),
     [hasMatchedQuery, matches, resolvedTheme, target.threadRef],

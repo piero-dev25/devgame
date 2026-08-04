@@ -1,6 +1,7 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
 
-import { useRightPanelStore } from "./rightPanelStore";
+import { FILES_PANEL_ID, openChatDockPanel } from "./dock/chatDockHandle";
+import { useFileExplorerStore } from "./fileExplorerStore";
 import { resolvePathLinkTarget } from "./terminal-links";
 
 interface OpenDiffFilePrimaryActionInput {
@@ -17,7 +18,10 @@ export function openDiffFilePrimaryAction({
   openInEditor,
 }: OpenDiffFilePrimaryActionInput): void {
   if (threadRef) {
-    useRightPanelStore.getState().openFile(threadRef, filePath);
+    // Task #61: "which file is open" moved to fileExplorerStore.ts; making
+    // the Files panel itself visible is now the dock's job.
+    useFileExplorerStore.getState().openFile(threadRef, filePath);
+    openChatDockPanel(FILES_PANEL_ID);
     return;
   }
 

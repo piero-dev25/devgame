@@ -207,6 +207,140 @@ describe("migrateLoadedLayout — proof bar: diff panel promotion (spec-surfaces
   });
 });
 
+// Mirrors buildChatDockPreset()'s REAL current shape (ChatDock.tsx, after
+// task #61's Files promotion): a flat HORIZONTAL branch of single-view
+// leaves, sidebar (256) | chat (640) | diff (400) | files (400) — checked
+// against ChatDock.tsx's live numbers, same discipline DIFF_DEFAULT_TREE
+// above already follows for Diff.
+const FILES_DEFAULT_TREE: SerializedDockview = {
+  grid: {
+    orientation: Orientation.HORIZONTAL,
+    width: 1696,
+    height: 800,
+    root: {
+      type: "branch",
+      size: 1696,
+      data: [
+        {
+          type: "leaf",
+          size: 256,
+          data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+        },
+        {
+          type: "leaf",
+          size: 640,
+          data: { id: "group-chat", views: ["chat"], activeView: "chat" },
+        },
+        {
+          type: "leaf",
+          size: 400,
+          data: { id: "group-diff", views: ["diff"], activeView: "diff" },
+        },
+        {
+          type: "leaf",
+          size: 400,
+          data: { id: "group-files", views: ["files"], activeView: "files" },
+        },
+      ],
+    },
+  },
+  panels: {
+    sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
+    chat: { id: "chat", contentComponent: "chat", title: "Chat" },
+    diff: { id: "diff", contentComponent: "diff", title: "Diff" },
+    files: { id: "files", contentComponent: "files", title: "Files" },
+  },
+  activeGroup: "group-chat",
+};
+
+// A pre-Files-promotion layout — sidebar+chat+diff already existed (Diff's
+// own promotion already shipped), sidebar dragged wider (392 instead of the
+// preset's 256) as the user's own customization to prove survives migration.
+function userLayoutBeforeFilesPanel(): SerializedDockview {
+  return {
+    grid: {
+      orientation: Orientation.HORIZONTAL,
+      width: 1520,
+      height: 800,
+      root: {
+        type: "branch",
+        size: 1520,
+        data: [
+          {
+            type: "leaf",
+            size: 392,
+            data: { id: "group-sidebar", views: ["sidebar"], activeView: "sidebar" },
+          },
+          {
+            type: "leaf",
+            size: 728,
+            data: { id: "group-chat", views: ["chat"], activeView: "chat" },
+          },
+          {
+            type: "leaf",
+            size: 400,
+            data: { id: "group-diff", views: ["diff"], activeView: "diff" },
+          },
+        ],
+      },
+    },
+    panels: {
+      sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
+      chat: { id: "chat", contentComponent: "chat", title: "Chat" },
+      diff: { id: "diff", contentComponent: "diff", title: "Diff" },
+    },
+    activeGroup: "group-diff",
+  };
+}
+
+describe("migrateLoadedLayout — proof bar: files panel promotion (spec-surfaces-as-dock-panels.md, Part B, task #61)", () => {
+  it("inserts the newly-registered files panel at its default-preset position while leaving every existing panel's size/order/active-state untouched", () => {
+    const registry = registryWith("sidebar", "chat", "diff", "files");
+    const loaded = userLayoutBeforeFilesPanel();
+    const loadedRoot = loaded.grid.root;
+    if (loadedRoot.type !== "branch" || !Array.isArray(loadedRoot.data)) {
+      throw new Error("fixture must be a branch root");
+    }
+    const loadedChildren = loadedRoot.data;
+
+    const result = migrateLoadedLayout({
+      loaded,
+      knownPanelIds: ["sidebar", "chat", "diff"], // files didn't exist when this was saved
+      panelRegistry: registry,
+      defaultTree: FILES_DEFAULT_TREE,
+    });
+
+    expect(result.addedPanelIds).toEqual(["files"]);
+    expect(result.unplaceablePanelIds).toEqual([]);
+
+    // The person's positions survived: sidebar's dragged 392 width, chat's
+    // 728 width, diff's 400 width, all three still in order, activeGroup
+    // unchanged.
+    const root = result.tree.grid.root;
+    if (root.type !== "branch" || !Array.isArray(root.data)) {
+      throw new Error("expected a branch root");
+    }
+    const children = root.data;
+    expect(children).toHaveLength(4);
+    expect(children[0]).toEqual(loadedChildren[0]);
+    expect(children[1]).toEqual(loadedChildren[1]);
+    expect(children[2]).toEqual(loadedChildren[2]);
+    expect(result.tree.activeGroup).toBe("group-diff");
+
+    // The new panel is present, at the default preset's own position (last),
+    // as its OWN leaf (views.length === 1) rather than tabbed into chat's or
+    // diff's group, and using the default preset's own panels-map entry
+    // verbatim.
+    const filesLeaf = children[3];
+    expect(filesLeaf).toEqual({
+      type: "leaf",
+      size: 400,
+      data: { id: "group-files", views: ["files"], activeView: "files" },
+    });
+    expect(result.tree.panels.files).toEqual(FILES_DEFAULT_TREE.panels.files);
+  });
+});
+
 describe("migrateLoadedLayout — proof bar: positions survive AND the new panel appears", () => {
   it("inserts the newly-registered panel at its default-preset position while leaving every existing panel's size/order/active-state untouched", () => {
     const registry = registryWith("sidebar", "chat", "files");

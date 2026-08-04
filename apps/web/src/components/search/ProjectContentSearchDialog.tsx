@@ -2,10 +2,11 @@ import type { ProjectContentMatch } from "@t3tools/contracts";
 import { LoaderCircle } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
+import { FILES_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
+import { useFileExplorerStore } from "~/fileExplorerStore";
 import { useActiveProjectTarget, type ActiveProjectTarget } from "~/hooks/useActiveProjectTarget";
 import { useTheme } from "~/hooks/useTheme";
 import { cn } from "~/lib/utils";
-import { useRightPanelStore } from "~/rightPanelStore";
 import { useProjectContentSearch } from "~/state/queries";
 
 import { PierreEntryIcon } from "../chat/PierreEntryIcon";
@@ -147,7 +148,8 @@ function OpenContentSearchDialog(props: {
   const openMatch = (match: ProjectContentMatch) => {
     if (!canOpenMatches) return;
     props.onOpenChange(false);
-    useRightPanelStore.getState().openFile(target.threadRef, match.path, match.lineNumber);
+    useFileExplorerStore.getState().openFile(target.threadRef, match.path, match.lineNumber);
+    openChatDockPanel(FILES_PANEL_ID);
   };
   const fileCount = useMemo(() => new Set(matches.map((match) => match.path)).size, [matches]);
   const showSearchStatus =

@@ -4,8 +4,14 @@
  * This is intentionally a shallow workspace model: it owns an ordered set of
  * surface descriptors and the active surface, while each feature continues to
  * own its durable resource state. Browser surfaces point at preview tab ids,
- * terminal surfaces point at terminal session ids, file surfaces point at
- * workspace paths, and diff/plan/files remain singleton surfaces.
+ * terminal surfaces point at terminal session ids, and plan remains a
+ * singleton surface. Diff and Files ("files"/"file") used to live here too —
+ * both are gone as of spec-surfaces-as-dock-panels.md, Part B: each moved to
+ * a first-class dock panel, with its own visibility owned by the dock and
+ * (for Files) its own in-panel selection state owned by a dedicated store
+ * (`fileExplorerStore.ts`, mirroring `diffPanelStore.ts`'s own split for
+ * Diff) — see `RIGHT_PANEL_KINDS`'s own comment for why each kind is
+ * DELETED here rather than left unused.
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -14,17 +20,17 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-// "diff" is deliberately NOT a member — spec-surfaces-as-dock-panels.md,
-// Part B moved it to a first-class dock panel (see dock/ChatDock.tsx's
-// registration), and removing it from this union (rather than leaving it
-// unused) is what let the compiler find both stale call sites a review
-// caught: onToggleDiff (Cmd+D) and activateRightPanelSurface's dead
-// "diff" branch, neither of which a runtime check alone would have
-// flagged. The persisted-data side of "diff" still exists — see
-// migratePersistedRightPanelState's own comment on why that ONE spot is
-// exempt. This is the template for Files/Terminal/Browser's own eventual
-// promotion: move the surface, then delete its kind here.
-export const RIGHT_PANEL_KINDS = ["plan", "files", "file", "preview", "terminal"] as const;
+// "diff" and, as of task #61, "files"/"file" are deliberately NOT members —
+// spec-surfaces-as-dock-panels.md, Part B moved each to a first-class dock
+// panel (see dock/ChatDock.tsx's registrations), and removing a kind from
+// this union (rather than leaving it unused) is what let the compiler find
+// every stale call site on the Diff pass — six of them across two files,
+// including onToggleDiff's Cmd+D binding, none of which a runtime check
+// alone would have flagged. The persisted-data side of each retired kind
+// still exists — see migratePersistedRightPanelState's own comment on why
+// those spots are exempt. This is the template for Terminal/Browser's own
+// eventual promotion: move the surface, then delete its kind here.
+export const RIGHT_PANEL_KINDS = ["plan", "preview", "terminal"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
 export type RightPanelSurface =
@@ -38,18 +44,10 @@ export type RightPanelSurface =
       activeTerminalId: string;
       splitDirection?: "horizontal" | "vertical";
     }
-  | { id: "files"; kind: "files" }
-  | {
-      id: `file:${string}`;
-      kind: "file";
-      relativePath: string;
-      revealLine: number | null;
-      revealRequestId: number;
-    }
   | { id: "plan"; kind: "plan" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 8;
+const RIGHT_PANEL_STORAGE_VERSION = 9;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -59,9 +57,8 @@ export interface ThreadRightPanelState {
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "terminal">) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
-  openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   openTerminal: (ref: ScopedThreadRef, terminalId: string) => void;
   splitTerminal: (
     ref: ScopedThreadRef,
@@ -77,11 +74,10 @@ interface RightPanelStoreState {
   closeSurfacesToRight: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeAllSurfaces: (ref: ScopedThreadRef) => void;
   reconcileBrowserSurfaces: (ref: ScopedThreadRef, tabIds: readonly string[]) => void;
-  reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
-  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "terminal">) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -92,11 +88,9 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
 };
 
 const singletonSurface = (
-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal">,
+  kind: Exclude<RightPanelKind, "preview" | "terminal">,
 ): RightPanelSurface => {
   switch (kind) {
-    case "files":
-      return { id: "files", kind };
     case "plan":
       return { id: "plan", kind };
   }
@@ -106,18 +100,6 @@ const browserSurface = (tabId: string | null): RightPanelSurface =>
   tabId
     ? { id: `browser:${tabId}`, kind: "preview", resourceId: tabId }
     : { id: "browser:new", kind: "preview", resourceId: null };
-
-const fileSurface = (
-  relativePath: string,
-  revealLine: number | null,
-  revealRequestId: number,
-): RightPanelSurface => ({
-  id: `file:${relativePath}`,
-  kind: "file",
-  relativePath,
-  revealLine,
-  revealRequestId,
-});
 
 const terminalSurface = (terminalId: string): RightPanelSurface => ({
   id: `terminal:${terminalId}`,
@@ -155,11 +137,6 @@ const updateThread = (
   return { ...byThreadKey, [threadKey]: next };
 };
 
-function normalizeRevealLine(line: number | undefined): number | null {
-  if (line === undefined || !Number.isFinite(line)) return null;
-  return Math.max(1, Math.trunc(line));
-}
-
 export function migratePersistedRightPanelState(persistedState: unknown): {
   byThreadKey: Record<string, ThreadRightPanelState>;
 } {
@@ -177,46 +154,42 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                 threadState && typeof threadState === "object" ? threadState : null;
               const surfaces = Array.isArray(validThreadState?.surfaces)
                 ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
-                    // v8: Diff moved to a first-class dock panel (spec-
-                    // surfaces-as-dock-panels.md, Part B) and is no longer a
-                    // right-panel surface kind ChatView renders — its
-                    // visibility now lives in the dock's own layout state.
-                    // Drop any persisted "diff" entry rather than resurrect
-                    // a tab with nothing behind it; activeSurfaceId below
-                    // already falls back to null when its target surface is
-                    // gone, so this is a non-destructive strip of just this
-                    // one surface, same as the terminal-validation drops
-                    // further down.
+                    // v8 added "diff"; v9 (task #61) adds "files" (the
+                    // browser) and "file" (one opened file) — each moved to
+                    // a first-class dock panel (spec-surfaces-as-dock-
+                    // panels.md, Part B) and no longer a right-panel surface
+                    // kind ChatView renders; visibility for each now lives
+                    // in the dock's own layout state. "File"'s own payload
+                    // (relativePath/revealLine/revealRequestId, which open
+                    // files) moved WITH it, into fileExplorerStore.ts's own
+                    // v1 store — a fresh store with nothing to migrate FROM,
+                    // so there's no coercion to preserve here, only a strip.
+                    // Drop any persisted entry of a retired kind rather than
+                    // resurrect a tab with nothing behind it; activeSurfaceId
+                    // below already falls back to null when its target
+                    // surface is gone, so this is a non-destructive strip of
+                    // just these surfaces, same as the terminal-validation
+                    // drops further down.
                     //
                     // Cast past RightPanelSurface's CURRENT union
                     // deliberately: a persisted surface can be an OLDER
                     // shape than what this build's type allows — that is
-                    // the entire reason migration exists — and "diff" is
-                    // exactly such a shape, real in every v7-and-earlier
-                    // save, no longer a member of RightPanelSurface at all
-                    // as of this type's own v8 narrowing (see its comment).
-                    // This is the one spot in the file deliberately exempt
-                    // from the compiler proof the rest of the union now
-                    // gets — a review specifically asked for that proof
-                    // everywhere ELSE, which is what caught the two stale
-                    // ChatView.tsx call sites this same migration doesn't
-                    // touch.
-                    if ((surface as { kind: string }).kind === "diff") {
+                    // the entire reason migration exists — and each of
+                    // these is exactly such a shape, real in an
+                    // earlier-versioned save, no longer a member of
+                    // RightPanelSurface at all as of this type's own
+                    // narrowing (see its comment). This is the one spot in
+                    // the file deliberately exempt from the compiler proof
+                    // the rest of the union now gets — a review specifically
+                    // asked for that proof everywhere ELSE, which is what
+                    // caught the two stale ChatView.tsx call sites this same
+                    // migration doesn't touch.
+                    if (
+                      (surface as { kind: string }).kind === "diff" ||
+                      (surface as { kind: string }).kind === "files" ||
+                      (surface as { kind: string }).kind === "file"
+                    ) {
                       return [];
-                    }
-                    if (surface.kind === "file") {
-                      const revealLine =
-                        typeof surface.revealLine === "number" &&
-                        Number.isFinite(surface.revealLine)
-                          ? Math.max(1, Math.trunc(surface.revealLine))
-                          : null;
-                      const revealRequestId =
-                        typeof surface.revealRequestId === "number" &&
-                        Number.isSafeInteger(surface.revealRequestId) &&
-                        surface.revealRequestId >= 0
-                          ? surface.revealRequestId
-                          : 0;
-                      return [{ ...surface, revealLine, revealRequestId }];
                     }
                     if (surface.kind !== "terminal") return [surface];
                     if (
@@ -303,33 +276,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
-          }),
-        })),
-      openFile: (ref, relativePath, line) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            const withoutStandaloneExplorer = current.surfaces.filter(
-              (surface) => surface.kind !== "files",
-            );
-            const surfaceId = `file:${relativePath}` as const;
-            const existing = withoutStandaloneExplorer.find(
-              (surface): surface is Extract<RightPanelSurface, { kind: "file" }> =>
-                surface.id === surfaceId && surface.kind === "file",
-            );
-            const surface = fileSurface(
-              relativePath,
-              normalizeRevealLine(line),
-              (existing?.revealRequestId ?? 0) + 1,
-            );
-            return {
-              isOpen: true,
-              activeSurfaceId: surface.id,
-              surfaces: existing
-                ? withoutStandaloneExplorer.map((entry) =>
-                    entry.id === surface.id ? surface : entry,
-                  )
-                : [...withoutStandaloneExplorer, surface],
-            };
           }),
         })),
       openTerminal: (ref, terminalId) =>
@@ -500,27 +446,6 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               activeSurfaceId: activeStillExists
                 ? current.activeSurfaceId
                 : (fallbackBrowser?.id ?? surfaces[0]?.id ?? null),
-            };
-          }),
-        })),
-      reconcileFileSurfaces: (ref, workspaceAvailable) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
-            if (workspaceAvailable) return current;
-            const surfaces = current.surfaces.filter(
-              (surface) => surface.kind !== "files" && surface.kind !== "file",
-            );
-            if (surfaces.length === current.surfaces.length) return current;
-            const activeStillExists = surfaces.some(
-              (surface) => surface.id === current.activeSurfaceId,
-            );
-            return {
-              ...current,
-              isOpen: surfaces.length > 0 ? current.isOpen : false,
-              surfaces,
-              activeSurfaceId: activeStillExists
-                ? current.activeSurfaceId
-                : (surfaces.at(-1)?.id ?? null),
             };
           }),
         })),

@@ -75,9 +75,10 @@ import {
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { cn } from "../lib/utils";
-import { useRightPanelStore } from "../rightPanelStore";
 import { useActiveEnvironmentId } from "../state/entities";
 import { serverEnvironment } from "../state/server";
+import { FILES_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
+import { useFileExplorerStore } from "~/fileExplorerStore";
 import { assetEnvironment } from "../state/assets";
 import { usePreparedConnection } from "../state/session";
 import { previewEnvironment } from "../state/preview";
@@ -1069,7 +1070,12 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
       handleOpenInEditor();
       return;
     }
-    useRightPanelStore.getState().openFile(threadRef, workspaceRelativePath, line);
+    // Task #61: "which file is open" moved to fileExplorerStore.ts; making
+    // the Files panel itself visible is now the dock's job, same
+    // open-then-focus split every other cross-surface "open a file" call
+    // site in this pass needed.
+    useFileExplorerStore.getState().openFile(threadRef, workspaceRelativePath, line);
+    openChatDockPanel(FILES_PANEL_ID);
   }, [handleOpenInEditor, line, threadRef, workspaceRelativePath]);
 
   const handleOpenInBrowser = useCallback(() => {

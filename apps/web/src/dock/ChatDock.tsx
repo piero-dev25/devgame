@@ -38,13 +38,14 @@ import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, MessageCircle, PanelLeft } from "lucide-react";
+import { FileDiff, Files, MessageCircle, PanelLeft } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import { DIFF_PANEL_ID, registerChatDockHandle } from "./chatDockHandle";
+import { DIFF_PANEL_ID, FILES_PANEL_ID, registerChatDockHandle } from "./chatDockHandle";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
+import FilesDockPanel from "./FilesDockPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -60,6 +61,7 @@ const CHAT_PANEL_ID = "chat";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
+const FILES_GROUP_ID = "group-files";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -221,14 +223,38 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * The default preset: sidebar on the left, chat next to it, Diff further
- * right — the same third-column slot Files occupied before Part A deleted
- * it, now occupied by T3's own Diff surface instead of a re-filled stand-in.
+ * Part B, second slice (task #61): T3's own Files surface as an ordinary
+ * dock panel. `FilesDockPanel.tsx` is a thicker wrapper than Diff's — see
+ * its own doc comment for the three decisions that made it so (files+file
+ * move together, a dedicated store for "which file is open," the minimal
+ * multi-file tab strip preserved from `RightPanelTabs`).
+ *
+ * `singleton: true`: same reasoning as Diff — one thread's file browser has
+ * no case for two simultaneous instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as Diff —
+ * nothing depends on this panel staying mounted, so no reason to take away
+ * the ability to close it.
+ */
+chatDockPanelRegistry.register({
+  id: FILES_PANEL_ID,
+  title: "Files",
+  icon: Files,
+  component: FilesDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Diff and Files
+ * further right — the same third-column slot Files occupied before Part A
+ * deleted our own version of it, now occupied by T3's own Diff AND Files
+ * surfaces instead of a re-filled stand-in.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
  * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
- * number. No measured mock exists for the chat:diff split — dockview
+ * number. No measured mock exists for the chat:diff:files split — dockview
  * stretches this initial tree to fit the real container, so only the
  * RATIOS matter, not the absolute pixels.
  *
@@ -238,8 +264,9 @@ chatDockPanelRegistry.register({
  * open. For the sidebar specifically this is load-bearing, not just
  * convenient — see SidebarPanel.tsx/this file's registration comment on why
  * a panel that can never unmount is what keeps the sidebar's window keydown
- * listeners (thread prev/next, Cmd+1..9) alive. Diff is NOT no-close — see
- * its own registration comment above for why that's deliberate.
+ * listeners (thread prev/next, Cmd+1..9) alive. Diff and Files are NOT
+ * no-close — see their own registration comments above for why that's
+ * deliberate.
  *
  * `presetPanelEntry` below reads `closeable` off the REGISTRY rather than
  * this function choosing `tabComponent` independently — fix round after the
@@ -249,15 +276,16 @@ chatDockPanelRegistry.register({
  * one place (`PanelDefinition.closeable`, set at registration above), and
  * every caller reads it.
  *
- * Diff is its own SEPARATE leaf in this flat branch (own `views: [id]`
- * array, length 1) — a SEPARATE PANEL IN A ROW, not tabbed into chat's
- * group. That's not just this function's choice: `lib/layoutMigration.ts`'s
- * `locatePanelInFlatBranch` only recognizes a leaf as a newly-registered
- * panel's home when `views.length === 1` — grafting Diff into an existing
- * TABBED group here would make it unrecognizable to migration (reported as
- * unplaceable) for every user who saved a layout before this shipped. The
- * "separate row" rule enforces itself structurally; it isn't something a
- * future edit here could quietly break without migration noticing.
+ * Diff and Files are each their own SEPARATE leaf in this flat branch (own
+ * `views: [id]` array, length 1) — a SEPARATE PANEL IN A ROW, not tabbed
+ * into chat's group or into each other. That's not just this function's
+ * choice: `lib/layoutMigration.ts`'s `locatePanelInFlatBranch` only
+ * recognizes a leaf as a newly-registered panel's home when
+ * `views.length === 1` — grafting either into an existing TABBED group here
+ * would make it unrecognizable to migration (reported as unplaceable) for
+ * every user who saved a layout before this shipped. The "separate row"
+ * rule enforces itself structurally; it isn't something a future edit here
+ * could quietly break without migration noticing.
  */
 function presetPanelEntry(id: string, title: string): SerializedDockview["panels"][string] {
   const definition = chatDockPanelRegistry.get(id);
@@ -274,7 +302,8 @@ function buildChatDockPreset(): SerializedDockview {
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
   const CHAT_WIDTH = 640;
   const DIFF_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH;
+  const FILES_WIDTH = 400;
+  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH;
 
   return {
     grid: {
@@ -300,6 +329,11 @@ function buildChatDockPreset(): SerializedDockview {
             size: DIFF_WIDTH,
             data: { id: DIFF_GROUP_ID, views: [DIFF_PANEL_ID], activeView: DIFF_PANEL_ID },
           },
+          {
+            type: "leaf",
+            size: FILES_WIDTH,
+            data: { id: FILES_GROUP_ID, views: [FILES_PANEL_ID], activeView: FILES_PANEL_ID },
+          },
         ],
       },
     },
@@ -307,6 +341,7 @@ function buildChatDockPreset(): SerializedDockview {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
+      [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
     },
     activeGroup: CHAT_GROUP_ID,
   };

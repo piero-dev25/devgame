@@ -48,6 +48,9 @@
  * literal string at each call site.
  */
 export const DIFF_PANEL_ID = "diff";
+/** Task #61, following the same pattern: `ChatView.tsx`'s `addFilesSurface`
+ * needs this id to call `openChatDockPanel` after Files moved to the dock. */
+export const FILES_PANEL_ID = "files";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;

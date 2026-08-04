@@ -1,9 +1,10 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { FILES_PANEL_ID, registerChatDockHandle } from "./dock/chatDockHandle";
 import { openDiffFilePrimaryAction } from "./diffFileActions";
-import { selectThreadRightPanelState, useRightPanelStore } from "./rightPanelStore";
+import { selectThreadFileExplorerState, useFileExplorerStore } from "./fileExplorerStore";
 
 const THREAD_REF = scopeThreadRef(
   EnvironmentId.make("environment-local"),
@@ -12,11 +13,17 @@ const THREAD_REF = scopeThreadRef(
 
 describe("openDiffFilePrimaryAction", () => {
   beforeEach(() => {
-    useRightPanelStore.setState({ byThreadKey: {} });
+    useFileExplorerStore.setState({ byThreadKey: {} });
+  });
+  afterEach(() => {
+    registerChatDockHandle(null);
   });
 
-  it("opens diff files in the thread file viewer", () => {
+  it("opens diff files in the thread file viewer AND makes the Files dock panel visible", () => {
     const openInEditor = vi.fn();
+    const openPanel = vi.fn();
+    const togglePanel = vi.fn();
+    registerChatDockHandle({ openPanel, togglePanel });
 
     openDiffFilePrimaryAction({
       threadRef: THREAD_REF,
@@ -26,11 +33,12 @@ describe("openDiffFilePrimaryAction", () => {
     });
 
     expect(
-      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, THREAD_REF),
+      selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, THREAD_REF),
     ).toMatchObject({
-      isOpen: true,
-      activeSurfaceId: "file:apps/web/src/components/DiffPanel.tsx",
+      activePath: "apps/web/src/components/DiffPanel.tsx",
+      openPaths: ["apps/web/src/components/DiffPanel.tsx"],
     });
+    expect(openPanel).toHaveBeenCalledExactlyOnceWith(FILES_PANEL_ID);
     expect(openInEditor).not.toHaveBeenCalled();
   });
 
