@@ -22,6 +22,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { previewBridge } from "~/components/preview/previewBridge";
+
 import { acquireDesktopTab, type AcquiredDesktopTab } from "./desktopTabLifetime";
 import type { ThirdPartySourceKind } from "../thirdPartySourceBrowserStore";
 import { useThirdPartySourceBrowserStore } from "../thirdPartySourceBrowserStore";
@@ -138,6 +140,23 @@ export function ThirdPartySourceWebview(props: { readonly source: ThirdPartySour
       webview.removeEventListener("page-title-updated", reportNavigation);
     };
   }, [config, tabId, reportNavigation]);
+
+  // Matches `PreviewPanel.tsx`'s own runtime gate exactly, same signal
+  // (`previewBridge`, i.e. `window.desktopBridge?.preview`): the `<webview>`
+  // intrinsic only exists in Electron's renderer, so a plain web-client tab
+  // has no host to attach one to at all. Before this, a non-Electron runtime
+  // fell through to the `!config` branch below and rendered nothing — the
+  // exact "blank panel with no explanation" the Browser dock panel already
+  // avoids for the analogous case. This check comes first so the message is
+  // honest about *why* there's nothing to show, rather than reading as the
+  // same empty state a slow/failed config load produces.
+  if (previewBridge === null) {
+    return (
+      <div className="flex size-full items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+        Figma and Notion previews are only available in the DevGame desktop app.
+      </div>
+    );
+  }
 
   if (!config) return null;
 

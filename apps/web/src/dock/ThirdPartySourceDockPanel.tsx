@@ -49,6 +49,16 @@
  * origin-scoped in Electron). Deliberately kept SMALL per the ruling:
  * `will-navigate` visibility and an origin indicator in the UI are tracked
  * but explicitly NOT built in this slice.
+ *
+ * WEB-CLIENT DEGRADATION: the `<webview>` intrinsic only exists in
+ * Electron's renderer, so a plain web-client tab has nothing to attach one
+ * to — `ThirdPartySourceWebview.tsx` shows an honest "only available in the
+ * desktop app" message in that case (same `previewBridge` signal, same
+ * message text, as `PreviewPanel.tsx`'s equivalent gate for the Browser
+ * panel), rather than a blank content area. "Add to chat" and "Sign out"
+ * are disabled with the same reason here, at the panel level, since both
+ * would otherwise stay clickable and silently no-op via `previewBridge?.
+ * method()` — see `THIRD_PARTY_SOURCE_UNAVAILABLE_REASON` below.
  */
 import { useContext, useState } from "react";
 
@@ -76,6 +86,16 @@ const SOURCE_TAB_LABELS: Readonly<Record<ThirdPartySourceKind, string>> = {
   notion: "Notion",
 };
 const SOURCE_TAB_ORDER: ReadonlyArray<ThirdPartySourceKind> = ["figma", "notion"];
+
+// Same text, same signal (`previewBridge`) as `ThirdPartySourceWebview.tsx`'s
+// own runtime gate — repeated here (not exported/shared) matching
+// `BrowserDockPanel.tsx`'s/`PreviewPanel.tsx`'s precedent of each owning its
+// own copy of the equivalent message rather than a cross-file constant.
+// Content-area unavailability is `ThirdPartySourceWebview`'s job; this
+// constant is for the two action buttons here, which would otherwise stay
+// enabled and silently no-op (`previewBridge?.method()`) in a plain web tab.
+const THIRD_PARTY_SOURCE_UNAVAILABLE_REASON =
+  "Figma and Notion previews are only available in the DevGame desktop app.";
 
 function ThirdPartySourceTabStrip(props: {
   activeSource: ThirdPartySourceKind | null;
@@ -136,11 +156,13 @@ export default function ThirdPartySourceDockPanel(_props: PanelProps) {
   };
 
   const addToChatDisabledReason =
-    composerTarget === null
-      ? "Select a conversation to add this to."
-      : activeSource === null || activeTab === null
-        ? "Pick Figma or Notion above first."
-        : null;
+    previewBridge === null
+      ? THIRD_PARTY_SOURCE_UNAVAILABLE_REASON
+      : composerTarget === null
+        ? "Select a conversation to add this to."
+        : activeSource === null || activeTab === null
+          ? "Pick Figma or Notion above first."
+          : null;
 
   const onAddToChat = async () => {
     if (composerTarget === null || activeSource === null || activeTab === null) return;
@@ -210,16 +232,18 @@ export default function ThirdPartySourceDockPanel(_props: PanelProps) {
         <div className="flex shrink-0 items-center gap-0.5">
           <button
             type="button"
-            disabled={activeSource === null || signingOut}
+            disabled={previewBridge === null || activeSource === null || signingOut}
             title={
-              activeSource === null
-                ? "Pick Figma or Notion above first."
-                : `Sign out of ${SOURCE_TAB_LABELS[activeSource]}`
+              previewBridge === null
+                ? THIRD_PARTY_SOURCE_UNAVAILABLE_REASON
+                : activeSource === null
+                  ? "Pick Figma or Notion above first."
+                  : `Sign out of ${SOURCE_TAB_LABELS[activeSource]}`
             }
             onClick={() => void onSignOut()}
             className={cn(
               "shrink-0 rounded px-2 py-1 text-xs",
-              activeSource === null || signingOut
+              previewBridge === null || activeSource === null || signingOut
                 ? "cursor-not-allowed text-muted-foreground/50"
                 : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
             )}
