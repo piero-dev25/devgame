@@ -44,8 +44,29 @@ class_name EppClient
 ## (force_reconnect_now), once the user has actually fixed the problem.
 ## Do NOT re-flatten this back into a numeric threshold — that is the
 ## exact bug this replaced.
+##
+## COMMANDS (task #48, spec-editor-presence-commands.md): inbound frames are
+## now properly JSON-parsed and dispatched on `type`, replacing a PRIOR bug
+## where `_handle_inbound` substring-searched the raw text for `"pong"`.
+## That match was over the WHOLE frame, so once commands existed, any
+## command whose caller-supplied `action` or `params` happened to contain
+## the substring "pong" would have silently cleared `_awaiting_pong` and
+## defeated dead-socket detection — a live bug caught before it shipped,
+## fixed by parsing structurally rather than by refining the substring
+## check. `command` frames are parsed here (transport's job) but DISPATCHED
+## by plugin.gd via the `command_received` signal — this file has no
+## EditorInterface access and by design should not gain any; see
+## plugin.gd's module doc for why that split exists.
 
 signal state_changed(state: int, message: String)
+## Emitted when a well-formed `command` frame arrives — plugin.gd is the
+## sole listener and the only place with EditorInterface access to act on
+## it. Malformed frames (no `id`, so no id to correlate a reply against)
+## are dropped without emitting; a frame with an `id` but no recognised
+## `action` still emits, so the caller can honour the spec's
+## "unsupported_action must be answered, never dropped" rule via
+## send_command_result.
+signal command_received(id: String, action: String, params: Dictionary)
 
 enum State { DISCONNECTED, CONNECTING, CONNECTED, UNSUPPORTED }
 
@@ -59,8 +80,21 @@ const RECONNECT_BASE_SEC := 0.5
 const RECONNECT_MAX_SEC := 30.0
 const RECONNECT_JITTER_FRACTION := 0.2
 const CIRCUIT_BREAKER_LIMIT := 3
-const PING_INTERVAL_SEC := 20.0
-const PONG_TIMEOUT_SEC := 10.0
+## `var`, not `const`, so a test can shrink these to exercise the ping/pong
+## cycle in real seconds rather than real minutes — production callers
+## never set these, so the defaults below are the only values that matter
+## outside tests.
+var PING_INTERVAL_SEC := 20.0
+var PONG_TIMEOUT_SEC := 10.0
+
+## What this addon can actually honour once dispatched by plugin.gd — sent
+## verbatim in `hello.capabilities`. Godot has no scriptable frame-step API
+## (EditorInterface exposes play/stop but not a single-frame advance), so
+## "step" is deliberately absent; see spec-editor-presence-commands.md's
+## "a default that claims a capability is a lie whenever it's wrong" rule,
+## which applies just as much to what a REAL publisher advertises as it
+## does to the server's own default.
+const CAPABILITIES: Array[String] = ["play", "stop"]
 
 var editor_id := "godot"
 var editor_name := "Godot Editor"
@@ -137,6 +171,13 @@ func get_session_id() -> String:
 
 func get_seq() -> int:
 	return _seq
+
+## Test-observability hook: whether a ping is currently outstanding — see
+## the module doc's COMMANDS note for why this matters (proving the
+## pong-substring bug stays fixed needs to observe this directly, not
+## infer it from a slow real-time ping/pong cycle).
+func is_awaiting_pong() -> bool:
+	return _awaiting_pong
 
 ## Resets backoff and retries immediately — the toolbar indicator's
 ## click-to-retry gesture. The user just started the server; don't make
@@ -234,11 +275,61 @@ func _send_hello() -> void:
 		"editor": {"id": editor_id, "name": editor_name, "version": editor_version},
 		"session": {"id": _session_id},
 		"workspace": {"root": ProjectSettings.globalize_path("res://").trim_suffix("/")},
+		"capabilities": CAPABILITIES,
 	})
 
+## Replies to ONE command (spec-editor-presence-commands.md): the SAME
+## short, machine-readable shape whether the outcome came from actually
+## dispatching the command (plugin.gd) or from a rejection this file
+## itself might one day originate. Commands are never silently dropped —
+## an unrecognised `action` still gets a reply, with `error:
+## "unsupported_action"`, per the spec's explicit rule.
+func send_command_result(id: String, ok: bool, error: String = "") -> void:
+	var obj := {"v": 1, "type": "commandResult", "id": id, "ok": ok}
+	if not ok:
+		obj["error"] = error
+	_send_json(obj)
+
+## Parses every inbound frame as JSON and dispatches on its `type` field —
+## see the module doc's COMMANDS note for why this replaced a raw
+## substring search. Any frame that fails to parse, isn't a JSON object,
+## or has an unrecognised `type` is silently ignored, matching this
+## function's ORIGINAL behaviour for anything that wasn't `"pong"` (this
+## file has always ignored frame types it doesn't understand — that is not
+## new here).
 func _handle_inbound(text: String) -> void:
-	if text.find("\"pong\"") != -1:
-		_awaiting_pong = false
+	var json := JSON.new()
+	if json.parse(text) != OK:
+		return
+	var data = json.get_data()
+	if typeof(data) != TYPE_DICTIONARY:
+		return
+	var frame_type = data.get("type")
+	match frame_type:
+		"pong":
+			_awaiting_pong = false
+		"command":
+			_handle_command_frame(data)
+
+## `id` is REQUIRED to emit at all — with no id, there is nothing to
+## correlate a `commandResult` reply against, so there is nothing sensible
+## plugin.gd could do with the frame (the real server always includes one;
+## this is defensive, not an expected path). `action` missing or non-string
+## still emits (with an empty action), so the "never drop, always answer
+## unsupported_action" rule in send_command_result is exercised by the
+## SAME code path a genuinely-unrecognised action takes, not a special
+## case. `params` defaults to an empty Dictionary when absent or malformed
+## — Godot's play/stop dispatch does not currently read it, but a
+## malformed params must not crash the parse of an otherwise-valid frame.
+func _handle_command_frame(data: Dictionary) -> void:
+	var id = data.get("id")
+	if typeof(id) != TYPE_STRING or id == "":
+		return
+	var action = data.get("action")
+	var action_str: String = action if typeof(action) == TYPE_STRING else ""
+	var params = data.get("params")
+	var params_dict: Dictionary = params if typeof(params) == TYPE_DICTIONARY else {}
+	command_received.emit(id, action_str, params_dict)
 
 ## Circuit breaker note: GDScript has no exception handling, so this can
 ## only react to CHECKABLE failures (a non-OK return from send_text) — it
