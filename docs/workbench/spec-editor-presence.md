@@ -4,6 +4,20 @@ Design from a mapped + adversarially-reviewed pass. Neither critic refuted it.
 Line citations in the source design drifted by 1-6 lines throughout; the
 substance was verified correct but re-check any exact line before relying on it.
 
+> **STATUS (2026-08-03): Unity's `com.ironmind.editor-presence` package
+> described throughout this document — including the whole "thin vertical"
+> walkthrough below — was deleted.** Unity ships an official editor-automation
+> package, `com.unity.pipeline`, plus a `unity` CLI, which the owner's real
+> project already had installed instead of ours; ours had also never been
+> compiled. Unity's Play/Stop/Pause/status/selection now go through Pipeline,
+> not this protocol. See `unity/README.md` for the current state and why, and
+> `docs/workbench/spec-unity-play-stop.md`'s own status note for the Play/Stop
+> pivot specifically. **Godot (`godot/addons/editor_presence/`) and Unreal
+> (`unreal/EditorPresence/`) are unaffected** — this protocol, the server
+> route, and the web subscriber below remain exactly as designed and are what
+> those two engines use; only Unity's publisher is gone. The rest of this
+> document is left intact as the historical design record.
+
 ## Recommendation
 
 Build a small, editor-agnostic **Editor Presence Protocol (EPP)** and ship the first slice as a thin vertical: a Unity Editor package (our own UPM package) pushes selection state over a plain-JSON WebSocket to a **new raw WS route on the local T3 server** (our own file, one line of registration), and a **new web-client module** (our own file) renders it as an ambient chip above the composer.

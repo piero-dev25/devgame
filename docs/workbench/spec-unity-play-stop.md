@@ -3,9 +3,25 @@
 Frozen design. If the code disagrees with this spec, correct the spec rather
 than diverging from it silently.
 
-Follows `spec-editor-presence-commands.md`, which defines the command frame,
-the `presence:command` scope, and the capability table. Read that first; this
-document only covers what is Unity-specific.
+> **STATUS (2026-08-03): SUPERSEDED.** Everything below describes driving
+> Unity Play/Stop through our own `com.ironmind.editor-presence` C# plugin
+> over the Editor Presence WebSocket — the "two paths" split, the domain-
+> reload hazard and its "acceptance is an edge, play state is a level"
+> ruling, the capability table entry. That plugin was deleted: it was never
+> installed in the owner's real project (which already had Unity's own
+> `com.unity.pipeline` package) and never compiled. Unity Play/Stop now goes
+> through `apps/server/src/unity/UnityPipelineClient.ts`, which shells out to
+> the official `unity` CLI (`editor_play` / `editor_stop` / `editor_pause` /
+> `editor_status`) — no WebSocket, no domain-reload-vs-socket hazard (Pipeline's
+> local server briefly drops during the reload too, but self-heals; see that
+> module's own doc for the measured behavior). Cold start is
+> `apps/server/src/editorPresence/UnityColdStart.ts`'s `unity open <path>`,
+> not the `-executeMethod` entry point this document describes. `step` is
+> NOT available on the Pipeline path (no `editor_step` command) — Unity's
+> capability there is `play`/`stop`/`pause` only, not the four this document
+> lists. This document is left intact below as the historical design record
+> for why the original C# approach was built and what it proved; see
+> `unity/README.md` for the current state.
 
 ## Verified environment
 
