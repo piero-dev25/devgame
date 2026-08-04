@@ -38,15 +38,7 @@ import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import {
-  AppWindow,
-  FileDiff,
-  Files,
-  Globe2,
-  MessageCircle,
-  PanelLeft,
-  TerminalSquare,
-} from "lucide-react";
+import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -62,7 +54,9 @@ import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import FilesDockPanel from "./FilesDockPanel";
 import TerminalDockPanel from "./TerminalDockPanel";
-import ThirdPartySourceDockPanel from "./ThirdPartySourceDockPanel";
+// `AppWindow` (icon) and `ThirdPartySourceDockPanel` (component) imports
+// removed with the registration below — see that comment block (`#78`/
+// `#79` HOLD). Restore both imports when un-holding.
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -324,53 +318,47 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * Figma/Notion, registered (task #55's Section C precondition) —
- * `ThirdPartySourceDockPanel.tsx`'s own doc comment carries the full
- * feature-shape reasoning; this is the "make it reachable" half team-lead
- * asked for after the QA plan named registration as the gate.
+ * Figma/Notion — registration HELD, per an explicit directive from the
+ * independent security review, NOT a design change. Do not uncomment the
+ * `.register()` call below without confirming both close:
  *
- * DELIBERATELY ABSENT FROM `buildChatDockPreset()` BELOW — not an oversight,
- * a decision made with evidence, not assumption. This panel models
- * Figma-in-Google-Meet: something a user SUMMONS while working, not a
- * fifth column permanently occupying screen space the way Diff/Files/
- * Terminal/Browser earned by being about THIS thread. Verified the "how
- * would someone open it" question before committing to this rather than
- * assuming an omission is safe: `tabContextMenu.ts`'s "Add tab" builds its
- * menu from `registry.list().filter(... !api.getPanel(id))` — EVERY
- * registered panel not currently open, not just ones the active preset
- * happened to include. So right-clicking any open tab and choosing
- * "Add tab: Figma / Notion" already works today, with no new UI needed —
- * the same sole discovery path this dock uses for reopening anything else
- * that isn't pinned open (see this file's own preset-builder comment on
- * why there's no "+"/catalog UI yet).
+ * - `#78` (SHIP BLOCKER, PROVEN by execution against real Electron):
+ *   `DesktopWindow.ts`'s will-attach-webview handler decides everything
+ *   from `params.partition`, but Electron builds the guest from
+ *   `webPreferences.partition` — a different field a renderer-supplied
+ *   `webpreferences=` attribute can override with no key allowlist. A
+ *   crafted webview attribute set gets classified as the harmless preview
+ *   path while Electron actually attaches it with an attacker `preload`
+ *   at `contextIsolation:false` — full `ipcRenderer` access inside the
+ *   REAL logged-in Figma/Notion session (cookies, tokens, live DOM).
+ * - `#79` (largest blast radius in the review, verified end-to-end):
+ *   `thirdPartySourceTabId()` is a fixed, guessable string
+ *   ("third-party-browser:figma"/"…:notion"), and the third-party guest
+ *   registers through the ordinary preview `tabsRef` path with no
+ *   partition check. Every agent-facing MCP automation tool
+ *   (preview_evaluate/click/type/snapshot) takes an arbitrary tabId — so
+ *   the moment this panel is reachable, a PROMPT-INJECTED AGENT can
+ *   already run arbitrary JS inside the user's live authenticated
+ *   Figma/Notion session, no exploit of `#78` required. This blast radius
+ *   was live the instant registration landed, independent of the webview
+ *   bug above.
  *
- * `singleton: true`: `thirdPartySourceBrowserStore.ts` is deliberately ONE
- * global Figma tab and ONE global Notion tab for the whole app (its own
- * doc comment explains why — not per-thread), so a second panel instance
- * would just be two views onto the identical store, never a case with any
- * use.
- *
- * `closeable: true` (default, no override): same reasoning as
- * Diff/Files/Terminal/Browser — nothing depends on this panel staying
- * mounted.
- *
- * SECURITY STATUS AT REGISTRATION TIME (`#75`) — read before assuming this
- * is shippable: F1/F2/F3/F5/F7 are fixed (`f425a8ebd`); F4 (no sign-out
- * path) is still being built; an INDEPENDENT REVIEW of the fix commit is
- * still running as of this registration and may land further findings.
- * Registering the panel makes the code PATH reachable for that review and
- * for the QA plan's Section C to actually run against — it does not by
- * itself mean the feature is cleared to ship. Do not remove this note
- * without confirming the review has closed.
+ * The panel, its component (`ThirdPartySourceDockPanel.tsx`), its tab icon
+ * entry (`reactTabRenderer.tsx`), and its structural test
+ * (`ChatDock.test.ts`) are all left in place, finished and ready — holding
+ * registration is the ENTIRE mitigation needed while `#78`/`#79` are
+ * fixed, since none of the rest of this feature is reachable without it.
+ * See `ChatDock.test.ts` for the test that currently asserts the hold
+ * itself, not the registration.
  */
-chatDockPanelRegistry.register({
-  id: THIRD_PARTY_SOURCE_PANEL_ID,
-  title: "Figma / Notion",
-  icon: AppWindow,
-  component: ThirdPartySourceDockPanel,
-  defaultLocation: "right",
-  singleton: true,
-});
+// chatDockPanelRegistry.register({
+//   id: THIRD_PARTY_SOURCE_PANEL_ID,
+//   title: "Figma / Notion",
+//   icon: AppWindow,
+//   component: ThirdPartySourceDockPanel,
+//   defaultLocation: "right",
+//   singleton: true,
+// });
 
 /**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
