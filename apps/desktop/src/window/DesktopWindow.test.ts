@@ -62,6 +62,13 @@ const environmentInput = {
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
+// G3/#80: a stable object identity for the third-party session, so a fake
+// guest webContents's `.session` can be compared against what
+// `did-attach-webview`'s handler captured via `getThirdPartyBrowserSession`
+// — a fresh `{}` per call (as `getBrowserSession`'s mock already does
+// elsewhere) would never `===`-match anything.
+const FAKE_THIRD_PARTY_SESSION = {} as Electron.Session;
+
 function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContentsListeners = new Map<string, (...args: readonly unknown[]) => void>();
@@ -190,6 +197,7 @@ function makeTestLayer(input: {
     bounds: DesktopAppSettings.DesktopWindowBounds,
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
+  readonly thirdPartySession?: Electron.Session;
 }) {
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
@@ -270,6 +278,8 @@ function makeTestLayer(input: {
           getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
           isThirdPartyBrowserPartition: (partition) =>
             partition.startsWith("persist:devgame-thirdparty-"),
+          getThirdPartyBrowserSession: () =>
+            Effect.succeed(input.thirdPartySession ?? FAKE_THIRD_PARTY_SESSION),
         }),
       ),
     ),
@@ -366,6 +376,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
             isThirdPartyBrowserPartition: (partition) =>
               partition.startsWith("persist:devgame-thirdparty-"),
+            getThirdPartyBrowserSession: () => Effect.succeed(FAKE_THIRD_PARTY_SESSION),
           }),
         ),
       ),
@@ -999,6 +1010,224 @@ describe("DesktopWindow", () => {
 
         assert.isTrue(prevented);
         assert.deepEqual(openedExternalUrls, ["https://accounts.microsoft.com/oauth"]);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  // G3/#80 (independent security review, 2026-08-04): the main window's own
+  // `will-navigate`/`context-menu` listeners (tested above) are scoped to
+  // `window.webContents` and Electron never applies them to a `<webview>`
+  // guest's SEPARATE webContents. Two consequences, closed together via
+  // `did-attach-webview` since both need the same hook:
+  //
+  // G3: with no guard, any page inside the third-party panel could navigate
+  // the WHOLE panel (still branded "Figma"/"Notion") to an arbitrary https
+  // URL — a credible "your session expired, sign in again" phishing
+  // surface on the panel the user trusts. #80: right-click inside the
+  // panel showed no menu at all, since nothing built one for guest content.
+  //
+  // POLICY (decided here, not copied from the main window's fixed
+  // `applicationUrl` anchor, which doesn't fit a guest that legitimately
+  // navigates within its own origin): allow navigation that stays on the
+  // guest's CURRENT origin, and DEFLECT anything cross-origin to the
+  // user's real external browser (same `ElectronShell.openExternal`
+  // mechanism proven above for the main window) rather than silently
+  // blocking it. SSO/IdP redirects (Google, Microsoft, an enterprise's own
+  // SAML domain) are real, necessarily cross-origin, and not enumerable
+  // ahead of time — neither this fix nor the independent review that found
+  // G3 could verify Figma/Notion's SSO flow against a live account. A
+  // strict host allowlist would plausibly BREAK first login for exactly
+  // the managed-workspace users this matters most for; deflecting to a
+  // real browser tab keeps sign-in possible at the cost of a clunkier
+  // hop (the user finishes there and returns manually) — a real,
+  // acknowledged tradeoff, not a free one.
+  //
+  // SCOPED TO THIRD-PARTY ONLY: preview's guest loads the user's OWN,
+  // fully-trusted dev server — forcing an origin policy onto it would
+  // change existing, unrelated, out-of-scope behavior no one asked to
+  // change. Identity is checked via `webContents.session` (Electron's
+  // `WebContents` doesn't expose its partition string directly, and
+  // `getLastWebPreferences()` — what the reviewer's own probe used — isn't
+  // in this Electron version's type definitions), compared against the
+  // SAME session object `getThirdPartyBrowserSession()` already resolves
+  // and memoizes (BrowserSession.ts), warmed here the same way
+  // `createWindow` already eagerly warms the preview session.
+  it.effect(
+    "wires a guest will-navigate guard on the third-party webview: same-origin allowed",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "https://www.figma.com/files/recents",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willNavigate = guestListeners.get("will-navigate");
+          if (!willNavigate) {
+            return yield* Effect.die("guest will-navigate listener was not registered");
+          }
+          let prevented = false;
+          willNavigate(
+            { preventDefault: () => (prevented = true) },
+            "https://www.figma.com/design/abc/My-File",
+          );
+
+          assert.isFalse(prevented);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "wires a guest will-navigate guard on the third-party webview: cross-origin denied and deflected externally",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "https://www.figma.com/files/recents",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willNavigate = guestListeners.get("will-navigate");
+          if (!willNavigate) {
+            return yield* Effect.die("guest will-navigate listener was not registered");
+          }
+          let prevented = false;
+          // A look-alike phishing domain — NOT figma.com, NOT an obviously
+          // suspicious scheme, exactly the shape G3 describes.
+          willNavigate(
+            { preventDefault: () => (prevented = true) },
+            "https://figma-login-verify.example.com/session-expired",
+          );
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.isTrue(prevented);
+          assert.deepEqual(openedExternalUrls, [
+            "https://figma-login-verify.example.com/session-expired",
+          ]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "does NOT wire the guest will-navigate guard on a preview webview (scoped to third-party only)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          // A PREVIEW guest — a DIFFERENT session object, not the third-party
+          // one `did-attach-webview`'s handler was warmed with.
+          const guestWebContents = {
+            session: {} as Electron.Session,
+            getURL: () => "http://127.0.0.1:5733/",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          assert.isFalse(guestListeners.has("will-navigate"));
+          assert.isFalse(guestListeners.has("context-menu"));
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect("wires a guest context-menu guard on the third-party webview (#80)", () =>
+    Effect.gen(function* () {
+      const fakeWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+        const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+        if (!didAttachWebview) {
+          return yield* Effect.die("did-attach-webview listener was not registered");
+        }
+        const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+        const guestWebContents = {
+          session: FAKE_THIRD_PARTY_SESSION,
+          getURL: () => "https://www.figma.com/files/recents",
+          on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+            guestListeners.set(eventName, listener);
+          },
+        };
+        didAttachWebview({}, guestWebContents);
+
+        const contextMenu = guestListeners.get("context-menu");
+        if (!contextMenu) {
+          return yield* Effect.die("guest context-menu listener was not registered");
+        }
+        let prevented = false;
+        contextMenu(
+          { preventDefault: () => (prevented = true) },
+          {
+            editFlags: { canCut: false, canCopy: true, canPaste: false, canSelectAll: true },
+          },
+        );
+
+        // Denying default + popping a template is the same observable shape
+        // the main window's own context-menu test would use; `electronMenu
+        // .popupTemplate` here is a no-op mock (see `electronMenuLayer`), so
+        // the reachable assertion is that a menu was even attempted —
+        // proven by `preventDefault` firing, which only happens once this
+        // handler exists at all (before this fix, nothing was registered
+        // and this whole test would have died at the null-check above).
+        assert.isTrue(prevented);
       }).pipe(Effect.provide(layer));
     }),
   );

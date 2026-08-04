@@ -434,6 +434,12 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    // G3/#80: warmed eagerly, mirroring `createWindow`'s existing
+    // `previewManager.getBrowserSession()` warm-up a few lines up — needed
+    // so `did-attach-webview` below can recognize a third-party guest by
+    // session identity the moment one attaches, not just after some other
+    // code path happens to have resolved it first.
+    const thirdPartySession = yield* previewManager.getThirdPartyBrowserSession();
     // ALLOWLIST, not a style-setter: any `<webview>` whose partition matches
     // neither predicate below gets `event.preventDefault()` and never
     // attaches at all. Two NAMED predicates, not one loosened check —
@@ -613,6 +619,87 @@ export const make = Effect.gen(function* () {
       if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
         void runPromise(electronShell.openExternal(url));
       }
+    });
+
+    // G3/#80 (independent security review, 2026-08-04): the two listeners
+    // above are scoped to `window.webContents` — the main window's OWN
+    // content — and Electron never applies them to a `<webview>` guest's
+    // separate WebContents. Two consequences, closed together here since
+    // both need the same hook:
+    //
+    // G3: with no guard at all, any page inside the third-party panel
+    // could navigate the WHOLE panel (still branded "Figma"/"Notion") to
+    // an arbitrary https URL — F5's window-open handler (Manager.ts)
+    // already funnels a denied `window.open()` into a same-webview
+    // `loadURL`, so this was never just a popup-only risk. A credible
+    // "your session expired, sign in again" phishing surface on the panel
+    // the user trusts, sitting on the partition holding the real cookies.
+    //
+    // #80: right-clicking inside the panel showed no menu at all — nothing
+    // built one for guest content either.
+    //
+    // POLICY (decided here, not copied from the main window's `will-navigate`
+    // above, whose fixed `applicationUrl` anchor doesn't fit a guest that
+    // legitimately navigates within its own origin — Figma/Notion are real
+    // SPAs): allow navigation that stays on the guest's CURRENT origin, and
+    // DEFLECT anything cross-origin to the user's real external browser
+    // (the SAME `ElectronShell.openExternal` mechanism above), rather than
+    // silently blocking it. SSO/IdP redirects (Google, Microsoft, an
+    // enterprise's own SAML domain) are real, necessarily cross-origin, and
+    // NOT enumerable ahead of time — neither this fix nor the independent
+    // review that found G3 could verify Figma/Notion's SSO flow against a
+    // live account. A strict host allowlist would plausibly BREAK first
+    // login for exactly the managed-workspace users this matters most for;
+    // a silently-broken sign-in is a worse failure than a phishing risk
+    // that's already only a UI-spoofing vector (a fake page here can't
+    // read the real origin's cookies, only social-engineer a re-typed
+    // password). Deflecting to a real browser tab keeps sign-in possible,
+    // at the cost of a clunkier hop (finish there, return manually) — a
+    // real, acknowledged tradeoff, not a free one.
+    //
+    // SCOPED TO THIRD-PARTY ONLY: preview's guest loads the user's OWN,
+    // fully-trusted dev server — forcing this origin policy onto it would
+    // change existing, unrelated, out-of-scope behavior nobody asked to
+    // change. `WebContents` doesn't expose its partition string directly
+    // (and `getLastWebPreferences()` — what the reviewer's own probe used
+    // — isn't in this Electron version's type definitions), so identity is
+    // checked by session object equality against `thirdPartySession`
+    // above, the SAME memoized session `getThirdPartyBrowserSession`
+    // resolves everywhere else in this codebase.
+    window.webContents.on("did-attach-webview", (_event, guestWebContents) => {
+      if (guestWebContents.session !== thirdPartySession) return;
+
+      guestWebContents.on("will-navigate", (event, url) => {
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // Minimal Cut/Copy/Paste/Select All, matching the main window's own
+      // template above. Deliberately NOT the fuller "Copy Link"/"Copy
+      // Image" affordances that template also has: nothing here closes G4
+      // (the automation-tabId issue), so adding more surface to guest
+      // content ahead of that landing would only grow the problem, not
+      // shrink it.
+      guestWebContents.on("context-menu", (event, params) => {
+        event.preventDefault();
+        const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+          { role: "cut", enabled: params.editFlags.canCut },
+          { role: "copy", enabled: params.editFlags.canCopy },
+          { role: "paste", enabled: params.editFlags.canPaste },
+          { role: "selectAll", enabled: params.editFlags.canSelectAll },
+        ];
+        void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
+      });
     });
 
     window.on("page-title-updated", (event) => {
