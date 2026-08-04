@@ -63,6 +63,26 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  // #89/#92 (independent audit, mutation-tested, 2026-08-04): `setUserAgent`
+  // is a `vi.fn()` in every fake session this file already builds, but
+  // nothing asserted what it was called WITH — a mutation deleting the
+  // scrub entirely, or scrubbing only one of the two tokens, survived. A
+  // regression here silently tells whatever a guest loads (in production:
+  // figma.com/notion.so, untrusted third-party content) that it's running
+  // inside Electron and this app specifically.
+  it.effect("scrubs Electron/x.y and t3code/x.y from the guest's User-Agent before creating the session", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+
+      const fakeSession = sessions.get(partition);
+      // The mock's own getUserAgent returns "Mozilla/5.0 Electron/41.5.0
+      // t3code/0.0.27" (see beforeEach above) -> scrubbed to "Mozilla/5.0".
+      assert.strictEqual(fakeSession?.setUserAgent.mock.calls[0]?.[0], "Mozilla/5.0");
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("grants clipboard-sanitized-write through both the request and check handlers", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
