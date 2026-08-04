@@ -31,6 +31,15 @@ const SAFE_EXTERNAL_PROTOCOLS = new Set(["http:", "https:"]);
 // Manager.ts's popup-handler deflect count against the SAME budget for the
 // same guest — a page cannot reset its allowance by switching which
 // navigation mechanism it spams through.
+//
+// The invariant that keeps a legitimate multi-hop SSO chain from tripping
+// this: only a CROSS-ORIGIN hop that actually gets deflected calls this at
+// all — a same-origin hop returns before ever reaching it, so an
+// all-same-origin redirect chain can never consume budget. And
+// `event.preventDefault()` on the first cross-origin hop of a chain cancels
+// that WHOLE in-flight navigation, so later hops in the same load never
+// fire — a chain costs at most one deflection structurally, not "one per
+// hop, which happens not to accumulate."
 const EXTERNAL_DEFLECT_COOLDOWN_MS = 3_000;
 const lastExternalDeflectAtByWebContentsId = new Map<number, number>();
 

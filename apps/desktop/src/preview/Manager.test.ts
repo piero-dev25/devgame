@@ -2164,13 +2164,21 @@ describe("PreviewManager", () => {
   );
 });
 
-// G4 (independent security review, 2026-08-04): every operation reachable
-// through the MCP preview toolkit took an arbitrary caller-supplied tabId
+// G4 (independent security review, 2026-08-04). CLAIM CORRECTED
+// 2026-08-04: originally reported as a live agent-reachable exploit; an
+// independent reviewer could not reproduce it — the MCP preview toolkit
+// wraps an agent's tabId as `previewRuntimeTabId = JSON.stringify([...])`
+// before it reaches the desktop, while the panel registers under the raw
+// `third-party-browser:<source>` string these tests call directly, so
+// `automationEvaluate("third-party-browser:figma", …)` is not producible
+// through MCP today — these tests exercise a scenario the product cannot
+// currently produce. The guard stays: every operation reachable through
+// the MCP preview toolkit still took an arbitrary caller-supplied tabId
 // with no check that it wasn't the third-party (Figma/Notion) webview's
-// FIXED, guessable tabId — letting a prompt-injected agent run arbitrary
-// JavaScript, click, type, navigate, or record inside the user's
-// authenticated third-party session. These assert the EFFECT (the call is
-// rejected) rather than a precondition (some field says "third-party") —
+// FIXED tabId at this layer, and nothing here depends on today's specific
+// wrapping format staying that way — this is defense-in-depth, not proof
+// of a live exploit. These assert the EFFECT (the call is rejected)
+// rather than a precondition (some field says "third-party") —
 // see assert-effect-not-precondition in the house doctrine.
 // G2 (independent security review, 2026-08-04): the deny-and-validate
 // window-open handler used to exist ONLY once `registerWebview` ran, a

@@ -799,16 +799,28 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     return wc;
   });
 
-  // G4 (independent security review, 2026-08-04): every operation an agent
-  // can reach through the MCP preview toolkit — the 14 members of
-  // PREVIEW_AUTOMATION_OPERATIONS in @t3tools/contracts — took an arbitrary
-  // caller-supplied tabId with no ownership or partition check. The
-  // third-party (Figma/Notion) webview registers under a FIXED, guessable
-  // tabId (`thirdPartySourceTabId()`, `apps/web/src/browser/
-  // ThirdPartySourceWebview.tsx`), so a prompt-injected agent could target it
-  // by name and run arbitrary JavaScript inside the user's authenticated
-  // session. Checked by SESSION IDENTITY, not by the tabId string or a
-  // `startsWith` prefix match on it — the tabId is a label an agent could in
+  // G4 (independent security review, 2026-08-04). CLAIM CORRECTED
+  // 2026-08-04: this was originally reported as a live, agent-reachable
+  // exploit — a prompt-injected agent targeting the third-party (Figma/
+  // Notion) webview by its fixed, guessable tabId (`thirdPartySourceTabId()`,
+  // `apps/web/src/browser/ThirdPartySourceWebview.tsx`) and running
+  // arbitrary JavaScript inside the user's authenticated session. An
+  // independent reviewer could not reproduce that: every automation
+  // dispatch wraps the agent's tabId as `previewRuntimeTabId =
+  // JSON.stringify([...])` before it reaches the desktop, while the panel
+  // registers under the raw `third-party-browser:<source>` string —
+  // disjoint namespaces, so `automationEvaluate("third-party-browser:figma",
+  // …)` is not producible through the MCP preview toolkit today.
+  //
+  // The guard below is KEPT regardless: every operation an agent can reach
+  // through the MCP preview toolkit — the 14 members of
+  // PREVIEW_AUTOMATION_OPERATIONS in @t3tools/contracts — still took an
+  // arbitrary caller-supplied tabId with no ownership or partition check
+  // at this layer, and nothing here depends on today's specific wrapping
+  // format staying that way. This is defense-in-depth against any future
+  // or alternate caller that passes a raw tabId, not a fix for a proven
+  // live exploit. Checked by SESSION IDENTITY, not by the tabId string or a
+  // `startsWith` prefix match on it — the tabId is a label a caller could in
   // principle collide with by chance for a legitimate tab; the webContents'
   // actual `session` is what carries the third-party cookies and cannot be
   // spoofed by naming a tab similarly. `getThirdPartyBrowserSession()`
