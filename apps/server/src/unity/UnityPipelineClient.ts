@@ -5,13 +5,15 @@
  * docs/workbench/spec-unity-play-stop.md and its owner-directed pivot:
  * `com.unity.pipeline` is already installed in the owner's real project
  * (`~/Projects/Deepmind/Packages/manifest.json`), our own
- * `com.ironmind.editor-presence` package is not, and the `unity` CLI proves
- * a working play/stop round trip against a live Editor RIGHT NOW — so it is
- * the path that can produce a working Play button tonight, not a socket
- * protocol nothing has installed yet. Editor Presence's C# plugin
- * (`unity/com.ironmind.editor-presence/`) is not deleted — it stays the
- * answer for an Editor that can't reach this server directly (behind NAT,
- * remote box) — but it is not this module's concern.
+ * `com.ironmind.editor-presence` package was not, and the `unity` CLI
+ * proves a working play/stop round trip against a live Editor RIGHT NOW —
+ * so it is the path that can produce a working Play button tonight, not a
+ * socket protocol nothing had installed. `com.ironmind.editor-presence` has
+ * since been DELETED entirely ("Delete our Unity plugin — Unity is served
+ * by com.unity.pipeline") — never installed, never compiled, and made
+ * redundant by Pipeline; see `docs/workbench/unity-integration-architecture.md`.
+ * Unity is now the one engine of the three (Godot, Unreal, Unity) with no
+ * Editor Presence publisher at all.
  *
  * VERIFIED LIVE against a real Unity 6000.3.14f1 Editor on a disposable
  * project under `$CLAUDE_JOB_DIR/tmp/unity-cli-test/scratch-project`
@@ -38,11 +40,12 @@
  * SCOPE, deliberately narrow: play / stop / pause / status / CLI-presence
  * only. No `eval`/`eval_file` (arbitrary C# execution, not bounded by
  * `set_authoring_root` — explicitly out per the owner's ruling). No
- * `editor_step` — Pipeline has no frame-step command at all; step remains
- * Unity-only through the (separate, not-this-module) Editor Presence C#
- * plugin. No generic "run any Pipeline command" passthrough — that would
- * be exactly the "general Unity command abstraction" scope creep this task
- * was told to avoid.
+ * `editor_step` — Pipeline has no frame-step command at all, and (now that
+ * `com.ironmind.editor-presence` is deleted) Unity has no scriptable
+ * frame-step path through this codebase anymore, unlike the frozen spec's
+ * original assumption. No generic "run any Pipeline command" passthrough —
+ * that would be exactly the "general Unity command abstraction" scope
+ * creep this task was told to avoid.
  */
 import { isCommandAvailable } from "@t3tools/shared/shell";
 import * as Context from "effect/Context";

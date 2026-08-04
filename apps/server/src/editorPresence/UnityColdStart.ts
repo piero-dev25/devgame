@@ -22,18 +22,19 @@
  * `UnityPipelineClient.status` afterward for that, per that module's own
  * "No Pipeline instance found for project" -> `notReady` handling). This
  * REPLACES the original design of invoking the raw Unity Editor binary
- * directly with `-projectPath <path> -executeMethod <Class.Method>`: no
- * caller yet exists for a `-projectPath` launch (see the SCOPE note below),
- * and the CLI's `open` subcommand does everything that mechanism needed
- * without depending on our own `com.ironmind.editor-presence` plugin being
- * installed in the target project at all — which, per the owner's
- * redirect, it currently is NOT in the one project that matters tonight
- * (`~/Projects/Deepmind`). The old `-executeMethod` entry point
- * (`unity/com.ironmind.editor-presence/Editor/EditorPresenceColdStartEntryPoint.cs`,
- * `EnterPlaymodeOnLaunch`) is not deleted — it remains the answer for the
- * separate WebSocket-based Editor Presence path this module does not cover
- * (an Editor that cannot reach this server directly) — but it is not what
- * `buildUnityColdStartArgs` below builds.
+ * directly with `-projectPath <path> -executeMethod <Class.Method>`, whose
+ * target — `com.ironmind.editor-presence`'s
+ * `EditorPresenceColdStartEntryPoint.EnterPlaymodeOnLaunch` — no longer
+ * exists: that whole package was DELETED (see "Delete our Unity plugin —
+ * Unity is served by com.unity.pipeline"). It was never installed in the
+ * one project that matters (`~/Projects/Deepmind` carries
+ * `com.unity.pipeline`, not ours) and never compiled, and Pipeline already
+ * covers what it existed for. Unity is now the one engine of the three
+ * (Godot, Unreal, Unity) with NO Editor Presence publisher — the WebSocket
+ * path this comment previously described as "kept for NAT/remote" does not
+ * exist for Unity anymore either. `docs/workbench/unity-integration-architecture.md`
+ * records the study; task #68 tracks the one open gap that deletion left
+ * (selection chips), which is not this module's concern.
  *
  * The cold path is launch-time ONLY — per the spec's own warning, it cannot
  * drive an Editor that is already running (the lockfile rejects the second
