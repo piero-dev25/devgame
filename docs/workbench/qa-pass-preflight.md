@@ -268,6 +268,18 @@ The third row matters. "It worked the second time" is not a pass — with no
 restart to explain it, that is an intermittent defect being laundered into a
 green. Note it as intermittent rather than dropping it.
 
+### Test-suite environment noise: `PortScanner.test.ts`
+
+Same discipline as the WS-banner table above, different symptom: a red
+`apps/server` test suite during this pass's own verification sweep, not the
+live app. Full investigation and the (unproven) alternative candidate in
+`docs/workbench/research-flaky-server-tests.md` (task #59) — this is the one
+row from that document worth having at hand during the pass itself.
+
+| Check                                     | How                                                                                                                                                                              | If this is the cause                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/server/src/preview/PortScanner.test.ts` fails | Check whether something is actually listening on one of `PortScanner.COMMON_DEV_PORTS` (3000, 3001, 3333, 4173, 4200, 4321, 5000, 5173, 5174, 5175, 5500, 8000, 8080, 8081, 8888, 9000) on this machine: `lsof -iTCP -sTCP:LISTEN -P -n \| grep -E ':(3000\|5173\|8080\|...)\b'` | Not necessarily a defect. This is the one file in the whole suite that binds a real, fixed, well-known port instead of an OS-assigned one, and two of its own tests independently close-then-reopen the same port back to back. A dev server the owner (or another lane) has running on one of these ports, or the timing between the file's own two tests, can trip it with nothing wrong in the product. Re-run the file alone; if it passes clean once nothing else is bound to that port, treat the original failure as environment noise, not a finding. |
+
 ## 5. Existing state — reuse it, don't manufacture over it
 
 The smoke pass (2026-08-04) found real, already-existing threads in this
