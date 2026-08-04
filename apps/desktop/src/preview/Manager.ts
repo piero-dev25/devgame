@@ -56,9 +56,7 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
-import { parseSafeExternalUrl, shouldAllowExternalDeflect } from "../electron/ElectronShell.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
-import { isSameOriginRendererNavigation } from "../window/DesktopWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -466,131 +464,40 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
 
-  // G2 (independent security review, 2026-08-04): the validated
-  // deny-and-navigate window-open handler below (`install`, inside
-  // `attachListeners`) only exists once `registerWebview` runs — a
-  // renderer round trip after the guest's `did-attach`/`dom-ready` fires,
-  // with its own failure swallowed (`ThirdPartySourceWebview.tsx`'s
-  // `register` catch block: "did-attach/dom-ready will retry"). A guest
-  // page that calls `window.open` before that round trip completes never
-  // reaches that handler at all — it falls through to Electron's default
-  // popup behavior: a REAL, unrestricted `BrowserWindow` at an
-  // attacker-chosen URL, outside every navigation check in this file.
-  // Proven with a probe (`case-G.html`, reproducing the exact React
-  // element-then-ref-callback ordering `ThirdPartySourceWebview.tsx`
-  // uses): without a handler installed by this point, the window is
-  // created and settles at the attacker URL; with one installed here, no
-  // window is created at all and the guest navigates in place instead.
+  // G2/H1/F-3 (independent security review, 2026-08-04) built a
+  // session-identity-scoped policy here — same-origin popups load in the
+  // guest, cross-origin ones deny-and-deflect to the real external browser,
+  // rate limited — for the third-party (Figma/Notion) panel specifically.
+  // FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this handler collapses
+  // to the ORIGINAL, unconditional `loadInPanel` behavior below, which is
+  // exactly what preview has always gotten from it (the fix's own carve-out
+  // comment said so explicitly: the mechanism applies identically to a
+  // preview guest, the third-party scoping was a scope decision, not a
+  // claim the mechanism doesn't reach preview).
   //
-  // `web-contents-created` fires synchronously in the MAIN process the
-  // instant Electron builds a guest's WebContents — before the renderer
-  // could possibly have run any JS in response, and independent of
-  // whether `registerWebview` ever arrives. Every `<webview>` in this app
-  // belongs to this Manager (see the module doc above), so `getType() ===
-  // "webview"` needs no further scoping. `attachListeners`' own handler
-  // still runs too, once/if the tab registers — Electron keeps only the
-  // most recently set handler per WebContents, and this one is validated
-  // identically, so the later call is a harmless no-op re-registration,
-  // not a second navigation.
-  // H1 (independent security review, 2026-08-04, merge-gate — SHIP
-  // BLOCKER): both window-open handlers below deny the popup and fall
-  // back to `wc.loadURL(url)` on the SAME guest WebContents — but Electron
-  // never fires `will-navigate` for a main-process `loadURL` call, so
-  // DesktopWindow.ts's G3 guest guard (which listens for exactly that
-  // event) never sees this path at all. Proven by execution: a
-  // third-party guest calling `window.open(crossOriginUrl)` repainted the
-  // whole panel to the attacker origin, on the third-party session, with
-  // no `will-navigate` ever firing — and a cross-origin IFRAME inside the
-  // guest can trigger the identical `window.open` call with no user
-  // gesture, so this doesn't require figma.com/notion.so itself to be
-  // hostile.
+  // NOT reduced to nothing: `window.open` still needs SOME handler, or
+  // Electron's default popup behavior opens a real, unrestricted
+  // `BrowserWindow` at an attacker-chosen URL outside every navigation
+  // check in this file (this is what G2 fixed in the first place — see
+  // commit 630eeb5e9's version of this file for the full history and the
+  // probe that proved it). Deny-and-loadURL-in-place is still strictly
+  // safer than Electron's default even with no origin check at all.
   //
-  // Fix applies G3's OWN policy here rather than inventing a second one:
-  // for a THIRD-PARTY guest specifically, same-origin-as-the-guest's-
-  // current-page loads in place (unchanged from before); cross-origin is
-  // NOT loaded in-panel — it's denied and deflected to the user's real
-  // browser via `shell.openExternal`, identically to G3's guest
-  // `will-navigate` handler. Preview webviews are explicitly OUT of this
-  // policy's scope (same carve-out G3 documents) and keep their original,
-  // unconditional `loadURL` behavior — preview loads the user's own
-  // fully-trusted dev server, and this handler's original purpose was
-  // simply "don't let a preview page pop an uncontrolled native window."
+  // #88 (open, live today): the deny+loadURL fallback below still bypasses
+  // `will-navigate` (H1's own finding), so this handler's own popups have
+  // no origin policy — same exposure preview has always had for this
+  // class, unrelated to today's collapse. The same-origin/deflect/rate-
+  // limited policy that closed this for third-party is proven, tested, and
+  // fully recoverable at commit 630eeb5e9 (`resolvePopupNavigationTarget`'s
+  // and `handlePopupNavigation`'s pre-collapse bodies) — #88 should restore
+  // that design against preview's session, not invent a new one.
   //
-  // F-3 (same review): the deflect-to-external-browser path is rate
-  // limited (`shouldAllowExternalDeflect`, ElectronShell.ts) — see that
-  // function's own comment for why a cooldown and not a gesture check.
-  //
-  // Resolved ONCE here, as part of `makeNativeOperations`'s own normal
-  // (non-forked) generator body — the same place `browserSession` itself
-  // gets bound just above — rather than re-resolved inside the popup
-  // handler's `runFork`'d fiber on every call. `getThirdPartyBrowserSession`
-  // always returns the SAME memoized session object regardless of when
-  // it's called (BrowserSession.ts caches it), so nothing is lost by
-  // resolving it up front; what's gained is avoiding a fresh
-  // service-dependent `yield*` inside a nested forked fiber for every
-  // single popup event, which is both unnecessary overhead and, if this
-  // effect never handles a raw failure, would deny-without-navigating
-  // forever rather than serving stale identity.
-  //
-  // CORRECTED 2026-08-04: this used to be justified here as safe against a
-  // G5-style bootstrap-ordering race because this generator body runs
-  // start-to-finish before `app.on("web-contents-created", ...)` registers
-  // below. That's not a real safety argument — `Effect.gen` bodies are
-  // ordinary interruptible Effects with real yield points (this one
-  // included), not something that becomes safe by being free of them. The
-  // actual guarantee: `DesktopWindow.ts` takes `PreviewManager.PreviewManager`
-  // as a Layer dependency (`yield* PreviewManager.PreviewManager`,
-  // `DesktopWindow.ts:251`), so Effect's own layer graph cannot begin
-  // constructing DesktopWindow — and therefore cannot create the main
-  // `BrowserWindow` — until THIS layer, including the listener registered
-  // below, has already finished. No `<webview>` element (the only thing
-  // that produces the "webview"-typed webContents this handler cares about)
-  // can exist before that window loads its renderer page. The ordering is
-  // enforced by the dependency graph between layers, not by any property of
-  // how this particular function happens to execute.
-  const thirdPartySessionForPopupPolicy: Session | null = yield* Effect.orElseSucceed(
-    browserSession.getThirdPartyBrowserSession(),
-    () => null,
-  );
-
-  const resolvePopupNavigationTarget = (
-    wc: Electron.WebContents,
-    normalizedUrl: string,
-  ): { readonly kind: "loadInPanel" | "deflect" | "denyOnly" } => {
-    // Fails CLOSED: if third-party session identity couldn't be resolved
-    // at startup, deny-only for every guest rather than falling back to
-    // the looser preview behavior for one that might actually be
-    // third-party.
-    if (thirdPartySessionForPopupPolicy === null) {
-      return { kind: "denyOnly" };
-    }
-    // NOT third-party — carved out onto the original, unconditional
-    // loadInPanel behavior. Record precisely why, corrected once already:
-    // this mechanism (deny + loadURL bypassing will-navigate) applies
-    // IDENTICALLY to a preview guest — nothing about it is third-party-
-    // specific; the carve-out is a scope decision, not a claim the
-    // mechanism doesn't reach preview. The escalation question that used
-    // to motivate this carve-out has been answered CLEAN: `sandbox: true`
-    // is forced on every guest regardless of partition, so a hostile
-    // preview page cannot reach ipcRenderer/require/process/Node globals
-    // even with contextIsolation off — sandbox denies Node injection on
-    // its own. So the carve-out holds for a different reason than
-    // originally assumed: preview guests can't escalate, not that preview
-    // is otherwise trusted. Sandbox says nothing about NAVIGATION, though
-    // — preview remains exactly as exposed to this spoofing class as
-    // third-party is without this fix, tracked as its own ticket, live
-    // today regardless of the third-party panel's hold.
-    if (wc.session !== thirdPartySessionForPopupPolicy) {
-      return { kind: "loadInPanel" };
-    }
-    const anchor = wc.getURL();
-    const sameOrigin = isSameOriginRendererNavigation({
-      applicationUrl: anchor,
-      navigationUrl: normalizedUrl,
-    });
-    return sameOrigin ? { kind: "loadInPanel" } : { kind: "deflect" };
-  };
-
+  // Kept as a NAMED, dedicated function rather than inlined at both call
+  // sites (this one and `install` inside `attachListeners`, below) so a
+  // future `#88` fix has exactly one place to change, and so the two
+  // install sites' shared behavior (see the H1 note in `install` for why
+  // there are two) is visibly the same function, not two copies that could
+  // drift.
   const handlePopupNavigation = Effect.fn("PreviewManager.handlePopupNavigation")(function* (
     operation: string,
     wc: Electron.WebContents,
@@ -602,18 +509,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     } catch {
       return;
     }
-    const target = resolvePopupNavigationTarget(wc, normalizedUrl);
-    if (target.kind === "denyOnly") return;
-    if (target.kind === "loadInPanel") {
-      yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
-        wc.loadURL(normalizedUrl),
-      ).pipe(Effect.ignore);
-      return;
-    }
-    if (!shouldAllowExternalDeflect(wc.id)) return;
-    if (Option.isNone(parseSafeExternalUrl(normalizedUrl))) return;
-    yield* attemptPromise({ operation: `${operation}.deflect`, webContentsId: wc.id }, () =>
-      shell.openExternal(normalizedUrl),
+    yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
+      wc.loadURL(normalizedUrl),
     ).pipe(Effect.ignore);
   });
 
@@ -816,66 +713,19 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     return wc;
   });
 
-  // G4 (independent security review, 2026-08-04). CLAIM CORRECTED
-  // 2026-08-04: this was originally reported as a live, agent-reachable
-  // exploit — a prompt-injected agent targeting the third-party (Figma/
-  // Notion) webview by its fixed, guessable tabId (`thirdPartySourceTabId()`,
-  // `apps/web/src/browser/ThirdPartySourceWebview.tsx`) and running
-  // arbitrary JavaScript inside the user's authenticated session. An
-  // independent reviewer could not reproduce that: every automation
-  // dispatch wraps the agent's tabId as `previewRuntimeTabId =
-  // JSON.stringify([...])` before it reaches the desktop, while the panel
-  // registers under the raw `third-party-browser:<source>` string —
-  // disjoint namespaces, so `automationEvaluate("third-party-browser:figma",
-  // …)` is not producible through the MCP preview toolkit today.
-  //
-  // The guard below is KEPT regardless: every operation an agent can reach
-  // through the MCP preview toolkit — the 14 members of
-  // PREVIEW_AUTOMATION_OPERATIONS in @t3tools/contracts — still took an
-  // arbitrary caller-supplied tabId with no ownership or partition check
-  // at this layer, and nothing here depends on today's specific wrapping
-  // format staying that way. This is defense-in-depth against any future
-  // or alternate caller that passes a raw tabId, not a fix for a proven
-  // live exploit. Checked by SESSION IDENTITY, not by the tabId string or a
-  // `startsWith` prefix match on it — the tabId is a label a caller could in
-  // principle collide with by chance for a legitimate tab; the webContents'
-  // actual `session` is what carries the third-party cookies and cannot be
-  // spoofed by naming a tab similarly. `getThirdPartyBrowserSession()`
-  // returns the one process-wide singleton Session object for the shared
-  // third-party partition (`session.fromPartition` caches by partition
-  // string), so this is a reference-identity check, not a derived string
-  // comparison.
-  //
-  // Deliberately NOT folded into `requireWebContents` itself: that function
-  // also backs human-only browser chrome (goBack/goForward/refresh/
-  // hardReload/openDevTools/pickElement/captureScreenshot) and the "Add to
-  // chat" screenshot capture (`captureTabScreenshotDataUrl`) that the
-  // third-party panel's own legitimate UI needs to keep working — see that
-  // function's own callers. Blocking there would also break ordinary human
-  // browsing of the embedded Figma/Notion tab, not just agent automation.
-  const assertNotThirdParty = Effect.fn("PreviewManager.assertNotThirdParty")(function* (
-    operation: string,
-    tabId: string,
-    wc: Electron.WebContents,
-  ) {
-    const thirdPartySession = yield* browserSession.getThirdPartyBrowserSession().pipe(
-      Effect.mapError(
-        (cause) =>
-          new PreviewOperationError({ operation: "assertNotThirdParty", tabId, cause }),
-      ),
-    );
-    if (wc.session === thirdPartySession) {
-      return yield* new PreviewAutomationThirdPartyTabForbiddenError({ tabId, operation });
-    }
-  });
-
-  const requireAutomatableWebContents = Effect.fn(
-    "PreviewManager.requireAutomatableWebContents",
-  )(function* (operation: string, tabId: string) {
-    const wc = yield* requireWebContents(tabId);
-    yield* assertNotThirdParty(operation, tabId, wc);
-    return wc;
-  });
+  // G4 (independent security review, 2026-08-04): a defense-in-depth guard
+  // that blocked the MCP automation toolkit from targeting the third-party
+  // (Figma/Notion) webview by session identity, kept even after an
+  // independent reviewer couldn't reproduce the originally-reported live
+  // exploit (the automation tabId namespace and the panel's registration
+  // namespace turned out disjoint). FIGMA/NOTION DELETED (owner ruling,
+  // 2026-08-04): there is no third-party session left to check identity
+  // against, so this guard is gone with the feature it protected, not left
+  // as dead code that would always resolve successfully — see git history
+  // at commit 630eeb5e9 for the removed `assertNotThirdParty`/
+  // `requireAutomatableWebContents` and their full rationale. Every call
+  // site below that used `requireAutomatableWebContents(operation, tabId)`
+  // now calls the plain `requireWebContents(tabId)` it wrapped.
 
   const resolveArtifactPath = (artifactPath: string) =>
     attempt({ operation: "resolveArtifactPath", artifactPath }, () => {
@@ -1623,25 +1473,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.ipc.on(HUMAN_INPUT_CHANNEL, humanInput);
         wc.setWindowOpenHandler(({ url }) => {
           // F5 (independent security review, 2026-08-04): this handler
-          // existed to stop uncontrolled new windows from untrusted content
-          // (deny + navigate the same webview instead), but the fallback
-          // navigation itself took the guest's `url` completely
-          // unvalidated — every OTHER navigation path in this file routes
-          // through `normalizePreviewUrl` (http/https only); this one
-          // didn't. Chromium already blocks `file:` and downgrades
-          // `javascript:`, so this wasn't an arbitrary-scheme hole, but an
-          // unvalidated main-process navigation driven by guest content has
-          // no business skipping the check every other navigation gets —
-          // especially now that third-party (untrusted external) content
-          // reaches this same handler via `allowpopups`.
-          //
-          // H1 (independent security review, 2026-08-04, merge-gate — SHIP
-          // BLOCKER): normalizing the URL was NOT enough — this same-
-          // webview `loadURL` fallback still bypassed G3's origin policy
-          // entirely, since `will-navigate` never fires for it. See
+          // exists to stop uncontrolled new windows from untrusted content
+          // (deny + navigate the same webview instead) — see
           // `handlePopupNavigation`'s own comment (this file, near the
-          // early `web-contents-created` handler) for the fix; this call
-          // site shares it rather than re-implementing it.
+          // early `web-contents-created` handler) for what it does and the
+          // #88 exposure it still leaves open. This call site shares that
+          // function rather than re-implementing it.
           runFork(handlePopupNavigation("openPreviewWindow", wc, url));
           return { action: "deny" };
         });
@@ -1962,7 +1799,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       yield* emit(tabId, detached);
       return;
     }
-    yield* assertNotThirdParty("navigate", tabId, wc);
     if (wc.getURL() === url) {
       yield* attempt({ operation: "navigate.reload", tabId, webContentsId: wc.id }, () =>
         wc.reload(),
@@ -2235,7 +2071,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (webContentsId == null) return;
     const wc = webContents.fromId(webContentsId);
     if (!wc || wc.isDestroyed()) return;
-    yield* assertNotThirdParty("setColorScheme", tabId, wc);
     yield* applyColorScheme(tabId, wc, colorScheme);
   });
 
@@ -2783,12 +2618,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const startRecording = Effect.fn("PreviewManager.startRecording")(function* (tabId: string) {
-    yield* requireAutomatableWebContents("recordingStart", tabId);
+    yield* requireWebContents(tabId);
     yield* startFrameCapture(tabId, "recording");
   });
 
   const stopRecording = Effect.fn("PreviewManager.stopRecording")(function* (tabId: string) {
-    yield* requireAutomatableWebContents("recordingStop", tabId);
+    yield* requireWebContents(tabId);
     yield* stopFrameCapture(tabId, "recording");
   });
 
@@ -2857,7 +2692,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         loading: false,
       };
     }
-    yield* assertNotThirdParty("status", tabId, wc);
     return {
       available: true,
       visible: true,
@@ -2975,7 +2809,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const automationSnapshot = Effect.fn("PreviewManager.automationSnapshot")(function* (
     tabId: string,
   ) {
-    const wc = yield* requireAutomatableWebContents("snapshot", tabId);
+    const wc = yield* requireWebContents(tabId);
     return yield* withControlSession(tabId, wc, "snapshot", (send) =>
       captureAutomationSnapshot(tabId, wc, send),
     );
@@ -3109,7 +2943,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationClickInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("click", tabId);
+    const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "click", (send) =>
       performAutomationClick(tabId, input, send),
     );
@@ -3235,7 +3069,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationTypeInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("type", tabId);
+    const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "type", (send) =>
       performAutomationType(tabId, input, send),
     );
@@ -3297,7 +3131,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationPressInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("press", tabId);
+    const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "press", (send, sendCleanup) =>
       performAutomationPress(tabId, wc, input, send, sendCleanup),
     );
@@ -3353,7 +3187,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationScrollInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("scroll", tabId);
+    const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "scroll", (send) =>
       performAutomationScroll(tabId, input, send),
     );
@@ -3389,7 +3223,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationEvaluateInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("evaluate", tabId);
+    const wc = yield* requireWebContents(tabId);
     return yield* withControlSession(tabId, wc, "evaluate", (send) =>
       performAutomationEvaluate(tabId, input, send),
     );
@@ -3460,7 +3294,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     tabId: string,
     input: PreviewAutomationWaitForInput,
   ) {
-    const wc = yield* requireAutomatableWebContents("waitFor", tabId);
+    const wc = yield* requireWebContents(tabId);
     yield* withControlSession(tabId, wc, "waitFor", (send) =>
       performAutomationWaitFor(tabId, input, send),
     );
@@ -3588,20 +3422,6 @@ export class PreviewWebviewNotInitializedError extends Schema.TaggedErrorClass<P
 ) {
   override get message(): string {
     return `Preview tab "${this.tabId}" has no webview registered`;
-  }
-}
-
-// G4 (independent security review, 2026-08-04): distinct from
-// PreviewTabNotFoundError/PreviewWebviewNotInitializedError — the tab exists
-// and has a live webview, so those would be false. This says the operation
-// itself is not permitted against this specific tab's session, regardless of
-// whether it would otherwise succeed.
-export class PreviewAutomationThirdPartyTabForbiddenError extends Schema.TaggedErrorClass<PreviewAutomationThirdPartyTabForbiddenError>()(
-  "PreviewAutomationThirdPartyTabForbiddenError",
-  { tabId: Schema.String, operation: Schema.String },
-) {
-  override get message(): string {
-    return `Automation operation "${this.operation}" is not permitted against tab "${this.tabId}": it holds a live third-party (Figma/Notion) session, and the automation namespace never targets third-party sessions.`;
   }
 }
 
@@ -3824,7 +3644,6 @@ export const PreviewManagerError = Schema.Union([
   PreviewAutomationResultTooLargeError,
   PreviewAutomationTimeoutError,
   PreviewAutomationControlInterruptedError,
-  PreviewAutomationThirdPartyTabForbiddenError,
 ]);
 export type PreviewManagerError = typeof PreviewManagerError.Type;
 
@@ -3843,20 +3662,6 @@ export class PreviewManager extends Context.Service<
     readonly setMainWindow: (window: BrowserWindow) => Effect.Effect<void, PreviewManagerError>;
     readonly getBrowserSession: (scope?: string) => Effect.Effect<Session, PreviewManagerError>;
     readonly isBrowserPartition: (partition: string) => boolean;
-    /** The one shared session/partition for every third-party browser-panel
-     * destination (Figma, Notion) — see BrowserSession.ts's own doc for why
-     * these take no scope argument and are kept out of `clearCookies`/
-     * `clearCache`'s reach. */
-    readonly getThirdPartyBrowserSession: () => Effect.Effect<Session, PreviewManagerError>;
-    readonly getThirdPartyBrowserPartition: () => Effect.Effect<string, PreviewManagerError>;
-    readonly isThirdPartyBrowserPartition: (partition: string) => boolean;
-    /** F4 (owner ruling, relayed 2026-08-04): sign out of ONE third-party
-     * source (`origin`, e.g. `https://www.figma.com`) without touching the
-     * other's login — see BrowserSession.ts's own doc for exactly what this
-     * does and does not clear. */
-    readonly clearThirdPartySourceData: (
-      origin: string,
-    ) => Effect.Effect<void, PreviewManagerError>;
     readonly createTab: (tabId: string) => Effect.Effect<PreviewTabState, PreviewManagerError>;
     readonly closeTab: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly registerWebview: (
@@ -3970,42 +3775,6 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         );
     }),
     isBrowserPartition: browserSession.isPartition,
-    getThirdPartyBrowserSession: Effect.fn("PreviewManager.getThirdPartyBrowserSession")(
-      function* () {
-        return yield* browserSession
-          .getThirdPartyBrowserSession()
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new PreviewOperationError({ operation: "getThirdPartyBrowserSession", cause }),
-            ),
-          );
-      },
-    ),
-    getThirdPartyBrowserPartition: Effect.fn("PreviewManager.getThirdPartyBrowserPartition")(
-      function* () {
-        return yield* browserSession
-          .getThirdPartyBrowserPartition()
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new PreviewOperationError({ operation: "getThirdPartyBrowserPartition", cause }),
-            ),
-          );
-      },
-    ),
-    isThirdPartyBrowserPartition: browserSession.isThirdPartyPartition,
-    clearThirdPartySourceData: Effect.fn("PreviewManager.clearThirdPartySourceData")(function* (
-      origin: string,
-    ) {
-      yield* browserSession
-        .clearThirdPartySourceData(origin)
-        .pipe(
-          Effect.mapError(
-            (cause) => new PreviewOperationError({ operation: "clearThirdPartySourceData", cause }),
-          ),
-        );
-    }),
     createTab: operations.createTab,
     closeTab: operations.closeTab,
     registerWebview: operations.registerWebview,

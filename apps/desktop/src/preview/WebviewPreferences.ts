@@ -32,51 +32,17 @@
  *   `contextIsolation="no"` is truthy → contextIsolation stays ENABLED →
  *   react-grab can't see the React DevTools hook.
  *
- * Defense in depth: `apps/desktop/src/window/DesktopWindow.ts` (NOT
- * `main.ts` — corrected 2026-08-04, an earlier version of this comment
- * named the wrong file and there is exactly one `will-attach-webview`
- * handler in the app) also runs a `will-attach-webview` handler that
- * force-sets `sandbox`/`nodeIntegration*`/`webSecurity`/
- * `allowRunningInsecureContent` on the actual webPreferences object, gated
- * on the preview or third-party partition, so even if this string is ever
- * wrong, the security-critical flags can't regress.
+ * Defense in depth: `apps/desktop/src/window/DesktopWindow.ts` also runs a
+ * `will-attach-webview` handler that force-sets `sandbox`/
+ * `nodeIntegration*`/`webSecurity`/`allowRunningInsecureContent` on the
+ * actual webPreferences object, gated on the preview partition, so even if
+ * this string is ever wrong, the security-critical flags can't regress.
+ *
+ * FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this file used to export
+ * a second constant, `THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES`, for the
+ * third-party browser panel's `<webview>` — deleted with the feature it
+ * served. See git history at commit 630eeb5e9 for its full text and the
+ * independent security review (F1/F2/F3/F5/G1) that hardened it.
  */
 export const PREVIEW_WEBVIEW_PREFERENCES =
   "contextIsolation=false,sandbox=true,nodeIntegration=false";
-
-/**
- * webPreferences for a third-party browser-panel `<webview>` (Figma,
- * Notion). Deliberately its own constant, not a reuse of
- * `PREVIEW_WEBVIEW_PREFERENCES` — third-party pages are untrusted external
- * content, unlike the user's own dev-server preview, and get no preload
- * (`getThirdPartyBrowserConfig`'s `preloadUrl` is always `null`). With no
- * preload, there is nothing running in that renderer for
- * `contextIsolation` to protect either way — `sandbox=true` +
- * `nodeIntegration=false` already deny Node/IPC access regardless of it —
- * so `contextIsolation=true` here costs nothing and is pure defense in
- * depth, unlike preview's `false`, which is a real, documented tradeoff for
- * the picker preload.
- *
- * `DesktopWindow.ts`'s `will-attach-webview` handler now recognizes the
- * third-party partition and honors this constant (fixed 2026-08-04,
- * addressing findings F1/F2/F3/F5 from an independent security review,
- * each verified by execution against a real third-party partition). That
- * review found the earlier version of this handler and the third-party
- * session; the fixes made in response are new changes to the SAME
- * security-relevant surface and are themselves pending their own review
- * pass before merge — a review addressing version N doesn't clear
- * version N+1 just because it was written in response.
- *
- * STILL NOT LIVE, for a separate reason — and NOT the original one. The
- * third-party dock panel (`ThirdPartySourceDockPanel.tsx`) WAS registered
- * in `ChatDock.tsx` at one point, then the registration was deliberately
- * HELD (`a10d37791`) once the independent review proved a full bypass of
- * F2/F3 (G1) and identified a second, larger-blast-radius issue (G4: a
- * fixed, guessable tabId reachable by every automation MCP tool). G1 is
- * now fixed (`098aea5e2`) and re-verified DENIED against the reviewer's
- * own probe; G4 is a separate lane's active work. Un-holding registration
- * requires BOTH closed, not just this one — see `ChatDock.tsx`'s own
- * registration comment for the current, authoritative status.
- */
-export const THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES =
-  "contextIsolation=true,sandbox=true,nodeIntegration=false";

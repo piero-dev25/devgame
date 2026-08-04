@@ -17,10 +17,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
-import {
-  PREVIEW_WEBVIEW_PREFERENCES,
-  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
-} from "../preview/WebviewPreferences.ts";
+import { PREVIEW_WEBVIEW_PREFERENCES } from "../preview/WebviewPreferences.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
 const TITLEBAR_HEIGHT = 40;
@@ -434,20 +431,9 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
-    // G3/#80: warmed eagerly, mirroring `createWindow`'s existing
-    // `previewManager.getBrowserSession()` warm-up a few lines up — needed
-    // so `did-attach-webview` below can recognize a third-party guest by
-    // session identity the moment one attaches, not just after some other
-    // code path happens to have resolved it first.
-    const thirdPartySession = yield* previewManager.getThirdPartyBrowserSession();
-    // ALLOWLIST, not a style-setter: any `<webview>` whose partition matches
-    // neither predicate below gets `event.preventDefault()` and never
-    // attaches at all. Two NAMED predicates, not one loosened check —
-    // `isBrowserPartition` deliberately excludes the third-party partition
-    // (see BrowserSession.ts's own doc), because preview-only machinery
-    // (`clearCookies`/`clearCache`) must never sweep up third-party
-    // sessions. Merging the two checks here to save a branch would erode
-    // that separation at the one place it's actually enforced.
+    // ALLOWLIST, not a style-setter: any `<webview>` whose partition doesn't
+    // match `isBrowserPartition` gets `event.preventDefault()` and never
+    // attaches at all.
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
       // G1 (independent security review, follow-up to F2/F3, 2026-08-04),
       // SHIP BLOCKER, PROVEN BY EXECUTION (decompiled shipped Electron
@@ -457,36 +443,25 @@ export const make = Effect.gen(function* () {
       // `webPreferences.partition`, a different field. The webview's
       // `webpreferences="..."` attribute is parsed with NO key allowlist
       // and applied LAST, silently overriding `partition` (and `preload`)
-      // on the object Electron actually uses. So a renderer could set
-      // `partition="persist:devgame-preview-X"` (passing the allowlist as
-      // preview) while `webpreferences="partition=persist:devgame-
-      // thirdparty-REAL,preload=/evil.js"` made Electron attach the REAL,
-      // logged-in third-party session with preview's laxer posture
-      // (preload untouched, contextIsolation forced false) applied to it
-      // — full `ipcRenderer` access inside the user's Figma/Notion
-      // session. Two independent closures below, either sufficient alone:
+      // on the object Electron actually uses. Two independent closures
+      // below, either sufficient alone:
       //
-      // 1. `params.webpreferences` must be BYTE-IDENTICAL to one of the
-      //    two known-good exported constants. Neither constant contains a
-      //    `partition=` or `preload=` key (or anything else), so this
-      //    alone makes the injection above impossible: smuggling an extra
-      //    key also deviates from the constant and is denied outright.
-      //    This is also the fix for G6 — every key not in one of the two
-      //    constants (`webviewTag=true`, `experimentalFeatures=true`, ...)
-      //    is now rejected, not just the six flags this handler happens
-      //    to force below.
+      // 1. `params.webpreferences` must be BYTE-IDENTICAL to the known-good
+      //    exported constant. It contains no `partition=` or `preload=` key
+      //    (or anything else), so this alone makes a smuggled key
+      //    impossible: any extra key deviates from the constant and is
+      //    denied outright. This is also the fix for G6 — every key not in
+      //    the constant (`webviewTag=true`, `experimentalFeatures=true`,
+      //    ...) is rejected, not just the flags this handler forces below.
       // 2. Classify from `webPreferences.partition` — the field Electron
       //    actually uses — not `params.partition`, and fail closed if the
       //    two disagree. (1) should already make disagreement impossible
-      //    (neither constant can move `webPreferences.partition` away
-      //    from what the `partition=` attribute set), but this doesn't
-      //    lean on that being airtight forever.
+      //    (the constant can't move `webPreferences.partition` away from
+      //    what the `partition=` attribute set), but this doesn't lean on
+      //    that being airtight forever.
       const webpreferencesAttr =
         typeof params.webpreferences === "string" ? params.webpreferences : null;
-      if (
-        webpreferencesAttr !== PREVIEW_WEBVIEW_PREFERENCES &&
-        webpreferencesAttr !== THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES
-      ) {
+      if (webpreferencesAttr !== PREVIEW_WEBVIEW_PREFERENCES) {
         event.preventDefault();
         return;
       }
@@ -496,10 +471,7 @@ export const make = Effect.gen(function* () {
       }
       const partition =
         typeof webPreferences.partition === "string" ? webPreferences.partition : null;
-      const isPreviewPartition = partition !== null && previewManager.isBrowserPartition(partition);
-      const isThirdPartyPartition =
-        partition !== null && previewManager.isThirdPartyBrowserPartition(partition);
-      if (!isPreviewPartition && !isThirdPartyPartition) {
+      if (partition === null || !previewManager.isBrowserPartition(partition)) {
         event.preventDefault();
         return;
       }
@@ -510,45 +482,18 @@ export const make = Effect.gen(function* () {
       // EXECUTION: this handler forced only 3 of 6 security-relevant
       // flags. Nothing SET `webSecurity`/`allowRunningInsecureContent`,
       // but nothing FORCED them either — a `<webview disablewebsecurity>`
-      // attribute attached with `webSecurity:false` on the real
-      // third-party partition. Worse, a renderer-supplied `preload`
-      // attribute EXECUTED on that partition (probe logged `ipcRenderer
-      // available: object` from inside the guest) — the partition name is
-      // derivable, not secret, and `getThirdPartyBrowserConfig` hands it
-      // out unauthenticated. A handler whose own comment calls itself "an
-      // ALLOWLIST, not a style-setter" needs to pin the whole posture, not
-      // just the three flags that happened to matter for preview's picker.
+      // attribute attached with `webSecurity:false`. A handler whose own
+      // comment calls itself "an ALLOWLIST, not a style-setter" needs to
+      // pin the whole posture, not just the three flags that happened to
+      // matter for the picker.
       webPreferences.webSecurity = true;
       webPreferences.allowRunningInsecureContent = false;
-      // `preload` is scoped to third-party ONLY — preview's own picker
-      // preload is legitimate, main-process-controlled
-      // (`getPreviewConfig`'s `preloadUrl`), and forcing it away here
-      // would break that feature. Third-party's `getThirdPartyBrowserConfig`
-      // always returns `preloadUrl: null`; this is what actually enforces
-      // that a malicious renderer can't supply its own value instead.
-      if (isThirdPartyPartition) {
-        // `delete`, not `= undefined` — Electron's own `WebPreferences`
-        // type has `preload?: string`, and this repo's
-        // `exactOptionalPropertyTypes: true` treats an explicit `undefined`
-        // assignment as a type error distinct from the key being absent.
-        delete webPreferences.preload;
-      }
       // Preview loads the user's OWN dev server, and its picker preload
       // needs `contextIsolation=false` to reach the page's React DevTools
-      // hook (see WebviewPreferences.ts). Third-party tabs load ARBITRARY
-      // EXTERNAL CONTENT — figma.com, notion.so, and anything either links
-      // to — a different trust level that must not share preview's value
-      // just because it shares this handler.
-      //
-      // Setting this `false` ONLY for preview keeps third-party's isolation
-      // INTRINSIC rather than incidental: today it's also true that no
-      // preload runs on a third-party tab, so `contextIsolation` isn't
-      // protecting anything yet — but that fact can change silently (e.g.
-      // an in-page "Add to chat" affordance needing its own preload) with
-      // no error and no reason for whoever adds it to look at this
-      // main-process handler. Keeping the flag itself correct means nobody
-      // has to remember why.
-      webPreferences.contextIsolation = isThirdPartyPartition;
+      // hook (see WebviewPreferences.ts) — this is preview's own,
+      // main-process-controlled preload (`getPreviewConfig`'s
+      // `preloadUrl`), never left to a renderer-supplied value.
+      webPreferences.contextIsolation = false;
     });
 
     window.webContents.on("context-menu", (event, params) => {
@@ -621,119 +566,30 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    // G3/#80 (independent security review, 2026-08-04): the two listeners
-    // above are scoped to `window.webContents` — the main window's OWN
-    // content — and Electron never applies them to a `<webview>` guest's
-    // separate WebContents. Two consequences, closed together here since
-    // both need the same hook:
+    // G3/#80 (independent security review, 2026-08-04) built a
+    // same-origin-allow/cross-origin-deflect navigation guard, plus a guest
+    // context menu, for `did-attach-webview` guests — scoped by session
+    // identity to the third-party (Figma/Notion) panel specifically,
+    // because the two listeners above are scoped to `window.webContents`
+    // (the main window's OWN content) and Electron never applies them to a
+    // `<webview>` guest's separate WebContents.
     //
-    // G3: with no guard at all, any page inside the third-party panel
-    // could navigate the WHOLE panel (still branded "Figma"/"Notion") to
-    // an arbitrary https URL — F5's window-open handler (Manager.ts)
-    // already funnels a denied `window.open()` into a same-webview
-    // `loadURL`, so this was never just a popup-only risk. A credible
-    // "your session expired, sign in again" phishing surface on the panel
-    // the user trusts, sitting on the partition holding the real cookies.
-    //
-    // #80: right-clicking inside the panel showed no menu at all — nothing
-    // built one for guest content either.
-    //
-    // POLICY (decided here, not copied from the main window's `will-navigate`
-    // above, whose fixed `applicationUrl` anchor doesn't fit a guest that
-    // legitimately navigates within its own origin — Figma/Notion are real
-    // SPAs): allow navigation that stays on the guest's CURRENT origin, and
-    // DEFLECT anything cross-origin to the user's real external browser
-    // (the SAME `ElectronShell.openExternal` mechanism above), rather than
-    // silently blocking it. SSO/IdP redirects (Google, Microsoft, an
-    // enterprise's own SAML domain) are real, necessarily cross-origin, and
-    // NOT enumerable ahead of time — neither this fix nor the independent
-    // review that found G3 could verify Figma/Notion's SSO flow against a
-    // live account. A strict host allowlist would plausibly BREAK first
-    // login for exactly the managed-workspace users this matters most for;
-    // a silently-broken sign-in is a worse failure than a phishing risk
-    // that's already only a UI-spoofing vector (a fake page here can't
-    // read the real origin's cookies, only social-engineer a re-typed
-    // password). Deflecting to a real browser tab keeps sign-in possible,
-    // at the cost of a clunkier hop (finish there, return manually) — a
-    // real, acknowledged tradeoff, not a free one.
-    //
-    // SCOPED TO THIRD-PARTY ONLY: preview's guest loads the user's OWN,
-    // fully-trusted dev server — forcing this origin policy onto it would
-    // change existing, unrelated, out-of-scope behavior nobody asked to
-    // change. `WebContents` doesn't expose its partition string directly
-    // (and `getLastWebPreferences()` — what the reviewer's own probe used
-    // — isn't in this Electron version's type definitions), so identity is
-    // checked by session object equality against `thirdPartySession`
-    // above, the SAME memoized session `getThirdPartyBrowserSession`
-    // resolves everywhere else in this codebase.
-    window.webContents.on("did-attach-webview", (_event, guestWebContents) => {
-      if (guestWebContents.session !== thirdPartySession) return;
-
-      guestWebContents.on("will-navigate", (event, url) => {
-        if (
-          isSameOriginRendererNavigation({
-            applicationUrl: guestWebContents.getURL(),
-            navigationUrl: url,
-          })
-        ) {
-          return;
-        }
-        event.preventDefault();
-        if (
-          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
-        ) {
-          void runPromise(electronShell.openExternal(url));
-        }
-      });
-
-      // H2 (independent security review, 2026-08-04, merge-gate): `will-
-      // navigate` only fires for the INITIAL navigation of a load — a
-      // same-origin navigation that then 302-redirects cross-origin fires
-      // `will-redirect` instead, which nothing was listening to. Proven:
-      // a same-origin request allowed above, then a 302 to a different
-      // origin, navigated unguarded. On its own this needs an open
-      // redirect on the guest's current origin, but it composes directly
-      // with H1/G4 — either of which can already hand an attacker that
-      // origin — so it's not an independent precondition in practice.
-      // Same policy as `will-navigate` above, not a new one: same-origin
-      // redirect target is allowed silently, cross-origin is denied and
-      // deflected, same rate limit.
-      guestWebContents.on("will-redirect", (event, url) => {
-        if (
-          isSameOriginRendererNavigation({
-            applicationUrl: guestWebContents.getURL(),
-            navigationUrl: url,
-          })
-        ) {
-          return;
-        }
-        event.preventDefault();
-        if (
-          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
-        ) {
-          void runPromise(electronShell.openExternal(url));
-        }
-      });
-
-      // Minimal Cut/Copy/Paste/Select All, matching the main window's own
-      // template above. Deliberately NOT the fuller "Copy Link"/"Copy
-      // Image" affordances that template also has: nothing here closes G4
-      // (the automation-tabId issue), so adding more surface to guest
-      // content ahead of that landing would only grow the problem, not
-      // shrink it.
-      guestWebContents.on("context-menu", (event, params) => {
-        event.preventDefault();
-        const menuTemplate: Electron.MenuItemConstructorOptions[] = [
-          { role: "cut", enabled: params.editFlags.canCut },
-          { role: "copy", enabled: params.editFlags.canCopy },
-          { role: "paste", enabled: params.editFlags.canPaste },
-          { role: "selectAll", enabled: params.editFlags.canSelectAll },
-        ];
-        void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
-      });
-    });
+    // FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this guard was
+    // inert for every OTHER guest already (it bailed immediately unless
+    // `guestWebContents.session === thirdPartySession`), so removing it
+    // changes nothing about preview's behavior today. It is NOT reused for
+    // preview here rather than left in place: `#88` (open, live today) is
+    // that this exact class of exposure — an unguarded `window.open` →
+    // `loadURL` fallback bypassing `will-navigate`, and no guest navigation
+    // guard at all — applies to preview's `<webview>` too, and re-scoping
+    // this mechanism from third-party identity to preview identity is a
+    // real security decision for whoever picks up `#88`, not a mechanical
+    // rename to make while deleting an unrelated feature. The proven,
+    // tested design (same-origin-allow, cross-origin-deny-and-deflect via
+    // `ElectronShell.shouldAllowExternalDeflect`/`parseSafeExternalUrl`,
+    // `will-redirect` alongside `will-navigate` per H2, a minimal guest
+    // context menu) is fully recoverable at commit 630eeb5e9 — `#88` should
+    // restore it against preview's session, not invent a new one.
 
     window.on("page-title-updated", (event) => {
       event.preventDefault();

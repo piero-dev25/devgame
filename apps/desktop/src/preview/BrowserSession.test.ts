@@ -67,9 +67,10 @@ describe("BrowserSession", () => {
   // is a `vi.fn()` in every fake session this file already builds, but
   // nothing asserted what it was called WITH — a mutation deleting the
   // scrub entirely, or scrubbing only one of the two tokens, survived. A
-  // regression here silently tells whatever a guest loads (in production:
-  // figma.com/notion.so, untrusted third-party content) that it's running
-  // inside Electron and this app specifically.
+  // regression here silently tells whatever a guest loads (the user's own
+  // dev server, but content on that server can itself embed untrusted
+  // third-party resources) that it's running inside Electron and this app
+  // specifically.
   it.effect("scrubs Electron/x.y and t3code/x.y from the guest's User-Agent before creating the session", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
@@ -212,45 +213,22 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
-  it.effect("derives a third-party partition under its own prefix, independent of scope", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-
-      const first = yield* browserSessions.getThirdPartyBrowserPartition();
-      const second = yield* browserSessions.getThirdPartyBrowserPartition();
-
-      assert.strictEqual(first, second);
-      assert.isTrue(first.startsWith("persist:devgame-thirdparty-"));
-      assert.isFalse(first.startsWith("persist:devgame-preview-"));
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect("isPartition does not claim a third-party partition as a preview one", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-      const thirdPartyPartition = yield* browserSessions.getThirdPartyBrowserPartition();
-
-      assert.isFalse(browserSessions.isPartition(thirdPartyPartition));
-    }).pipe(Effect.provide(layer)),
-  );
-
   // G5 (independent security review, follow-up to F3, 2026-08-04): F3 fixed
-  // exact matching for the third-party partition (a single fixed scope) but
-  // left `isPartition` as a bare `startsWith` — preview has MANY legitimate
-  // partitions (one per scope), so a naive fix can't just cache one string
-  // the way F3 did. `<webview partition="persist:devgame-preview-anything"
-  // preload="...">` still passed this check before the fix below: any
-  // suffix satisfies `startsWith`, and DesktopWindow.ts only strips
-  // `preload` for THIRD-PARTY, on the (previously true) assumption that
-  // "classified as preview" meant "really is a preview session" — so an
-  // attacker-chosen partition string with the right prefix got treated as
-  // preview and its attacker-supplied preload ran unstripped, at
-  // preview's `contextIsolation=false`. Exact-match against every scope
-  // this process has ACTUALLY derived (mirroring F3, generalized from one
-  // cached string to a Set since there are many valid values) closes it:
-  // an attacker can't derive a NEW valid partition without knowing a scope
-  // this process would derive from, and the value is a SHA-256 truncation,
-  // not guessable by suffix-guessing.
+  // exact matching for the third-party partition (a single fixed scope,
+  // since deleted — owner ruling, 2026-08-04) but left `isPartition` as a
+  // bare `startsWith` — preview has MANY legitimate partitions (one per
+  // scope), so a naive fix can't just cache one string the way F3 did.
+  // `<webview partition="persist:devgame-preview-anything" preload="...">`
+  // still passed this check before the fix below: any suffix satisfies
+  // `startsWith`, and DesktopWindow.ts trusts "classified as preview" to
+  // mean "really is a preview session" — so an attacker-chosen partition
+  // string with the right prefix got treated as preview and its
+  // attacker-supplied preload ran unstripped, at preview's
+  // `contextIsolation=false`. Exact-match against every scope this process
+  // has ACTUALLY derived (a Set, since there are many valid values) closes
+  // it: an attacker can't derive a NEW valid partition without knowing a
+  // scope this process would derive from, and the value is a SHA-256
+  // truncation, not guessable by suffix-guessing.
   it.effect("isPartition rejects a lookalike that merely shares the prefix", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
@@ -277,206 +255,10 @@ describe("BrowserSession", () => {
       const a = yield* browserSessions.getPartition("scope-a");
       const b = yield* browserSessions.getPartition("scope-b");
 
-      // Preview has MANY legitimate partitions (unlike third-party's one
-      // fixed scope) — this is the property F3's single-cached-string
-      // approach can't express, and is why this needs a Set, not a
-      // solitary `let` cache.
       assert.isTrue(browserSessions.isPartition(a));
       assert.isTrue(browserSessions.isPartition(b));
       assert.notStrictEqual(a, b);
     }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect("isThirdPartyPartition recognizes its own partition and rejects a preview one", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-      const thirdPartyPartition = yield* browserSessions.getThirdPartyBrowserPartition();
-      const previewPartition = yield* browserSessions.getPartition("scope-a");
-
-      assert.isTrue(browserSessions.isThirdPartyPartition(thirdPartyPartition));
-      assert.isFalse(browserSessions.isThirdPartyPartition(previewPartition));
-    }).pipe(Effect.provide(layer)),
-  );
-
-  // F3 (independent security review, 2026-08-04): `startsWith` matching
-  // meant `persist:devgame-thirdparty-EVIL` attached with the weakened
-  // preference, and a bare prefix with nothing after it was allowed too.
-  // There is exactly one third-party partition (one fixed scope), so exact
-  // match is available at zero cost — no reason to accept a weaker check.
-  it.effect("isThirdPartyPartition rejects a lookalike that merely shares the prefix", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-      yield* browserSessions.getThirdPartyBrowserPartition();
-
-      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-EVIL"));
-      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-"));
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect("isThirdPartyPartition denies everything before any partition has been derived", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-
-      // Deliberately NOT calling getThirdPartyBrowserPartition/Session first
-      // — nothing to compare against yet, so this must fail closed, not
-      // fall back to a prefix check (that fallback would BE the F3 hole).
-      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-anything"));
-    }).pipe(Effect.provide(layer)),
-  );
-
-  // F1 (independent security review, 2026-08-04), VERIFIED BY EXECUTION:
-  // the third-party session was reusing ALLOWED_PREVIEW_PERMISSIONS —
-  // scoped, by that constant's own doc, to the user's OWN dev server — and
-  // silently granting clipboard-read/clipboard-write/geolocation/
-  // notifications to figma.com, notion.so, and anything they link to,
-  // WITHOUT a prompt. `navigator.clipboard.readText()` on any focused
-  // external page, no prompt, on a machine whose clipboard routinely holds
-  // API keys and tokens. Default third-party to denying everything.
-  it.effect("denies every permission preview allows — third party gets no free grants", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-      const partition = yield* browserSessions.getThirdPartyBrowserPartition();
-      yield* browserSessions.getThirdPartyBrowserSession();
-
-      const browserSession = sessions.get(partition);
-      assert.isDefined(browserSession);
-      const requestHandler = browserSession.setPermissionRequestHandler.mock.calls[0]?.[0];
-      const checkHandler = browserSession.setPermissionCheckHandler.mock.calls[0]?.[0];
-      assert.isFunction(requestHandler);
-      assert.isFunction(checkHandler);
-
-      const requestAllows = (permission: string): boolean => {
-        let granted: boolean | undefined;
-        requestHandler(null, permission, (value: boolean) => {
-          granted = value;
-        });
-        assert.isDefined(granted);
-        return granted;
-      };
-
-      for (const permission of [
-        "clipboard-read",
-        "clipboard-sanitized-write",
-        "clipboard-write",
-        "notifications",
-        "geolocation",
-        "midi",
-      ]) {
-        assert.isFalse(requestAllows(permission), `request handler should deny ${permission}`);
-        assert.isFalse(
-          checkHandler(null, permission) as boolean,
-          `check handler should deny ${permission}`,
-        );
-      }
-    }).pipe(Effect.provide(layer)),
-  );
-
-  // F4 sign-out (owner ruling, relayed 2026-08-04): the third-party
-  // partition is persistent — a login survives app restarts indefinitely,
-  // with no user-visible trace and no way to clear it short of a dev tool.
-  // "Prove it by executing it, not by asserting the call was made" — so
-  // this doesn't just assert `clearStorageData` was called; it tracks a
-  // fake per-origin "signed in" flag (mirroring what a real cookie jar
-  // does — state that either is or isn't there afterward) and proves
-  // sign-out for ONE origin actually clears that origin's flag while
-  // leaving the OTHER origin's flag untouched. That selectivity is the
-  // whole point: this is ONE shared partition for both Figma and Notion,
-  // so "sign out of Figma" must not silently sign the user out of Notion
-  // too — only Electron's per-origin `clearStorageData({ origin })` filter
-  // makes that possible; a whole-partition clear would not have been
-  // "per source" as promised.
-  it.effect("signs out of one origin's data without touching the other origin's", () =>
-    Effect.gen(function* () {
-      const signedInOrigins = new Set(["https://www.figma.com", "https://www.notion.so"]);
-      const clearStorageDataCalls: Array<{ origin?: string; storages?: readonly string[] }> = [];
-      fromPartition.mockImplementationOnce((partition: string) => {
-        const browserSession = {
-          clearCache: vi.fn(() => Promise.resolve()),
-          clearStorageData: vi.fn((options: { origin?: string; storages?: readonly string[] }) => {
-            clearStorageDataCalls.push(options);
-            if (options.origin) signedInOrigins.delete(options.origin);
-            return Promise.resolve();
-          }),
-          getUserAgent: vi.fn(() => "Mozilla/5.0 Electron/41.5.0 t3code/0.0.27"),
-          setPermissionRequestHandler: vi.fn(),
-          setPermissionCheckHandler: vi.fn(),
-          setUserAgent: vi.fn(),
-        };
-        sessions.set(partition, browserSession);
-        return browserSession;
-      });
-
-      const browserSessions = yield* BrowserSession.BrowserSession;
-      assert.isTrue(signedInOrigins.has("https://www.figma.com"));
-      assert.isTrue(signedInOrigins.has("https://www.notion.so"));
-
-      yield* browserSessions.clearThirdPartySourceData("https://www.figma.com");
-
-      assert.isFalse(signedInOrigins.has("https://www.figma.com"));
-      assert.isTrue(
-        signedInOrigins.has("https://www.notion.so"),
-        "clearing Figma's origin must not clear Notion's",
-      );
-      assert.strictEqual(clearStorageDataCalls.length, 1);
-      assert.deepEqual(clearStorageDataCalls[0]?.origin, "https://www.figma.com");
-      assert.deepEqual(
-        [...(clearStorageDataCalls[0]?.storages ?? [])].toSorted(),
-        ["cookies", "indexdb", "localstorage", "serviceworkers", "websql"].toSorted(),
-      );
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect(
-    "clearThirdPartySourceData does not touch preview sessions or the whole-partition clear methods",
-    () =>
-      Effect.gen(function* () {
-        const browserSessions = yield* BrowserSession.BrowserSession;
-        yield* browserSessions.getSession("scope-a");
-        const previewPartition = yield* browserSessions.getPartition("scope-a");
-        const previewSession = sessions.get(previewPartition);
-        assert.isDefined(previewSession);
-
-        yield* browserSessions.clearThirdPartySourceData("https://www.figma.com");
-
-        assert.strictEqual(previewSession.clearStorageData.mock.calls.length, 0);
-        assert.strictEqual(previewSession.clearCache.mock.calls.length, 0);
-      }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect("memoizes the third-party session the same way preview sessions are memoized", () =>
-    Effect.gen(function* () {
-      const browserSessions = yield* BrowserSession.BrowserSession;
-
-      const first = yield* browserSessions.getThirdPartyBrowserSession();
-      const second = yield* browserSessions.getThirdPartyBrowserSession();
-
-      assert.strictEqual(first, second);
-      assert.strictEqual(fromPartition.mock.calls.length, 1);
-    }).pipe(Effect.provide(layer)),
-  );
-
-  it.effect(
-    "clearCookies/clearCache never touch the third-party session — it is preview-only cleanup",
-    () =>
-      Effect.gen(function* () {
-        const browserSessions = yield* BrowserSession.BrowserSession;
-        yield* browserSessions.getSession("scope-a");
-        const thirdPartySession = yield* browserSessions.getThirdPartyBrowserSession();
-
-        yield* browserSessions.clearCookies();
-        yield* browserSessions.clearCache();
-
-        assert.strictEqual(
-          (thirdPartySession as unknown as { clearStorageData: ReturnType<typeof vi.fn> })
-            .clearStorageData.mock.calls.length,
-          0,
-        );
-        assert.strictEqual(
-          (thirdPartySession as unknown as { clearCache: ReturnType<typeof vi.fn> }).clearCache.mock
-            .calls.length,
-          0,
-        );
-      }).pipe(Effect.provide(layer)),
   );
 
   it.effect("correlates clear failures while still attempting every session", () =>

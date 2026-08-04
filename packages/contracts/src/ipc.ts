@@ -922,12 +922,6 @@ export const DesktopPreviewArtifactInputSchema = Schema.Struct({
   path: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
 });
 
-// F4 (owner ruling, relayed 2026-08-04): sign a user out of ONE third-party
-// source (e.g. `https://www.figma.com`) without touching the other's login.
-export const DesktopThirdPartySourceSignOutInputSchema = Schema.Struct({
-  origin: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
-});
-
 export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
   tabId: DesktopPreviewTabIdSchema,
   mimeType: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
@@ -1060,25 +1054,6 @@ export interface DesktopPreviewBridge {
    * the contract + main, not the renderer's mount logic.
    */
   getPreviewConfig: (environmentId: EnvironmentId) => Promise<DesktopPreviewWebviewConfig>;
-  /**
-   * Config for mounting a third-party browser-panel `<webview>` (Figma,
-   * Notion — see BrowserSession.ts's own doc for the shared, non-preview
-   * partition this reads). No `environmentId`: unlike `getPreviewConfig`,
-   * there is exactly one third-party partition for the whole app, so there
-   * is nothing to key it by. `preloadUrl` is always `null` here — the
-   * picker preload's react-grab/bippy machinery targets the user's OWN
-   * source-mapped React app; it has nothing to do on an arbitrary
-   * third-party page and is not attached.
-   */
-  getThirdPartyBrowserConfig: () => Promise<DesktopPreviewWebviewConfig>;
-  /**
-   * F4 (owner ruling, relayed 2026-08-04): sign the user out of ONE
-   * third-party source (`origin`, e.g. `https://www.figma.com`) — clears
-   * that origin's cookies/storage within the shared third-party partition
-   * WITHOUT touching the other product's login. Does not clear the
-   * partition's cache (not origin-scoped in Electron; see BrowserSession.ts).
-   */
-  signOutOfThirdPartySource: (origin: string) => Promise<void>;
   setAnnotationTheme: (theme: DesktopPreviewAnnotationTheme) => Promise<void>;
   /**
    * Activate the in-page element picker for the given tab. Resolves with

@@ -45,10 +45,7 @@ import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/cha
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 import * as PreviewManager from "../preview/Manager.ts";
-import {
-  PREVIEW_WEBVIEW_PREFERENCES,
-  THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
-} from "../preview/WebviewPreferences.ts";
+import { PREVIEW_WEBVIEW_PREFERENCES } from "../preview/WebviewPreferences.ts";
 
 const environmentInput = {
   dirname: "/repo/apps/desktop/dist-electron",
@@ -61,13 +58,6 @@ const environmentInput = {
   resourcesPath: "/repo/resources",
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
-
-// G3/#80: a stable object identity for the third-party session, so a fake
-// guest webContents's `.session` can be compared against what
-// `did-attach-webview`'s handler captured via `getThirdPartyBrowserSession`
-// — a fresh `{}` per call (as `getBrowserSession`'s mock already does
-// elsewhere) would never `===`-match anything.
-const FAKE_THIRD_PARTY_SESSION = {} as Electron.Session;
 
 function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
@@ -197,22 +187,18 @@ function makeTestLayer(input: {
     bounds: DesktopAppSettings.DesktopWindowBounds,
   ) => Effect.Effect<void>;
   readonly openedExternalUrls?: unknown[];
-  readonly thirdPartySession?: Electron.Session;
-  // F-4 (independent security review, follow-up to G5, 2026-08-04): these
+  // F-4 (independent security review, follow-up to G5, 2026-08-04): this
   // used to default to a blanket `.startsWith(...)` prefix match — the
   // exact vulnerable semantics G5 removed from the real BrowserSession.ts
-  // (`isPartition`/`isThirdPartyPartition`, which check SET MEMBERSHIP /
-  // an exact cached value, never a prefix). A test that registers nothing
-  // here gets NOTHING recognized as preview or third-party, matching the
-  // real fail-closed default; a test exercising `will-attach-webview`
-  // with a specific partition string must opt that exact string in here,
-  // the same way the real code only ever recognizes a partition after
-  // this process's own derivation actually produced it.
+  // (`isPartition`, which checks SET MEMBERSHIP, never a prefix). A test
+  // that registers nothing here gets NOTHING recognized as preview,
+  // matching the real fail-closed default; a test exercising
+  // `will-attach-webview` with a specific partition string must opt that
+  // exact string in here, the same way the real code only ever recognizes
+  // a partition after this process's own derivation actually produced it.
   readonly browserPartitions?: readonly string[];
-  readonly thirdPartyPartition?: string | null;
 }) {
   const browserPartitions = new Set(input.browserPartitions ?? []);
-  const thirdPartyPartition = input.thirdPartyPartition ?? null;
   let desktopSettings = input.desktopSettings ?? DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS;
   const desktopAppSettingsLayer = Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
     get: Effect.sync(() => desktopSettings),
@@ -290,9 +276,6 @@ function makeTestLayer(input: {
           setMainWindow: () => Effect.void,
           isBrowserPartition: (partition) => browserPartitions.has(partition),
           getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
-          isThirdPartyBrowserPartition: (partition) => partition === thirdPartyPartition,
-          getThirdPartyBrowserSession: () =>
-            Effect.succeed(input.thirdPartySession ?? FAKE_THIRD_PARTY_SESSION),
         }),
       ),
     ),
@@ -391,8 +374,6 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
             // makeTestLayer above, which IS exercised against it).
             isBrowserPartition: () => false,
             getBrowserPartition: () => Effect.succeed("persist:devgame-preview-test"),
-            isThirdPartyBrowserPartition: () => false,
-            getThirdPartyBrowserSession: () => Effect.succeed(FAKE_THIRD_PARTY_SESSION),
           }),
         ),
       ),
@@ -1030,390 +1011,19 @@ describe("DesktopWindow", () => {
     }),
   );
 
-  // G3/#80 (independent security review, 2026-08-04): the main window's own
-  // `will-navigate`/`context-menu` listeners (tested above) are scoped to
-  // `window.webContents` and Electron never applies them to a `<webview>`
-  // guest's SEPARATE webContents. Two consequences, closed together via
-  // `did-attach-webview` since both need the same hook:
-  //
-  // G3: with no guard, any page inside the third-party panel could navigate
-  // the WHOLE panel (still branded "Figma"/"Notion") to an arbitrary https
-  // URL — a credible "your session expired, sign in again" phishing
-  // surface on the panel the user trusts. #80: right-click inside the
-  // panel showed no menu at all, since nothing built one for guest content.
-  //
-  // POLICY (decided here, not copied from the main window's fixed
-  // `applicationUrl` anchor, which doesn't fit a guest that legitimately
-  // navigates within its own origin): allow navigation that stays on the
-  // guest's CURRENT origin, and DEFLECT anything cross-origin to the
-  // user's real external browser (same `ElectronShell.openExternal`
-  // mechanism proven above for the main window) rather than silently
-  // blocking it. SSO/IdP redirects (Google, Microsoft, an enterprise's own
-  // SAML domain) are real, necessarily cross-origin, and not enumerable
-  // ahead of time — neither this fix nor the independent review that found
-  // G3 could verify Figma/Notion's SSO flow against a live account. A
-  // strict host allowlist would plausibly BREAK first login for exactly
-  // the managed-workspace users this matters most for; deflecting to a
-  // real browser tab keeps sign-in possible at the cost of a clunkier
-  // hop (the user finishes there and returns manually) — a real,
-  // acknowledged tradeoff, not a free one.
-  //
-  // SCOPED TO THIRD-PARTY ONLY: preview's guest loads the user's OWN,
-  // fully-trusted dev server — forcing an origin policy onto it would
-  // change existing, unrelated, out-of-scope behavior no one asked to
-  // change. Identity is checked via `webContents.session` (Electron's
-  // `WebContents` doesn't expose its partition string directly, and
-  // `getLastWebPreferences()` — what the reviewer's own probe used — isn't
-  // in this Electron version's type definitions), compared against the
-  // SAME session object `getThirdPartyBrowserSession()` already resolves
-  // and memoizes (BrowserSession.ts), warmed here the same way
-  // `createWindow` already eagerly warms the preview session.
-  it.effect(
-    "wires a guest will-navigate guard on the third-party webview: same-origin allowed",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          const guestWebContents = {
-            session: FAKE_THIRD_PARTY_SESSION,
-            getURL: () => "https://www.figma.com/files/recents",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          const willNavigate = guestListeners.get("will-navigate");
-          if (!willNavigate) {
-            return yield* Effect.die("guest will-navigate listener was not registered");
-          }
-          let prevented = false;
-          willNavigate(
-            { preventDefault: () => (prevented = true) },
-            "https://www.figma.com/design/abc/My-File",
-          );
-
-          assert.isFalse(prevented);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect(
-    "wires a guest will-navigate guard on the third-party webview: cross-origin denied and deflected externally",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const openedExternalUrls: unknown[] = [];
-        const layer = makeTestLayer({
-          window: fakeWindow.window,
-          createCount,
-          mainWindow,
-          openedExternalUrls,
-        });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          const guestWebContents = {
-            // F-3 (independent security review, 2026-08-04): the deflect
-            // rate limiter is keyed by webContents id. An explicit, unique
-            // id here keeps this test's budget separate from every other
-            // test in this file that also exercises a deflect — sharing
-            // `undefined` (what a fixture with no `id` field resolves to)
-            // would make tests order-dependent.
-            id: 9101,
-            session: FAKE_THIRD_PARTY_SESSION,
-            getURL: () => "https://www.figma.com/files/recents",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          const willNavigate = guestListeners.get("will-navigate");
-          if (!willNavigate) {
-            return yield* Effect.die("guest will-navigate listener was not registered");
-          }
-          let prevented = false;
-          // A look-alike phishing domain — NOT figma.com, NOT an obviously
-          // suspicious scheme, exactly the shape G3 describes.
-          willNavigate(
-            { preventDefault: () => (prevented = true) },
-            "https://figma-login-verify.example.com/session-expired",
-          );
-          yield* Effect.promise(() => Promise.resolve());
-
-          assert.isTrue(prevented);
-          assert.deepEqual(openedExternalUrls, [
-            "https://figma-login-verify.example.com/session-expired",
-          ]);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  // H2 (independent security review, 2026-08-04, merge-gate): `will-navigate`
-  // only fires for a navigation's INITIAL request — a same-origin request
-  // that then 302-redirects cross-origin fires `will-redirect` instead,
-  // which nothing listened to. Same policy, same rate limit, new event.
-  it.effect(
-    "wires a guest will-redirect guard on the third-party webview: same-origin redirect allowed",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const openedExternalUrls: unknown[] = [];
-        const layer = makeTestLayer({
-          window: fakeWindow.window,
-          createCount,
-          mainWindow,
-          openedExternalUrls,
-        });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          const guestWebContents = {
-            id: 9102,
-            session: FAKE_THIRD_PARTY_SESSION,
-            getURL: () => "https://www.figma.com/files/recents",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          const willRedirect = guestListeners.get("will-redirect");
-          if (!willRedirect) {
-            return yield* Effect.die("guest will-redirect listener was not registered");
-          }
-          let prevented = false;
-          willRedirect(
-            { preventDefault: () => (prevented = true) },
-            "https://www.figma.com/files/recents?redirected=1",
-          );
-          yield* Effect.promise(() => Promise.resolve());
-
-          assert.isFalse(prevented);
-          assert.deepEqual(openedExternalUrls, []);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect(
-    "wires a guest will-redirect guard on the third-party webview: cross-origin redirect denied and deflected externally",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const openedExternalUrls: unknown[] = [];
-        const layer = makeTestLayer({
-          window: fakeWindow.window,
-          createCount,
-          mainWindow,
-          openedExternalUrls,
-        });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          const guestWebContents = {
-            id: 9103,
-            session: FAKE_THIRD_PARTY_SESSION,
-            getURL: () => "https://www.figma.com/files/recents",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          const willRedirect = guestListeners.get("will-redirect");
-          if (!willRedirect) {
-            return yield* Effect.die("guest will-redirect listener was not registered");
-          }
-          let prevented = false;
-          // H1's own composing precondition: a same-origin request that
-          // 302s cross-origin — this is the effect, not the handler's
-          // return value.
-          willRedirect(
-            { preventDefault: () => (prevented = true) },
-            "http://127.0.0.1:19999/evil",
-          );
-          yield* Effect.promise(() => Promise.resolve());
-
-          assert.isTrue(prevented);
-          assert.deepEqual(openedExternalUrls, ["http://127.0.0.1:19999/evil"]);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  // F-3 (independent security review, 2026-08-04): the deflect path is
-  // rate limited so a hostile page can't spawn unbounded real browser tabs
-  // by looping a redirect/navigation.
-  it.effect(
-    "rate-limits repeated cross-origin will-redirect deflects from the same guest",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const openedExternalUrls: unknown[] = [];
-        const layer = makeTestLayer({
-          window: fakeWindow.window,
-          createCount,
-          mainWindow,
-          openedExternalUrls,
-        });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          const guestWebContents = {
-            id: 9104,
-            session: FAKE_THIRD_PARTY_SESSION,
-            getURL: () => "https://www.figma.com/files/recents",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          const willRedirect = guestListeners.get("will-redirect");
-          if (!willRedirect) {
-            return yield* Effect.die("guest will-redirect listener was not registered");
-          }
-          for (let i = 0; i < 3; i++) {
-            willRedirect({ preventDefault: () => {} }, `http://127.0.0.1:19999/evil?n=${i}`);
-          }
-          yield* Effect.promise(() => Promise.resolve());
-
-          assert.deepEqual(openedExternalUrls, ["http://127.0.0.1:19999/evil?n=0"]);
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect(
-    "does NOT wire the guest will-navigate guard on a preview webview (scoped to third-party only)",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-          if (!didAttachWebview) {
-            return yield* Effect.die("did-attach-webview listener was not registered");
-          }
-          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-          // A PREVIEW guest — a DIFFERENT session object, not the third-party
-          // one `did-attach-webview`'s handler was warmed with.
-          const guestWebContents = {
-            session: {} as Electron.Session,
-            getURL: () => "http://127.0.0.1:5733/",
-            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-              guestListeners.set(eventName, listener);
-            },
-          };
-          didAttachWebview({}, guestWebContents);
-
-          assert.isFalse(guestListeners.has("will-navigate"));
-          assert.isFalse(guestListeners.has("context-menu"));
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
-  it.effect("wires a guest context-menu guard on the third-party webview (#80)", () =>
-    Effect.gen(function* () {
-      const fakeWindow = makeFakeBrowserWindow();
-      const createCount = yield* Ref.make(0);
-      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-      const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
-
-      yield* Effect.gen(function* () {
-        const desktopWindow = yield* DesktopWindow.DesktopWindow;
-        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-        const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
-        if (!didAttachWebview) {
-          return yield* Effect.die("did-attach-webview listener was not registered");
-        }
-        const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
-        const guestWebContents = {
-          session: FAKE_THIRD_PARTY_SESSION,
-          getURL: () => "https://www.figma.com/files/recents",
-          on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
-            guestListeners.set(eventName, listener);
-          },
-        };
-        didAttachWebview({}, guestWebContents);
-
-        const contextMenu = guestListeners.get("context-menu");
-        if (!contextMenu) {
-          return yield* Effect.die("guest context-menu listener was not registered");
-        }
-        let prevented = false;
-        contextMenu(
-          { preventDefault: () => (prevented = true) },
-          {
-            editFlags: { canCut: false, canCopy: true, canPaste: false, canSelectAll: true },
-          },
-        );
-
-        // Denying default + popping a template is the same observable shape
-        // the main window's own context-menu test would use; `electronMenu
-        // .popupTemplate` here is a no-op mock (see `electronMenuLayer`), so
-        // the reachable assertion is that a menu was even attempted —
-        // proven by `preventDefault` firing, which only happens once this
-        // handler exists at all (before this fix, nothing was registered
-        // and this whole test would have died at the null-check above).
-        assert.isTrue(prevented);
-      }).pipe(Effect.provide(layer));
-    }),
-  );
+  // G3/#80's `did-attach-webview` guest-navigation guard (same-origin
+  // allow, cross-origin deny-and-deflect, `will-navigate`/`will-redirect`,
+  // a minimal guest context menu) tested here in this fix round no longer
+  // exists. FIGMA/NOTION DELETED (owner ruling, 2026-08-04): the guard was
+  // scoped by session identity to the third-party panel and was already
+  // 100% inert for every other guest (it bailed immediately unless
+  // `guestWebContents.session === thirdPartySession`), so removing it
+  // changes nothing about preview's behavior — see DesktopWindow.ts's own
+  // comment at the deletion site. The proven, tested mechanism these tests
+  // exercised is fully recoverable at commit 630eeb5e9 for `#88` (open,
+  // live today: this same navigation-spoofing class applies to preview's
+  // `<webview>` too) to restore against preview's session identity rather
+  // than reinvent.
 
   it.effect("allows a preview-partition webview to attach with contextIsolation=false", () =>
     Effect.gen(function* () {
@@ -1456,64 +1066,15 @@ describe("DesktopWindow", () => {
     }),
   );
 
-  it.effect(
-    "allows a third-party-partition webview to attach with contextIsolation=true (untrusted external content, no preload to protect)",
-    () =>
-      Effect.gen(function* () {
-        const fakeWindow = makeFakeBrowserWindow();
-        const createCount = yield* Ref.make(0);
-        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
-        const layer = makeTestLayer({
-          window: fakeWindow.window,
-          createCount,
-          mainWindow,
-          thirdPartyPartition: "persist:devgame-thirdparty-abc",
-        });
-
-        yield* Effect.gen(function* () {
-          const desktopWindow = yield* DesktopWindow.DesktopWindow;
-          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
-
-          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
-          if (!willAttachWebview) {
-            return yield* Effect.die("will-attach-webview listener was not registered");
-          }
-          let prevented = false;
-          const webPreferences: Record<string, unknown> = {
-            partition: "persist:devgame-thirdparty-abc",
-          };
-          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
-            partition: "persist:devgame-thirdparty-abc",
-            webpreferences: THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
-          });
-
-          assert.isFalse(prevented);
-          assert.deepEqual(webPreferences, {
-            partition: "persist:devgame-thirdparty-abc",
-            sandbox: true,
-            nodeIntegration: false,
-            nodeIntegrationInSubFrames: false,
-            webSecurity: true,
-            allowRunningInsecureContent: false,
-            contextIsolation: true,
-          });
-        }).pipe(Effect.provide(layer));
-      }),
-  );
-
   // F2 (independent security review, 2026-08-04), VERIFIED BY EXECUTION:
   // the vulnerability wasn't that fresh `webPreferences` lacked safe
   // defaults — it's that a renderer-supplied `<webview>` ATTRIBUTE
-  // (`disablewebsecurity`, `preload="..."`) reaches this handler already
-  // set on the object Electron hands in, and nothing overrode it. Probe:
-  // a webview with `disablewebsecurity` on the real third-party partition
-  // attached with `webSecurity:false`; a renderer-supplied `preload`
-  // executed (`ipcRenderer available: object` logged from inside the
-  // guest). This test starts from exactly that attacker-controlled shape
-  // and proves the handler forces it back, not just that an empty object
-  // ends up correct.
+  // (`disablewebsecurity`) reaches this handler already set on the object
+  // Electron hands in, and nothing overrode it. This test starts from
+  // exactly that attacker-controlled shape and proves the handler forces
+  // it back, not just that an empty object ends up correct.
   it.effect(
-    "overrides a malicious renderer-supplied webPreferences on the third-party partition",
+    "overrides a malicious renderer-supplied webPreferences on the preview partition",
     () =>
       Effect.gen(function* () {
         const fakeWindow = makeFakeBrowserWindow();
@@ -1523,7 +1084,7 @@ describe("DesktopWindow", () => {
           window: fakeWindow.window,
           createCount,
           mainWindow,
-          thirdPartyPartition: "persist:devgame-thirdparty-abc",
+          browserPartitions: ["persist:devgame-preview-abc"],
         });
 
         yield* Effect.gen(function* () {
@@ -1535,39 +1096,38 @@ describe("DesktopWindow", () => {
             return yield* Effect.die("will-attach-webview listener was not registered");
           }
           let prevented = false;
-          // Simulates what `<webview disablewebsecurity preload="file:///evil.js">`
-          // hands Electron BEFORE this handler runs.
+          // Simulates what `<webview disablewebsecurity>` hands Electron
+          // BEFORE this handler runs.
           const webPreferences: Record<string, unknown> = {
-            partition: "persist:devgame-thirdparty-abc",
+            partition: "persist:devgame-preview-abc",
             sandbox: false,
             nodeIntegration: true,
             nodeIntegrationInSubFrames: true,
             webSecurity: false,
             allowRunningInsecureContent: true,
-            preload: "file:///evil.js",
-            contextIsolation: false,
+            contextIsolation: true,
           };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
-            partition: "persist:devgame-thirdparty-abc",
-            webpreferences: THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES,
+            partition: "persist:devgame-preview-abc",
+            webpreferences: PREVIEW_WEBVIEW_PREFERENCES,
           });
 
           assert.isFalse(prevented);
           assert.deepEqual(webPreferences, {
-            partition: "persist:devgame-thirdparty-abc",
+            partition: "persist:devgame-preview-abc",
             sandbox: true,
             nodeIntegration: false,
             nodeIntegrationInSubFrames: false,
             webSecurity: true,
             allowRunningInsecureContent: false,
-            contextIsolation: true,
+            contextIsolation: false,
           });
         }).pipe(Effect.provide(layer));
       }),
   );
 
   it.effect(
-    "blocks a webview attach whose partition matches neither the preview nor the third-party allowlist",
+    "blocks a webview attach whose partition doesn't match the preview allowlist",
     () =>
       Effect.gen(function* () {
         const fakeWindow = makeFakeBrowserWindow();
@@ -1607,15 +1167,14 @@ describe("DesktopWindow", () => {
   // attribute is parsed with NO key allowlist and applied LAST, silently
   // overriding `partition` (and `preload`) on the object Electron
   // actually uses. `<webview partition="persist:devgame-preview-X"
-  // webpreferences="partition=persist:devgame-thirdparty-REAL,preload=/e
-  // vil.js">` used to be ALLOWED as preview (so `delete
-  // webPreferences.preload` was skipped and `contextIsolation` was forced
-  // false), while Electron attached the REAL third-party session with the
-  // attacker's preload running at `contextIsolation:false` — full
-  // `ipcRenderer` access inside the user's live, logged-in Figma/Notion
-  // session. This reproduces the reviewer's case C verbatim (values taken
-  // directly from their probe) and proves it denied outright, not merely
-  // reclassified.
+  // webpreferences="partition=persist:devgame-preview-INJECTED,preload=/e
+  // vil.js">` used to be ALLOWED as preview (so `contextIsolation` was
+  // forced false with the attacker's preload left in place), while
+  // Electron attached a session this process never derived, with a
+  // renderer-supplied preload running at `contextIsolation:false` — full
+  // `ipcRenderer` access. This reproduces the reviewer's case C verbatim
+  // (values taken directly from their probe) and proves it denied
+  // outright, not merely reclassified.
   it.effect(
     "denies a webview whose webpreferences attribute smuggles a different partition AND preload (G1 full chain)",
     () =>
@@ -1639,22 +1198,22 @@ describe("DesktopWindow", () => {
           // and set `preload` on this object — this is the field Electron
           // actually builds the guest session from.
           const webPreferences: Record<string, unknown> = {
-            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            partition: "persist:devgame-preview-injected0123456789ab",
             preload: "/Users/attacker/evil.js",
           };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
             partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",
             webpreferences:
-              "partition=persist:devgame-thirdparty-0123456789abcdef0123,preload=/Users/attacker/evil.js",
+              "partition=persist:devgame-preview-injected0123456789ab,preload=/Users/attacker/evil.js",
           });
 
           assert.isTrue(prevented);
           // Denied means untouched — no security-flag pinning even ran,
-          // and critically `preload` was never stripped (proving this
-          // path never reaches the "classified as preview, leave preload
-          // alone" branch that made the exploit work).
+          // and critically `preload` was never stripped, proving this
+          // path never reaches the "classified as preview, leave it alone"
+          // branch that made the exploit work.
           assert.deepEqual(webPreferences, {
-            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            partition: "persist:devgame-preview-injected0123456789ab",
             preload: "/Users/attacker/evil.js",
           });
         }).pipe(Effect.provide(layer));
@@ -1664,8 +1223,8 @@ describe("DesktopWindow", () => {
   // G1, the partition-confusion half alone (no preload) — the reviewer's
   // case B. Denied for the same reason as the full chain above, but
   // proven independently: even without a malicious preload, letting this
-  // through would force `contextIsolation:false` onto the REAL third-party
-  // session (preview's posture), a real downgrade in its own right.
+  // through would attach a session this process never derived under
+  // preview's own posture, a real downgrade in its own right.
   it.effect("denies a webview whose webpreferences attribute smuggles a different partition alone", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();
@@ -1683,11 +1242,11 @@ describe("DesktopWindow", () => {
         }
         let prevented = false;
         const webPreferences: Record<string, unknown> = {
-          partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+          partition: "persist:devgame-preview-injected0123456789ab",
         };
         willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
           partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",
-          webpreferences: "partition=persist:devgame-thirdparty-0123456789abcdef0123",
+          webpreferences: "partition=persist:devgame-preview-injected0123456789ab",
         });
 
         assert.isTrue(prevented);
@@ -1725,12 +1284,12 @@ describe("DesktopWindow", () => {
           }
           let prevented = false;
           const webPreferences: Record<string, unknown> = {
-            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            partition: "persist:devgame-preview-injected0123456789ab",
             webviewTag: true,
             experimentalFeatures: true,
           };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
-            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            partition: "persist:devgame-preview-injected0123456789ab",
             webpreferences:
               "webviewTag=true,nodeIntegrationInWorker=true,experimentalFeatures=true,enableWebSQL=true,javascript=true,images=false,plugins=true",
           });
@@ -1768,7 +1327,7 @@ describe("DesktopWindow", () => {
           }
           let prevented = false;
           const webPreferences: Record<string, unknown> = {
-            partition: "persist:devgame-thirdparty-0123456789abcdef0123",
+            partition: "persist:devgame-preview-injected0123456789ab",
           };
           willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
             partition: "persist:devgame-preview-aaaaaaaaaaaaaaaaaaaa",

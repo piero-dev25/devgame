@@ -54,9 +54,6 @@ import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import FilesDockPanel from "./FilesDockPanel";
 import TerminalDockPanel from "./TerminalDockPanel";
-// `AppWindow` (icon) and `ThirdPartySourceDockPanel` (component) imports
-// removed with the registration below — see that comment block (`#78`/
-// `#79` HOLD). Restore both imports when un-holding.
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -69,13 +66,6 @@ import { SidebarPanel } from "./SidebarPanel";
 
 const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
-/** Task #55 (Section C precondition). No `chatDockHandle.ts` promotion —
- * unlike Diff/Files/Terminal/Browser, nothing today needs to open this
- * panel PROGRAMMATICALLY (no chat-markdown-link/script-auto-open-shaped
- * entry point exists for it); "Add tab" is its only open path, same as
- * Sidebar/Chat's own local-only ids below. Promote it to `chatDockHandle.ts`
- * if/when a caller needs `openChatDockPanel("third-party-source")`. */
-export const THIRD_PARTY_SOURCE_PANEL_ID = "third-party-source";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
@@ -318,57 +308,12 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * Figma/Notion — registration HELD, per an explicit directive from the
- * independent security review, NOT a design change. Do not uncomment the
- * `.register()` call below without confirming both close:
- *
- * - `#78` (SHIP BLOCKER, PROVEN by execution against real Electron):
- *   `DesktopWindow.ts`'s will-attach-webview handler decides everything
- *   from `params.partition`, but Electron builds the guest from
- *   `webPreferences.partition` — a different field a renderer-supplied
- *   `webpreferences=` attribute can override with no key allowlist. A
- *   crafted webview attribute set gets classified as the harmless preview
- *   path while Electron actually attaches it with an attacker `preload`
- *   at `contextIsolation:false` — full `ipcRenderer` access inside the
- *   REAL logged-in Figma/Notion session (cookies, tokens, live DOM).
- * - `#79` (largest blast radius in the review, verified end-to-end):
- *   `thirdPartySourceTabId()` is a fixed, guessable string
- *   ("third-party-browser:figma"/"…:notion"), and the third-party guest
- *   registers through the ordinary preview `tabsRef` path with no
- *   partition check. Every agent-facing MCP automation tool
- *   (preview_evaluate/click/type/snapshot) takes an arbitrary tabId — so
- *   the moment this panel is reachable, a PROMPT-INJECTED AGENT can
- *   already run arbitrary JS inside the user's live authenticated
- *   Figma/Notion session, no exploit of `#78` required. This blast radius
- *   was live the instant registration landed, independent of the webview
- *   bug above.
- *
- * The panel, its component (`ThirdPartySourceDockPanel.tsx`), its tab icon
- * entry (`reactTabRenderer.tsx`), and its structural test
- * (`ChatDock.test.ts`) are all left in place, finished and ready — holding
- * registration is the ENTIRE mitigation needed while `#78`/`#79` are
- * fixed, since none of the rest of this feature is reachable without it.
- * See `ChatDock.test.ts` for the test that currently asserts the hold
- * itself, not the registration.
- */
-// chatDockPanelRegistry.register({
-//   id: THIRD_PARTY_SOURCE_PANEL_ID,
-//   title: "Figma / Notion",
-//   icon: AppWindow,
-//   component: ThirdPartySourceDockPanel,
-//   defaultLocation: "right",
-//   singleton: true,
-// });
-
-/**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
  * Terminal and Browser further right — the same third-column slot Files
  * occupied before Part A deleted our own version of it, now occupied by
  * T3's own Diff, Files, Terminal AND Browser surfaces instead of a
  * re-filled stand-in. This preset now covers every surface
- * spec-surfaces-as-dock-panels.md set out to promote. Figma/Notion is
- * registered above but intentionally NOT part of this preset — see that
- * registration's own comment for why "open on demand" is correct here.
+ * spec-surfaces-as-dock-panels.md set out to promote.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant

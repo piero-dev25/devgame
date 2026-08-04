@@ -92,24 +92,12 @@ vi.mock("electron", () => ({
   },
 }));
 
-// G4 (independent security review, 2026-08-04): a distinct object identity,
-// never assigned as any ordinary test webContents' `.session`, so existing
-// tests' `wc.session === thirdPartySession` comparisons stay false exactly as
-// before this mock stopped dying — only a test that deliberately sets
-// `session: FAKE_THIRD_PARTY_SESSION` on its fake webContents exercises the
-// third-party branch.
-const FAKE_THIRD_PARTY_SESSION = { __brand: "fake-third-party-session" } as never;
-
 const baseBrowserSessionMock: BrowserSession.BrowserSession["Service"] = {
   getPartition: () => Effect.succeed("persist:devgame-preview-test"),
   isPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
   getSession: () => Effect.die("unexpected getSession"),
   clearCookies: () => Effect.void,
   clearCache: () => Effect.void,
-  getThirdPartyBrowserPartition: () => Effect.succeed("persist:devgame-thirdparty-test"),
-  getThirdPartyBrowserSession: () => Effect.succeed(FAKE_THIRD_PARTY_SESSION),
-  isThirdPartyPartition: (partition) => partition.startsWith("persist:devgame-thirdparty-"),
-  clearThirdPartySourceData: () => Effect.die("unexpected clearThirdPartySourceData"),
 };
 
 const browserSessionLayer = Layer.succeed(
@@ -515,59 +503,6 @@ describe("PreviewManager", () => {
         expect(loadURL).not.toHaveBeenCalled();
       }),
     ),
-  );
-
-  // F4 (owner ruling, relayed 2026-08-04): PreviewManager.clearThirdPartySourceData
-  // is a thin pass-through to BrowserSession — this proves it actually forwards
-  // the caller's origin (not, say, always the same hardcoded one, and not
-  // swallowed) by observing a fake per-origin "signed in" flag change through
-  // it, the same execution-not-assertion proof used at the BrowserSession layer.
-  effectIt.effect(
-    "clearThirdPartySourceData forwards the exact origin through to BrowserSession",
-    () => {
-      const signedInOrigins = new Set(["https://www.figma.com", "https://www.notion.so"]);
-      return withManagerUsingBrowserSession(
-        {
-          clearThirdPartySourceData: (origin) =>
-            Effect.sync(() => {
-              signedInOrigins.delete(origin);
-            }),
-        },
-        (manager) =>
-          Effect.gen(function* () {
-            yield* manager.clearThirdPartySourceData("https://www.notion.so");
-
-            expect(signedInOrigins.has("https://www.notion.so")).toBe(false);
-            expect(signedInOrigins.has("https://www.figma.com")).toBe(true);
-          }),
-      );
-    },
-  );
-
-  effectIt.effect(
-    "clearThirdPartySourceData wraps a BrowserSession failure as a PreviewOperationError",
-    () =>
-      withManagerUsingBrowserSession(
-        {
-          clearThirdPartySourceData: (origin) =>
-            Effect.fail(
-              new BrowserSession.BrowserSessionThirdPartySignOutError({
-                origin,
-                cause: new Error("clearStorageData rejected"),
-              }),
-            ),
-        },
-        (manager) =>
-          Effect.gen(function* () {
-            const exit = yield* Effect.exit(manager.clearThirdPartySourceData("https://www.figma.com"));
-            expect(Exit.isFailure(exit)).toBe(true);
-            const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : null;
-            expect(error).toBeInstanceOf(PreviewManager.PreviewOperationError);
-            expect((error as PreviewManager.PreviewOperationError).operation).toBe(
-              "clearThirdPartySourceData",
-            );
-          }),
-      ),
   );
 
   effectIt.effect("mirrors Electron's effective zoom across registration and navigation", () =>
@@ -2281,23 +2216,23 @@ describe("G2 — early main-process window-open guard", () => {
   );
 });
 
-// H1 (independent security review, 2026-08-04, merge-gate — SHIP BLOCKER):
-// both window-open handlers denied the popup and fell back to
-// `wc.loadURL(url)` on the SAME guest — but Electron never fires
-// `will-navigate` for a main-process `loadURL`, so G3's origin guard
-// (DesktopWindow.ts, listens for exactly that event) never saw this path.
-// Proven live: a third-party guest's `window.open(crossOriginUrl)`
-// repainted the whole panel to the attacker origin. These assert the
-// EFFECT — did the guest actually navigate, was openExternal actually
-// called with which URL — not the handler's return value, which was
-// always {action:"deny"} even while the bug was live.
-describe("H1 — early window-open handler enforces G3's origin policy for third-party guests", () => {
-  // This describe is a SIBLING of `describe("PreviewManager", ...)`, not
-  // nested inside it — that outer block's own `beforeEach` (which clears
-  // `appOn`/`shellOpenExternal`/etc.) does not apply here. Without a local
-  // one, `appOn.mock.calls` and `shellOpenExternal.mock.calls` accumulate
-  // across every test in this block, and `getHandler()`'s `.find()` can
-  // return an EARLIER test's handler registration.
+// G2/H1/F-3's session-identity-scoped popup policy (deny-and-navigate,
+// same-origin-allow, cross-origin-deny-and-deflect, rate limited) is gone
+// with the third-party feature it protected (owner ruling, 2026-08-04) —
+// see Manager.ts's own comment at the collapse site, and git history at
+// commit 630eeb5e9 for the removed mechanism, fully recoverable for `#88`
+// (open, live today: this same navigation-spoofing class applies to
+// preview's `<webview>` too) to restore against preview's session rather
+// than reinvent. What remains — and what `handlePopupNavigation` still
+// exists to do — is G2's own original fix: a window-open handler
+// installed BEFORE any renderer round trip completes, so a guest calling
+// `window.open` early never falls through to Electron's default,
+// unrestricted popup window. These pin that the collapse to unconditional
+// `loadInPanel` behavior actually happened, not just that the old
+// session-branching code is gone.
+describe("early window-open handler always loads the popup URL in the guest, never opens a new window", () => {
+  // Sibling of `describe("PreviewManager", ...)` — see its own beforeEach
+  // for why this block needs its own.
   beforeEach(() => {
     appOn.mockClear();
     fromId.mockClear();
@@ -2313,55 +2248,18 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
   // `handlePopupNavigation` runs on a separately `runFork`'d fiber (the
   // window-open handler itself is a synchronous Electron callback, not an
   // Effect the test can `yield*`), and it crosses a real Promise boundary
-  // (`attemptPromise` wrapping `wc.loadURL`/`shell.openExternal`). A single
-  // `Effect.yieldNow` is not reliably enough ticks for that fiber to fully
-  // settle before the assertion runs — under-flushing here doesn't just
-  // flake THIS test, it lets the fiber's mock call land LATER, bleeding
-  // into a subsequent test's own assertions once `beforeEach` clears the
-  // mock but the stray fiber is still in flight.
-  // H1's fibers cross a real Promise boundary; `it.live` (real clock) plus
-  // a short real sleep settles them reliably, unlike `it.effect`'s virtual
-  // TestClock, which never advances without an explicit tick and left
-  // these fibers' mock calls landing unpredictably across test boundaries.
+  // (`attemptPromise` wrapping `wc.loadURL`). `it.live` (real clock) plus a
+  // short real sleep settles it reliably, unlike `it.effect`'s virtual
+  // TestClock, which never advances without an explicit tick.
   const flush = Effect.sleep(50);
 
-  effectIt.live(
-    "denies AND does not loadURL a cross-origin popup on a third-party guest — deflects instead",
-    () =>
-      withManager((manager) =>
-        Effect.gen(function* () {
-          void manager;
-          const webContentsCreatedHandler = getHandler();
-          const loadURL = vi.fn(async () => undefined);
-          const setWindowOpenHandler = vi.fn();
-          webContentsCreatedHandler(
-            {},
-            {
-              id: 501,
-              getType: () => "webview",
-              getURL: () => "https://figma.example/file/abc",
-              session: FAKE_THIRD_PARTY_SESSION,
-              loadURL,
-              setWindowOpenHandler,
-            },
-          );
-          const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-            url: string;
-          }) => { action: string };
-
-          const result = openHandler({ url: "https://attacker.example/evil" });
-
-          expect(result).toEqual({ action: "deny" });
-          yield* flush;
-          // The effect, not the return value: the guest must NOT have
-          // navigated in-panel to the attacker origin.
-          expect(loadURL).not.toHaveBeenCalled();
-          expect(shellOpenExternal).toHaveBeenCalledWith("https://attacker.example/evil");
-        }),
-      ),
-  );
-
-  effectIt.live("allows a same-origin popup on a third-party guest to load in place", () =>
+  // Mutation-tested (this fix round): reintroducing a deny-only branch, or
+  // any branch on `wc.session`, should redden one of these two — together
+  // they assert `loadURL` fires with the exact URL for a same-origin
+  // request AND a cross-origin request, on two distinct session
+  // identities, so no origin- or session-based conditional can silently
+  // return and still pass both.
+  effectIt.live("loads a same-origin popup URL in the guest, unconditionally", () =>
     withManager((manager) =>
       Effect.gen(function* () {
         void manager;
@@ -2371,10 +2269,10 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
         webContentsCreatedHandler(
           {},
           {
-            id: 502,
+            id: 501,
             getType: () => "webview",
-            getURL: () => "https://figma.example/file/abc",
-            session: FAKE_THIRD_PARTY_SESSION,
+            getURL: () => "http://localhost:5173/",
+            session: { __brand: "session-a" },
             loadURL,
             setWindowOpenHandler,
           },
@@ -2383,17 +2281,18 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
           url: string;
         }) => { action: string };
 
-        openHandler({ url: "https://figma.example/file/def" });
+        const result = openHandler({ url: "http://localhost:5173/popup" });
 
+        expect(result).toEqual({ action: "deny" });
         yield* flush;
-        expect(loadURL).toHaveBeenCalledWith("https://figma.example/file/def");
+        expect(loadURL).toHaveBeenCalledWith("http://localhost:5173/popup");
         expect(shellOpenExternal).not.toHaveBeenCalled();
       }),
     ),
   );
 
   effectIt.live(
-    "keeps the original unconditional loadURL for a NON-third-party (preview) guest — unaffected by G3's policy",
+    "loads a cross-origin popup URL in the guest too, unconditionally — no origin branch survives",
     () =>
       withManager((manager) =>
         Effect.gen(function* () {
@@ -2404,10 +2303,10 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
           webContentsCreatedHandler(
             {},
             {
-              id: 503,
+              id: 502,
               getType: () => "webview",
               getURL: () => "http://localhost:5173/",
-              session: { __brand: "ordinary-preview-session" },
+              session: { __brand: "session-b" },
               loadURL,
               setWindowOpenHandler,
             },
@@ -2416,342 +2315,12 @@ describe("H1 — early window-open handler enforces G3's origin policy for third
             url: string;
           }) => { action: string };
 
-          openHandler({ url: "https://some-other-origin.example/" });
+          const result = openHandler({ url: "https://some-other-origin.example/" });
 
+          expect(result).toEqual({ action: "deny" });
           yield* flush;
           expect(loadURL).toHaveBeenCalledWith("https://some-other-origin.example/");
           expect(shellOpenExternal).not.toHaveBeenCalled();
-        }),
-      ),
-  );
-
-  // F-3 (same review): the deflect path is rate limited so a hostile page
-  // can't spawn unbounded real browser tabs by looping window.open.
-  effectIt.live("rate-limits repeated cross-origin deflects from the same guest", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        void manager;
-        const webContentsCreatedHandler = getHandler();
-        const loadURL = vi.fn(async () => undefined);
-        const setWindowOpenHandler = vi.fn();
-        webContentsCreatedHandler(
-          {},
-          {
-            id: 504,
-            getType: () => "webview",
-            getURL: () => "https://figma.example/file/abc",
-            session: FAKE_THIRD_PARTY_SESSION,
-            loadURL,
-            setWindowOpenHandler,
-          },
-        );
-        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-          url: string;
-        }) => { action: string };
-
-        openHandler({ url: "https://attacker.example/evil?n=0" });
-        yield* flush;
-        openHandler({ url: "https://attacker.example/evil?n=1" });
-        yield* flush;
-        openHandler({ url: "https://attacker.example/evil?n=2" });
-        yield* flush;
-
-        expect(shellOpenExternal).toHaveBeenCalledOnce();
-        expect(shellOpenExternal).toHaveBeenCalledWith("https://attacker.example/evil?n=0");
-      }),
-    ),
-  );
-});
-
-describe("F-1 fail-closed — third-party session identity cannot be resolved at startup", () => {
-  // Sibling of `describe("PreviewManager", ...)` — see H1's own comment on
-  // this same pattern.
-  beforeEach(() => {
-    appOn.mockClear();
-    fromId.mockClear();
-    shellOpenExternal.mockClear();
-  });
-
-  const flush = Effect.sleep(50);
-
-  // Mutation-tested (independent review, 2026-08-04): flipping
-  // `resolvePopupNavigationTarget`'s `thirdPartySessionForPopupPolicy ===
-  // null` branch from `denyOnly` to `loadInPanel` was the ONLY survivor out
-  // of nine mutations run against the real popup-policy module — nothing
-  // previously asserted this handler's behavior when
-  // `getThirdPartyBrowserSession()` itself fails at startup. Unreachable in
-  // practice today (BrowserSession.ts's real implementation only fails on a
-  // partition-derivation or session-creation error, both surfaced loudly
-  // elsewhere), and it correctly fails CLOSED already — this pins that so a
-  // future edit can't flip it to fail-open unnoticed.
-  effectIt.live(
-    "denies AND does not loadURL any popup — third-party or not — when third-party session identity failed to resolve",
-    () =>
-      withManagerUsingBrowserSession(
-        {
-          getThirdPartyBrowserSession: () =>
-            Effect.fail(
-              new BrowserSession.BrowserSessionCreationError({
-                scope: "third-party-tabs",
-                partition: "persist:devgame-thirdparty-test",
-                cause: new Error("simulated session-creation failure"),
-              }),
-            ),
-        },
-        (manager) =>
-          Effect.gen(function* () {
-            void manager;
-            const webContentsCreatedHandler = appOn.mock.calls.find(
-              ([event]) => event === "web-contents-created",
-            )?.[1] as (event: unknown, wc: unknown) => void;
-            const loadURL = vi.fn(async () => undefined);
-            const setWindowOpenHandler = vi.fn();
-            webContentsCreatedHandler(
-              {},
-              {
-                id: 505,
-                getType: () => "webview",
-                getURL: () => "https://figma.example/file/abc",
-                session: FAKE_THIRD_PARTY_SESSION,
-                loadURL,
-                setWindowOpenHandler,
-              },
-            );
-            const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
-              url: string;
-            }) => { action: string };
-
-            // A same-origin URL — under G3's normal policy this would load
-            // in-panel. Deny-only means it must not, even here.
-            const result = openHandler({ url: "https://figma.example/file/def" });
-
-            expect(result).toEqual({ action: "deny" });
-            yield* flush;
-            // The effect, not the return value: deny-only means NOTHING
-            // navigates and NOTHING deflects.
-            expect(loadURL).not.toHaveBeenCalled();
-            expect(shellOpenExternal).not.toHaveBeenCalled();
-          }),
-      ),
-  );
-});
-
-describe("G4 — automation namespace excludes third-party tabs", () => {
-  // Sibling of `describe("PreviewManager", ...)` — see H1's own comment on
-  // this same pattern.
-  beforeEach(() => {
-    appOn.mockClear();
-    fromId.mockClear();
-  });
-
-  const thirdPartyWc = (id = 90) =>
-    ({
-      id,
-      isDestroyed: () => false,
-      getType: () => "webview",
-      getURL: () => "https://www.figma.com/file/secret-design",
-      getTitle: () => "Figma",
-      isLoading: () => false,
-      isDevToolsOpened: () => false,
-      getZoomFactor: () => 1,
-      setZoomFactor: vi.fn(),
-      on: vi.fn(),
-      off: vi.fn(),
-      ipc: { on: vi.fn(), off: vi.fn() },
-      send: webviewSend,
-      navigationHistory: { canGoBack: () => false, canGoForward: () => false },
-      setWindowOpenHandler: vi.fn(),
-      debugger: {
-        isAttached: () => false,
-        attach: vi.fn(),
-        sendCommand: vi.fn(async () => undefined),
-        on: vi.fn(),
-        off: vi.fn(),
-      },
-      session: FAKE_THIRD_PARTY_SESSION,
-    });
-
-  effectIt.effect("rejects automationEvaluate against a tab on the third-party session", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        fromId.mockReturnValue(thirdPartyWc() as never);
-        yield* manager.createTab("third-party-browser:figma");
-        yield* manager.registerWebview("third-party-browser:figma", 90);
-
-        const exit = yield* Effect.exit(
-          manager.automationEvaluate("third-party-browser:figma", {
-            expression: "document.cookie",
-          }),
-        );
-
-        expect(Exit.isFailure(exit)).toBe(true);
-        if (Exit.isSuccess(exit)) return;
-        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
-        expect(error).toMatchObject({
-          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
-          tabId: "third-party-browser:figma",
-          operation: "evaluate",
-        });
-      }),
-    ),
-  );
-
-  effectIt.effect(
-    "does not reject a tab merely because its id LOOKS third-party — the check is session identity, not the name",
-    () =>
-      withManager((manager) =>
-        Effect.gen(function* () {
-          const sendCommand = vi.fn(async (method: string) =>
-            method === "Runtime.evaluate" ? { result: { value: null } } : undefined,
-          );
-          // Same tabId string a real third-party panel would use, but this
-          // webContents' session is NOT the third-party singleton — proves
-          // the guard reads wc.session, not tabId.startsWith(...).
-          fromId.mockReturnValue({
-            ...thirdPartyWc(),
-            session: { __brand: "ordinary" },
-            debugger: { isAttached: () => false, attach: vi.fn(), sendCommand, on: vi.fn(), off: vi.fn() },
-          } as never);
-          yield* manager.createTab("third-party-browser:figma");
-          yield* manager.registerWebview("third-party-browser:figma", 90);
-
-          const result = yield* manager.automationEvaluate("third-party-browser:figma", {
-            expression: "1 + 1",
-          });
-
-          expect(result).toBeNull();
-        }),
-      ),
-  );
-
-  effectIt.effect("rejects automationClick against a third-party tab", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        fromId.mockReturnValue(thirdPartyWc(91) as never);
-        yield* manager.createTab("third-party-browser:notion");
-        yield* manager.registerWebview("third-party-browser:notion", 91);
-
-        const exit = yield* Effect.exit(
-          manager.automationClick("third-party-browser:notion", { x: 10, y: 10 }),
-        );
-
-        expect(Exit.isFailure(exit)).toBe(true);
-        if (Exit.isSuccess(exit)) return;
-        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
-        expect(error).toMatchObject({
-          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
-          operation: "click",
-        });
-      }),
-    ),
-  );
-
-  effectIt.effect("rejects automationStatus against a third-party tab instead of reporting it", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        fromId.mockReturnValue(thirdPartyWc(92) as never);
-        yield* manager.createTab("third-party-browser:figma");
-        yield* manager.registerWebview("third-party-browser:figma", 92);
-
-        const exit = yield* Effect.exit(manager.automationStatus("third-party-browser:figma"));
-
-        expect(Exit.isFailure(exit)).toBe(true);
-        if (Exit.isSuccess(exit)) return;
-        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
-        expect(error).toMatchObject({ _tag: "PreviewAutomationThirdPartyTabForbiddenError" });
-      }),
-    ),
-  );
-
-  effectIt.effect(
-    "rejects navigate against an already-attached third-party tab without calling loadURL",
-    () =>
-      withManager((manager) =>
-        Effect.gen(function* () {
-          const loadURL = vi.fn(async () => undefined);
-          fromId.mockReturnValue({ ...thirdPartyWc(93), loadURL } as never);
-          yield* manager.createTab("third-party-browser:figma");
-          yield* manager.registerWebview("third-party-browser:figma", 93);
-
-          const exit = yield* Effect.exit(
-            manager.navigate("third-party-browser:figma", "https://evil.example.com"),
-          );
-
-          expect(Exit.isFailure(exit)).toBe(true);
-          if (Exit.isSuccess(exit)) return;
-          const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
-          expect(error).toMatchObject({
-            _tag: "PreviewAutomationThirdPartyTabForbiddenError",
-            operation: "navigate",
-          });
-          expect(loadURL).not.toHaveBeenCalled();
-        }),
-      ),
-  );
-
-  effectIt.effect("rejects startRecording against a third-party tab", () =>
-    withManager((manager) =>
-      Effect.gen(function* () {
-        fromId.mockReturnValue(thirdPartyWc(94) as never);
-        yield* manager.createTab("third-party-browser:figma");
-        yield* manager.registerWebview("third-party-browser:figma", 94);
-
-        const exit = yield* Effect.exit(manager.startRecording("third-party-browser:figma"));
-
-        expect(Exit.isFailure(exit)).toBe(true);
-        if (Exit.isSuccess(exit)) return;
-        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
-        expect(error).toMatchObject({
-          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
-          operation: "recordingStart",
-        });
-      }),
-    ),
-  );
-
-  effectIt.effect(
-    "still allows automationEvaluate against an ordinary (non-third-party) preview tab",
-    () =>
-      withManager((manager) =>
-        Effect.gen(function* () {
-          const sendCommand = vi.fn(async (method: string) =>
-            method === "Runtime.evaluate" ? { result: { value: null } } : undefined,
-          );
-          fromId.mockReturnValue({
-            id: 95,
-            isDestroyed: () => false,
-            getType: () => "webview",
-            getURL: () => "https://example.com",
-            getTitle: () => "Example",
-            isLoading: () => false,
-            isDevToolsOpened: () => false,
-            getZoomFactor: () => 1,
-            setZoomFactor: vi.fn(),
-            on: vi.fn(),
-            off: vi.fn(),
-            ipc: { on: vi.fn(), off: vi.fn() },
-            send: webviewSend,
-            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
-            setWindowOpenHandler: vi.fn(),
-            debugger: {
-              isAttached: () => false,
-              attach: vi.fn(),
-              sendCommand,
-              on: vi.fn(),
-              off: vi.fn(),
-            },
-            // No `session` field at all — matches every ordinary preview tab
-            // fixture elsewhere in this file, none of which is the
-            // third-party singleton.
-          } as never);
-          yield* manager.createTab("tab_ordinary");
-          yield* manager.registerWebview("tab_ordinary", 95);
-
-          const result = yield* manager.automationEvaluate("tab_ordinary", {
-            expression: "1 + 1",
-          });
-
-          expect(result).toBeNull();
         }),
       ),
   );

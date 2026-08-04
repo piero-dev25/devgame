@@ -188,93 +188,17 @@ running B4's own trigger and proving nothing new).
 
 ---
 
-## Section C — Figma/Notion tabs with "Add to chat"
+## Section C — DELETED (was: Figma/Notion tabs with "Add to chat")
 
-**Read this before running this section.** As of this writing, two gates
-exist, checked in this order — the first is the harder one: it currently
-makes the whole section un-drivable regardless of the second's status.
-
-1. **`ThirdPartySourceDockPanel`'s registration is deliberately HELD, not
-   simply unbuilt.** `#55`'s registration work landed, then was immediately
-   un-registered again in the same session once `#78` (G1, SHIP BLOCKER,
-   proven by execution — the webview partition-classification bypass) and
-   `#79` (G4 — a fixed, guessable third-party tabId reachable by any MCP
-   automation tool, independent of `#78`) surfaced. `#78`'s own text states
-   "Registration of ThirdPartySourceDockPanel is HELD until this and G4
-   close." The panel component, its tab-icon entry, and its structural test
-   are all finished and left in place — only the
-   `chatDockPanelRegistry.register(...)` call in `ChatDock.tsx` is
-   commented out, with the hold reasoning inline. Confirm `#78` and `#79`
-   are BOTH closed before assuming there's a UI entry point to drive at
-   all — grepping for `ThirdPartySourceDockPanel` will find it either way
-   now, since the component exists; check whether the `.register()` call is
-   live, not just whether the file exists. If either is open, mark this
-   whole section `BLOCKED — #78/#79 not resolved` and stop here; do not
-   improvise a way to reach the panel around the hold.
-2. **`#75`'s security findings must ALSO be resolved, independently of the
-   hold above.** F1 (third-party pages silently granted preview-tier
-   permissions — geolocation/clipboard, no prompt) is rated blocking. F5
-   (Google SSO popups are swallowed — `allowpopups` missing on the
-   third-party webview — so the standard login path for both Figma and
-   Notion doesn't work) means the feature may not even be usable
-   end-to-end regardless of security posture. **Confirm F1 and F5 (at
-   minimum) have landed fixes before running C1–C3** — running this
-   section against unpatched code would either produce a false pass
-   (login silently fails, so nothing meaningful gets tested) or exercise a
-   real security hole. If they haven't landed, mark this whole section
-   `BLOCKED — #75 not resolved`, do not improvise around it.
-
-Once both preconditions are confirmed:
-
-| #                                                                      | Check                                                                                                                                                                                                                                      | Evidence                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| C1                                                                     | Open a Figma file tab.                                                                                                                                                                                                                     | Figma loads and renders inside the panel (not a blank/error webview). Sign-in, if not already authenticated, actually completes (this is F5's exact regression surface — treat a swallowed SSO popup as a hard fail, not a "login separately then retry"). 📸.                                                                                                               |
-| C2                                                                     | Same for a Notion page tab.                                                                                                                                                                                                                | Same bar as C1. 📸.                                                                                                                                                                                                                                                                                                                                                          |
-| C3                                                                     | From a Figma or Notion tab, use "Add to chat."                                                                                                                                                                                             | The referenced content (page/frame identity, not a screenshot-only blob, unless that's the deliberate design) lands in the composer/thread in a form the agent can actually use — confirm by asking the agent a question that requires the added content and checking its answer references it correctly. 📸 both the "Add to chat" action and the resulting composer state. |
-| C4 (negative)                                                          | Attempt "Add to chat" before the tab has finished loading, or on a page that failed to load.                                                                                                                                               | Fails visibly and specifically (not a silent no-op, not a broken/blank attachment sent to the thread).                                                                                                                                                                                                                                                                       |
-| C5 (security spot-check, not a full re-audit — `#75` already did that) | With the browser devtools reachable for the third-party webview (or via the same probe method `#75`'s review used), confirm the third-party session does **not** silently grant geolocation/clipboard permissions (F1's exact regression). | No unprompted "granted" result for either permission against the third-party partition.                                                                                                                                                                                                                                                                                      |
-
-### Known Electron permission-set behaviors — read before running C1–C5
-
-Two independent Electron probes (separate from `#75`'s own review) established
-what the third-party webview's empty permission set actually does at
-runtime — one of these changes **how** this section gets run, not just what
-it finds, so read it before starting rather than after being surprised:
-
-- **A denied `requestFullscreen()` never settles — it hangs, it does not
-  reject.** Measured past a 4-second timeout with no rejection. A denied
-  fullscreen therefore presents to a runner as **the app freezing**, not as
-  an error message or a visible "permission denied" state — the worst
-  possible shape to hit live. If anything in C1–C3 can trigger fullscreen (a
-  Figma prototype's "Present" mode is the likely trigger) and the panel
-  appears to hang, **that is the deliberate empty permission set working as
-  designed, not a defect** — record it as the expected behavior and move on;
-  don't spend time chasing it as a crash or a deadlock.
-- **`pointerLock` is also denied, but rejects rather than hanging** — its
-  end-user-visible behavior isn't as clearly established as fullscreen's, so
-  don't assert a specific UI symptom for it with the same confidence. If
-  encountered, describe what was actually observed rather than assuming it
-  matches the fullscreen shape.
-- **Ordinary user-driven copy/paste works fine and never reaches the
-  permission handler at all** — keyboard shortcut, right-click menu, and
-  `execCommand` under a real user gesture all succeed. What's denied is the
-  **async Clipboard API** (`navigator.clipboard.*`), i.e. scripted access.
-  By inference — **unconfirmed, needs a real logged-in session to check** —
-  product features built on that API (Figma/Notion's own "Copy link," "Copy
-  as PNG/SVG," and similar) may be blocked even though manual copy/paste
-  isn't. Treat that as an open observation for whoever runs C1–C3 with real
-  credentials, not as an established limitation to report either way without
-  checking.
-- **Methodology caution, not just a finding — this changes how C5 (and any
-  manual clipboard spot-check) must be run.** Synthesized keystrokes
-  (`sendInputEvent`-style key simulation) do **not** exercise copy/paste on
-  macOS — native edit commands route outside the renderer's key handling
-  entirely, so a simulated Cmd+C/Cmd+V silently does nothing. Both probes
-  hit this and got a false "denied" reading before realizing the input
-  itself never landed. **Any clipboard check in this section must be driven
-  by a real human pressing the keys or using the menu item** — a
-  computer-use driver simulating the keystroke proves nothing, pass or fail.
-
+**Owner ruling, 2026-08-04, verbatim:** *"figma and notion was all wrong, it
+just opens a web page... delete figma and notion tabs and related code."*
+Wrong at the concept level — an embedded browser rendering figma.com was
+never what "Figma as a tab" meant — not a bug in the `#78`/`#79` security
+hold this section used to gate on. The feature, its panel, its store, its
+identity/annotation modules, and the desktop-side third-party session
+machinery are all deleted. Nothing in this section applies to a QA pass
+anymore; it is kept only as a record of what this plan used to check and
+why, not as an open or blocked item.
 ---
 
 ## What should NOT block marking the goal done
@@ -314,17 +238,19 @@ makes a "done" claim honest, not what prevents making it:
 - **`#76`** — rejecting an oversized message amplifies the rejection back
   into the thread (131k+ chars, plus a leaked server file path). Unrelated
   to any of the three features under test; do not let a QA pass wander into
-  reproducing it, but if it's encountered incidentally (e.g. while testing
-  "Add to chat" with a very large Figma page), note it and move on rather
-  than debugging it inline.
+  reproducing it, but if it's encountered incidentally (e.g. while pasting a
+  very large diff or file into the chat composer), note it and move on
+  rather than debugging it inline.
 
 ## Sign-off shape
 
-Not a single pass/fail bit. For each section (A/B/C), record: checks run,
-checks passed, checks that were `BLOCKED`/`OWNER-GATED` with the specific
-reason, and the screenshot set with critique notes. The goal is marked done
-when every non-gated check in A and B passes, C either passes or is
-explicitly and correctly marked blocked on `#75` (not silently skipped), and
-the "what should NOT block" list above is attached to the final report
-verbatim so the owner sees exactly what's knowingly deferred alongside what
-was actually verified live.
+Not a single pass/fail bit. For each remaining section (A/B), record: checks
+run, checks passed, checks that were `BLOCKED`/`OWNER-GATED` with the
+specific reason, and the screenshot set with critique notes. Section C no
+longer exists to pass, fail, or gate on (Figma/Notion deleted outright,
+owner ruling 2026-08-04 — see Section C above) — it drops out of this
+calculus entirely rather than needing a blocked/skipped disposition. The
+goal is marked done when every non-gated check in A and B passes, and the
+"what should NOT block" list above is attached to the final report verbatim
+so the owner sees exactly what's knowingly deferred alongside what was
+actually verified live.

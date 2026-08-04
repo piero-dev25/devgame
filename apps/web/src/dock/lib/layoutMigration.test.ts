@@ -403,10 +403,13 @@ describe("migrateLoadedLayout — proof bar: positions survive AND the new panel
 describe("migrateLoadedLayout — task #91: an on-demand panel absent from the default preset is not an error", () => {
   it("reports neither an add nor an unplaceable notice for a registered panel the default preset never contained, on a fresh default-shaped layout", () => {
     // The exact fresh-install shape: nothing has been dragged, nothing
-    // customized — `loaded` IS today's default tree. `third-party-source` is
+    // customized — `loaded` IS today's default tree. `on-demand-widget` is
     // registered (catalog knows about it) but was never part of
-    // `buildChatDockPreset()`, matching the real on-demand-panel shape.
-    const registry = registryWith("sidebar", "chat", "files", "third-party-source");
+    // `buildChatDockPreset()` — the general on-demand-panel shape (the real
+    // panel that motivated this fix, `third-party-source`, is itself
+    // deleted now — owner ruling, 2026-08-04 — but the fix applies to any
+    // future on-demand panel, hence a generic stand-in name here).
+    const registry = registryWith("sidebar", "chat", "files", "on-demand-widget");
     const result = migrateLoadedLayout({
       loaded: DEFAULT_TREE,
       knownPanelIds: ["sidebar", "chat", "files"],
@@ -414,13 +417,13 @@ describe("migrateLoadedLayout — task #91: an on-demand panel absent from the d
       defaultTree: DEFAULT_TREE,
     });
     // Silent, not "unplaceable" — there was never a placement decision to
-    // make. A red "couldn't be updated to include: third-party-source"
+    // make. A red "couldn't be updated to include: on-demand-widget"
     // banner on a first-ever launch is exactly the bug this proves fixed.
     expect(result).toEqual({ tree: DEFAULT_TREE, addedPanelIds: [], unplaceablePanelIds: [] });
   });
 
   it("also stays silent for the same on-demand panel against a STALE, user-customized layout — absence there isn't migration's business either", () => {
-    const registry = registryWith("sidebar", "chat", "files", "third-party-source");
+    const registry = registryWith("sidebar", "chat", "files", "on-demand-widget");
     const loaded = userLayoutBeforeFiles(); // pre-existing, customized, files not yet migrated
     const result = migrateLoadedLayout({
       loaded,
@@ -428,11 +431,11 @@ describe("migrateLoadedLayout — task #91: an on-demand panel absent from the d
       panelRegistry: registry,
       defaultTree: DEFAULT_TREE,
     });
-    // files (genuinely in the default preset) still gets added; third-party
-    // -source (never in the default preset) is absent from BOTH result
-    // lists — proves the discriminator, not just "the banner never fires,"
-    // by exercising a case where a REAL migration notice-worthy add is
-    // happening in the very same call.
+    // files (genuinely in the default preset) still gets added;
+    // on-demand-widget (never in the default preset) is absent from BOTH
+    // result lists — proves the discriminator, not just "the banner never
+    // fires," by exercising a case where a REAL migration notice-worthy add
+    // is happening in the very same call.
     expect(result.addedPanelIds).toEqual(["files"]);
     expect(result.unplaceablePanelIds).toEqual([]);
   });
@@ -441,11 +444,11 @@ describe("migrateLoadedLayout — task #91: an on-demand panel absent from the d
     // Sibling proof to the two above: the discriminator must not swallow a
     // real "couldn't place this" case just because SOME panel in the same
     // registry happens to be on-demand. `notes` here IS present in the
-    // default tree's own panels map (unlike third-party-source) — it's
+    // default tree's own panels map (unlike on-demand-widget) — it's
     // legitimately new — it just can't be placed because the default tree
     // is shaped as a nested branch, not the flat shape this function knows
     // how to graft into.
-    const registry = registryWith("sidebar", "chat", "notes", "third-party-source");
+    const registry = registryWith("sidebar", "chat", "notes", "on-demand-widget");
     const nestedDefaultTree: SerializedDockview = {
       grid: {
         orientation: Orientation.HORIZONTAL,
@@ -483,7 +486,7 @@ describe("migrateLoadedLayout — task #91: an on-demand panel absent from the d
         sidebar: { id: "sidebar", contentComponent: "sidebar", title: "Sidebar" },
         chat: { id: "chat", contentComponent: "chat", title: "Chat" },
         notes: { id: "notes", contentComponent: "notes", title: "Notes" },
-        // Deliberately no `third-party-source` entry — matches the real
+        // Deliberately no `on-demand-widget` entry — matches the real
         // default preset never including an on-demand panel.
       },
     };
@@ -508,7 +511,7 @@ describe("migrateLoadedLayout — task #91: an on-demand panel absent from the d
     });
     expect(result.addedPanelIds).toEqual([]);
     // notes still reported unplaceable (the notice DOES fire for the case
-    // that deserves it); third-party-source is absent from either list.
+    // that deserves it); on-demand-widget is absent from either list.
     expect(result.unplaceablePanelIds).toEqual(["chat", "notes"]);
   });
 });

@@ -63,8 +63,11 @@ type DockviewGridNode = SerializedGridObject<LeafGroupData>;
  *
  * A THIRD category, distinct from both of the above (task #91): an ON-DEMAND
  * panel — registered in the catalog, but deliberately absent from
- * `buildChatDockPreset()`'s own default tree, opened only via "Add tab"
- * (`third-party-source` is the first of these). It is ALWAYS absent from
+ * `buildChatDockPreset()`'s own default tree, opened only via "Add tab".
+ * (The panel that motivated this fix, `third-party-source`, was later
+ * deleted outright — owner ruling, 2026-08-04 — but the fix is general and
+ * applies to any future on-demand panel, not specific to that one.) It is
+ * ALWAYS absent from
  * `presentIds`/`baseline` on a fresh or default-shaped layout — nothing ever
  * put it there — which is not the same fact as "newly registered and needs
  * grafting in": the default preset never placed it anywhere either, so there
@@ -117,8 +120,8 @@ export function migrateLoadedLayout(input: MigrateLoadedLayoutInput): MigrateLoa
   const presentIds = new Set(Object.keys(loaded.panels ?? {}));
   const baseline = new Set(knownPanelIds ?? Object.keys(loaded.panels ?? {}));
   // #91: an ON-DEMAND panel (registered in the catalog but deliberately left
-  // out of `buildChatDockPreset()` — `third-party-source` is the first one,
-  // opened only via "Add tab") is absent from `presentIds` AND `baseline` on
+  // out of `buildChatDockPreset()`, opened only via "Add tab") is absent
+  // from `presentIds` AND `baseline` on
   // every fresh/default-shaped layout, which used to make it indistinguishable
   // from a genuinely newly-registered panel the migration should be grafting
   // in. It isn't one: there is nothing to graft, because the default preset
