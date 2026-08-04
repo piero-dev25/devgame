@@ -35,6 +35,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderValidationError } from "../../provider/Errors.ts";
+import { FAILURE_DETAIL_MAX_CHARS } from "../failureDetail.ts";
+import { ProviderSendTurnInput } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -2814,5 +2819,89 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  // Task #76: the provider input cap is enforced, but the REJECTION used to be
+  // unbounded -- a 130,000-char message produced a 131,752-char activity detail
+  // that was persisted, broadcast and rendered. This drives the REAL reactor,
+  // engine and persistence, with the REAL provider-boundary decode wired into
+  // the provider service, and asserts the EFFECT: the detail is bounded.
+  it("bounds and scrubs the failure detail when the provider rejects an oversized message", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const OVERSIZE_CHARS = 130_000;
+    const text = "A".repeat(OVERSIZE_CHARS);
+
+    // Mirrors ProviderService.decodeInputOrValidationError (ProviderService.ts:89-105).
+    const decodeProviderInput = Schema.decodeUnknownEffect(ProviderSendTurnInput);
+    harness.sendTurn.mockImplementation(((input: unknown) =>
+      decodeProviderInput(input).pipe(
+        Effect.map(() => ({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        })),
+        Effect.mapError(
+          (schemaError) =>
+            new ProviderValidationError({
+              operation: "ProviderService.sendTurn",
+              issue: SchemaIssue.makeFormatterDefault()(schemaError.issue),
+            }),
+        ),
+      )) as never);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-oversized"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-oversized"),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      const pending = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        pending?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) => entry.kind === "provider.turn.start.failed",
+    );
+    const detail = String((activity?.payload as { detail?: string } | undefined)?.detail ?? "");
+
+    // The failure is still reported, and still says what went wrong.
+    expect(activity).toBeDefined();
+    expect(detail).toContain("at most 120000");
+
+    // THE FIX: the detail no longer scales with the rejected payload.
+    expect(detail.length).toBeLessThanOrEqual(FAILURE_DETAIL_MAX_CHARS);
+    expect(detail).not.toContain("A".repeat(2_000));
+    expect(detail).toContain("characters omitted");
+
+    // No absolute server paths reach this client-visible, persisted activity.
+    expect(detail).not.toContain("/Users/");
+    expect(detail).not.toContain("/home/");
+
+    // The user's own message is untouched -- we bounded the ECHO, not the
+    // message, which is why truncating the echo loses nothing recoverable.
+    const userMessage = thread?.messages.find(
+      (entry) => entry.id === asMessageId("user-message-oversized"),
+    );
+    expect(String((userMessage as { text?: string } | undefined)?.text ?? "").length).toBe(
+      OVERSIZE_CHARS,
+    );
   });
 });

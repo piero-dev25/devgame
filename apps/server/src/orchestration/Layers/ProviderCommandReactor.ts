@@ -26,6 +26,7 @@ import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
+import { sanitizeFailureDetail } from "../failureDetail.ts";
 import { increment, orchestrationEventsProcessedTotal } from "../../observability/Metrics.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
@@ -302,7 +303,13 @@ const make = Effect.gen(function* () {
             kind: input.kind,
             summary: input.summary,
             payload: {
-              detail: input.detail,
+              // Sanitised HERE rather than at each caller: this is the one
+              // funnel where a failure detail becomes client-visible and
+              // persisted, and three of the callers below pass raw
+              // `Cause.pretty(cause)`. Guarding the boundary means a future
+              // call site cannot reintroduce the amplification by forgetting
+              // (task #76).
+              detail: sanitizeFailureDetail(input.detail),
               ...(input.requestId ? { requestId: input.requestId } : {}),
             },
             turnId: input.turnId,
