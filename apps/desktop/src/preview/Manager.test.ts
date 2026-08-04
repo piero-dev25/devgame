@@ -37,6 +37,7 @@ describe("fitPictureInPictureContentSize", () => {
 });
 
 const {
+  appOn,
   browserWindowConstructor,
   createFromPath,
   fromId,
@@ -47,6 +48,11 @@ const {
   writeFile,
   writeImage,
 } = vi.hoisted(() => ({
+  // G2 (independent security review, 2026-08-04): the early
+  // web-contents-created window-open guard registers via `app.on`, not
+  // through a webview/window instance — the real Electron `app` singleton
+  // has no counterpart in this file's other mocks.
+  appOn: vi.fn(),
   browserWindowConstructor: vi.fn(),
   createFromPath: vi.fn((): { readonly isEmpty: () => boolean } => ({ isEmpty: () => false })),
   fromId: vi.fn((_id?: number) => null),
@@ -59,6 +65,9 @@ const {
 }));
 
 vi.mock("electron", () => ({
+  app: {
+    on: appOn,
+  },
   BrowserWindow: browserWindowConstructor,
   clipboard: {
     writeImage,
@@ -78,6 +87,14 @@ vi.mock("electron", () => ({
   },
 }));
 
+// G4 (independent security review, 2026-08-04): a distinct object identity,
+// never assigned as any ordinary test webContents' `.session`, so existing
+// tests' `wc.session === thirdPartySession` comparisons stay false exactly as
+// before this mock stopped dying — only a test that deliberately sets
+// `session: FAKE_THIRD_PARTY_SESSION` on its fake webContents exercises the
+// third-party branch.
+const FAKE_THIRD_PARTY_SESSION = { __brand: "fake-third-party-session" } as never;
+
 const baseBrowserSessionMock: BrowserSession.BrowserSession["Service"] = {
   getPartition: () => Effect.succeed("persist:devgame-preview-test"),
   isPartition: (partition) => partition.startsWith("persist:devgame-preview-"),
@@ -85,7 +102,7 @@ const baseBrowserSessionMock: BrowserSession.BrowserSession["Service"] = {
   clearCookies: () => Effect.void,
   clearCache: () => Effect.void,
   getThirdPartyBrowserPartition: () => Effect.succeed("persist:devgame-thirdparty-test"),
-  getThirdPartyBrowserSession: () => Effect.die("unexpected getThirdPartyBrowserSession"),
+  getThirdPartyBrowserSession: () => Effect.succeed(FAKE_THIRD_PARTY_SESSION),
   isThirdPartyPartition: (partition) => partition.startsWith("persist:devgame-thirdparty-"),
   clearThirdPartySourceData: () => Effect.die("unexpected clearThirdPartySourceData"),
 };
@@ -230,6 +247,7 @@ const makeTestPictureInPictureWindow = (loadURL: () => Promise<void> = async () 
 
 describe("PreviewManager", () => {
   beforeEach(() => {
+    appOn.mockClear();
     browserWindowConstructor.mockReset();
     fromId.mockClear();
     getFocusedWebContents.mockReset();
@@ -2137,6 +2155,320 @@ describe("PreviewManager", () => {
         });
       }),
     ),
+  );
+});
+
+// G4 (independent security review, 2026-08-04): every operation reachable
+// through the MCP preview toolkit took an arbitrary caller-supplied tabId
+// with no check that it wasn't the third-party (Figma/Notion) webview's
+// FIXED, guessable tabId — letting a prompt-injected agent run arbitrary
+// JavaScript, click, type, navigate, or record inside the user's
+// authenticated third-party session. These assert the EFFECT (the call is
+// rejected) rather than a precondition (some field says "third-party") —
+// see assert-effect-not-precondition in the house doctrine.
+// G2 (independent security review, 2026-08-04): the deny-and-validate
+// window-open handler used to exist ONLY once `registerWebview` ran, a
+// renderer round trip. This proves the SEPARATE, EARLIER handler installed
+// synchronously in the main process at `web-contents-created` denies popups
+// on its own, with no tab ever registered — the exact race the review
+// found. Complements a live Electron process probe run against this same
+// pattern (case-G.html, `PROBE_WOH=manager`): without an early handler, a
+// real `BrowserWindow` was created and settled at the attacker URL; with
+// one, none was, and the guest navigated in place. This unit test proves
+// Manager.ts installs that same pattern; it does not re-run the probe.
+describe("G2 — early main-process window-open guard", () => {
+  effectIt.effect(
+    "installs a window-open handler on every webview's WebContents at creation, before any tab registers",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          void manager; // constructing the manager is what registers the app.on listener
+          expect(appOn).toHaveBeenCalledWith("web-contents-created", expect.any(Function));
+          const webContentsCreatedHandler = appOn.mock.calls.find(
+            ([event]) => event === "web-contents-created",
+          )?.[1] as (event: unknown, wc: unknown) => void;
+
+          const loadURL = vi.fn(async () => undefined);
+          const setWindowOpenHandler = vi.fn();
+          const guestWc = {
+            id: 777,
+            getType: () => "webview",
+            loadURL,
+            setWindowOpenHandler,
+          };
+
+          webContentsCreatedHandler({}, guestWc);
+
+          expect(setWindowOpenHandler).toHaveBeenCalledOnce();
+          const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+            url: string;
+          }) => { action: string };
+
+          const result = openHandler({ url: "https://evil.example.com/attacker" });
+
+          expect(result).toEqual({ action: "deny" });
+          yield* Effect.yieldNow;
+          expect(loadURL).toHaveBeenCalledWith("https://evil.example.com/attacker");
+        }),
+      ),
+  );
+
+  effectIt.effect("denies non-http(s) URLs without navigating anywhere", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = appOn.mock.calls.find(
+          ([event]) => event === "web-contents-created",
+        )?.[1] as (event: unknown, wc: unknown) => void;
+
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          { id: 778, getType: () => "webview", loadURL, setWindowOpenHandler },
+        );
+        const openHandler = setWindowOpenHandler.mock.calls[0]?.[0] as (input: {
+          url: string;
+        }) => { action: string };
+
+        expect(openHandler({ url: "javascript:alert(1)" })).toEqual({ action: "deny" });
+        yield* Effect.yieldNow;
+        expect(loadURL).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
+  effectIt.effect("does not install a window-open handler on a non-webview WebContents", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        void manager;
+        const webContentsCreatedHandler = appOn.mock.calls.find(
+          ([event]) => event === "web-contents-created",
+        )?.[1] as (event: unknown, wc: unknown) => void;
+
+        const setWindowOpenHandler = vi.fn();
+        webContentsCreatedHandler(
+          {},
+          { id: 779, getType: () => "window", setWindowOpenHandler },
+        );
+
+        expect(setWindowOpenHandler).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+});
+
+describe("G4 — automation namespace excludes third-party tabs", () => {
+  const thirdPartyWc = (id = 90) =>
+    ({
+      id,
+      isDestroyed: () => false,
+      getType: () => "webview",
+      getURL: () => "https://www.figma.com/file/secret-design",
+      getTitle: () => "Figma",
+      isLoading: () => false,
+      isDevToolsOpened: () => false,
+      getZoomFactor: () => 1,
+      setZoomFactor: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+      ipc: { on: vi.fn(), off: vi.fn() },
+      send: webviewSend,
+      navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+      setWindowOpenHandler: vi.fn(),
+      debugger: {
+        isAttached: () => false,
+        attach: vi.fn(),
+        sendCommand: vi.fn(async () => undefined),
+        on: vi.fn(),
+        off: vi.fn(),
+      },
+      session: FAKE_THIRD_PARTY_SESSION,
+    });
+
+  effectIt.effect("rejects automationEvaluate against a tab on the third-party session", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        fromId.mockReturnValue(thirdPartyWc() as never);
+        yield* manager.createTab("third-party-browser:figma");
+        yield* manager.registerWebview("third-party-browser:figma", 90);
+
+        const exit = yield* Effect.exit(
+          manager.automationEvaluate("third-party-browser:figma", {
+            expression: "document.cookie",
+          }),
+        );
+
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) return;
+        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+        expect(error).toMatchObject({
+          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
+          tabId: "third-party-browser:figma",
+          operation: "evaluate",
+        });
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "does not reject a tab merely because its id LOOKS third-party — the check is session identity, not the name",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const sendCommand = vi.fn(async (method: string) =>
+            method === "Runtime.evaluate" ? { result: { value: null } } : undefined,
+          );
+          // Same tabId string a real third-party panel would use, but this
+          // webContents' session is NOT the third-party singleton — proves
+          // the guard reads wc.session, not tabId.startsWith(...).
+          fromId.mockReturnValue({
+            ...thirdPartyWc(),
+            session: { __brand: "ordinary" },
+            debugger: { isAttached: () => false, attach: vi.fn(), sendCommand, on: vi.fn(), off: vi.fn() },
+          } as never);
+          yield* manager.createTab("third-party-browser:figma");
+          yield* manager.registerWebview("third-party-browser:figma", 90);
+
+          const result = yield* manager.automationEvaluate("third-party-browser:figma", {
+            expression: "1 + 1",
+          });
+
+          expect(result).toBeNull();
+        }),
+      ),
+  );
+
+  effectIt.effect("rejects automationClick against a third-party tab", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        fromId.mockReturnValue(thirdPartyWc(91) as never);
+        yield* manager.createTab("third-party-browser:notion");
+        yield* manager.registerWebview("third-party-browser:notion", 91);
+
+        const exit = yield* Effect.exit(
+          manager.automationClick("third-party-browser:notion", { x: 10, y: 10 }),
+        );
+
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) return;
+        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+        expect(error).toMatchObject({
+          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
+          operation: "click",
+        });
+      }),
+    ),
+  );
+
+  effectIt.effect("rejects automationStatus against a third-party tab instead of reporting it", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        fromId.mockReturnValue(thirdPartyWc(92) as never);
+        yield* manager.createTab("third-party-browser:figma");
+        yield* manager.registerWebview("third-party-browser:figma", 92);
+
+        const exit = yield* Effect.exit(manager.automationStatus("third-party-browser:figma"));
+
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) return;
+        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+        expect(error).toMatchObject({ _tag: "PreviewAutomationThirdPartyTabForbiddenError" });
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "rejects navigate against an already-attached third-party tab without calling loadURL",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const loadURL = vi.fn(async () => undefined);
+          fromId.mockReturnValue({ ...thirdPartyWc(93), loadURL } as never);
+          yield* manager.createTab("third-party-browser:figma");
+          yield* manager.registerWebview("third-party-browser:figma", 93);
+
+          const exit = yield* Effect.exit(
+            manager.navigate("third-party-browser:figma", "https://evil.example.com"),
+          );
+
+          expect(Exit.isFailure(exit)).toBe(true);
+          if (Exit.isSuccess(exit)) return;
+          const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+          expect(error).toMatchObject({
+            _tag: "PreviewAutomationThirdPartyTabForbiddenError",
+            operation: "navigate",
+          });
+          expect(loadURL).not.toHaveBeenCalled();
+        }),
+      ),
+  );
+
+  effectIt.effect("rejects startRecording against a third-party tab", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        fromId.mockReturnValue(thirdPartyWc(94) as never);
+        yield* manager.createTab("third-party-browser:figma");
+        yield* manager.registerWebview("third-party-browser:figma", 94);
+
+        const exit = yield* Effect.exit(manager.startRecording("third-party-browser:figma"));
+
+        expect(Exit.isFailure(exit)).toBe(true);
+        if (Exit.isSuccess(exit)) return;
+        const error = Option.getOrThrow(Cause.findErrorOption(exit.cause));
+        expect(error).toMatchObject({
+          _tag: "PreviewAutomationThirdPartyTabForbiddenError",
+          operation: "recordingStart",
+        });
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "still allows automationEvaluate against an ordinary (non-third-party) preview tab",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const sendCommand = vi.fn(async (method: string) =>
+            method === "Runtime.evaluate" ? { result: { value: null } } : undefined,
+          );
+          fromId.mockReturnValue({
+            id: 95,
+            isDestroyed: () => false,
+            getType: () => "webview",
+            getURL: () => "https://example.com",
+            getTitle: () => "Example",
+            isLoading: () => false,
+            isDevToolsOpened: () => false,
+            getZoomFactor: () => 1,
+            setZoomFactor: vi.fn(),
+            on: vi.fn(),
+            off: vi.fn(),
+            ipc: { on: vi.fn(), off: vi.fn() },
+            send: webviewSend,
+            navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+            setWindowOpenHandler: vi.fn(),
+            debugger: {
+              isAttached: () => false,
+              attach: vi.fn(),
+              sendCommand,
+              on: vi.fn(),
+              off: vi.fn(),
+            },
+            // No `session` field at all — matches every ordinary preview tab
+            // fixture elsewhere in this file, none of which is the
+            // third-party singleton.
+          } as never);
+          yield* manager.createTab("tab_ordinary");
+          yield* manager.registerWebview("tab_ordinary", 95);
+
+          const result = yield* manager.automationEvaluate("tab_ordinary", {
+            expression: "1 + 1",
+          });
+
+          expect(result).toBeNull();
+        }),
+      ),
   );
 });
 
