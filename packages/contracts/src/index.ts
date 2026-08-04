@@ -32,3 +32,4 @@ export * from "./rpc.ts";
 export * from "./editorPresence.ts";
 export * from "./unity.ts";
 export * from "./unitySetup.ts";
+export * from "./unityPipelineInstall.ts";

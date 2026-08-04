@@ -28,6 +28,7 @@ import { spaceEventsRouteLayer } from "./spaceEvents/SpaceEventsRoute.ts";
 import { unityCommandRouteLayer } from "./unity/UnityCommandRoute.ts";
 import * as UnityPackageLock from "./unity/UnityPackageLock.ts";
 import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
+import { unityPipelineInstallRouteLayer } from "./unity/UnityPipelineInstallRoute.ts";
 import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
 import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
 import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
@@ -539,6 +540,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     editorPresenceRouteLayer,
     editorPresenceCommandRouteLayer,
     unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityPipelineInstallRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
   ),

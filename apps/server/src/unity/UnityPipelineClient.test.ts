@@ -676,3 +676,122 @@ describe("list", () => {
       }),
   );
 });
+
+function pipelineInstallEnvelope(fields: {
+  readonly packageId?: string;
+  readonly version?: string;
+  readonly alreadyInstalled?: boolean;
+}): string {
+  return JSON.stringify({
+    success: true,
+    command: "pipeline install",
+    data: {
+      packageId: fields.packageId ?? "com.unity.pipeline",
+      version: fields.version ?? "0.4.0-exp.1",
+      projectPath: PROJECT,
+      alreadyInstalled: fields.alreadyInstalled ?? false,
+    },
+    errors: [],
+    warnings: [],
+  });
+}
+
+describe("install", () => {
+  it.effect(
+    "parses a real successful install envelope, byte-for-byte against the real scratch-project sample (plan §8-1, 2026-08-04)",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([pipelineInstallEnvelope({})]);
+        const result = yield* withClient(runner.run, (client) => client.install(PROJECT));
+        expect(result).toEqual({
+          _tag: "ok",
+          value: {
+            packageId: "com.unity.pipeline",
+            version: "0.4.0-exp.1",
+            alreadyInstalled: false,
+          },
+        });
+      }),
+  );
+
+  it.effect("alreadyInstalled: true is a real, distinct answer, not folded into an error", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([pipelineInstallEnvelope({ alreadyInstalled: true })]);
+      const result = yield* withClient(runner.run, (client) => client.install(PROJECT));
+      expect(result._tag).toBe("ok");
+      if (result._tag !== "ok") return;
+      expect(result.value.alreadyInstalled).toBe(true);
+    }),
+  );
+
+  it.effect(
+    "passes --project-path AND --non-interactive explicitly, plus pins the subprocess cwd to workspaceRoot",
+    () =>
+      Effect.gen(function* () {
+        const seenArgs: Array<ReadonlyArray<string>> = [];
+        const seenCwds: Array<string | undefined> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seenArgs.push(input.args);
+          seenCwds.push(input.cwd);
+          return okOutput(pipelineInstallEnvelope({}));
+        };
+        yield* withClient(runner, (client) => client.install(PROJECT));
+        expect(seenArgs).toEqual([
+          ["pipeline", "install", "--project-path", PROJECT, "--non-interactive", "--json"],
+        ]);
+        expect(seenCwds).toEqual([PROJECT]);
+      }),
+  );
+
+  it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([
+        JSON.stringify({
+          success: false,
+          command: "pipeline install",
+          data: null,
+          errors: [
+            {
+              code: "COMMAND_FAILED",
+              message:
+                "Not a Unity project: /tmp/not-a-project\nUnity projects must have an Assets/ folder.",
+            },
+          ],
+          warnings: [],
+        }),
+      ]);
+      const result = yield* withClient(runner.run, (client) => client.install(PROJECT));
+      expect(result).toEqual({
+        _tag: "error",
+        message:
+          "Not a Unity project: /tmp/not-a-project\nUnity projects must have an Assets/ folder.",
+      });
+    }),
+  );
+
+  it.effect("unparseable stdout folds into { _tag: 'error' }, never throws", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner(["not json at all"]);
+      const result = yield* withClient(runner.run, (client) => client.install(PROJECT));
+      expect(result._tag).toBe("error");
+    }),
+  );
+
+  it.effect(
+    "a well-formed envelope missing a required field folds into { _tag: 'error' }, not a silent partial parse",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          JSON.stringify({
+            success: true,
+            command: "pipeline install",
+            data: { packageId: "com.unity.pipeline" }, // missing version, alreadyInstalled
+            errors: [],
+            warnings: [],
+          }),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.install(PROJECT));
+        expect(result._tag).toBe("error");
+      }),
+  );
+});

@@ -143,6 +143,7 @@ import { serverEnvironment } from "~/state/server";
 import { useProjects } from "~/state/entities";
 import { readPreparedConnection } from "~/state/session";
 import { fetchUnitySetupProbe } from "../../unity/fetchSetupProbe";
+import { postUnityPipelineInstall } from "../../unity/postPipelineInstall";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
@@ -1740,12 +1741,16 @@ function CloudRemoteEnvironmentRows({
 }
 
 // -----------------------------------------------------------------------
-// Unity setup (#92, increment 3) — read-only, per-item status. Reads
-// `facts`, never `primary` — `primary` answers "what's the ONE most useful
-// sentence to show right now" (the toolbar's job); this panel answers
-// "what is the state of each thing," which is what `facts` exists for. No
-// button here writes anything: Phase 2's install actions are a separate,
-// later, gated feature (plan §5).
+// Unity setup (#92, increment 3 read-only status + increment 4a's one
+// consented write action, plan §5) — reads `facts`, never `primary` —
+// `primary` answers "what's the ONE most useful sentence to show right
+// now" (the toolbar's job); this panel answers "what is the state of each
+// thing," which is what `facts` exists for. The ONE thing in this panel
+// that writes anything is `UnityPipelineInstallButton` below, and it never
+// fires without an explicit confirm click in its own consent dialog — see
+// plan §3's "Consent model," non-negotiables: nothing is written without a
+// click, a refusal always leaves a working manual path (the
+// `CopyCommandButton` next to it, unconditionally present).
 // -----------------------------------------------------------------------
 
 /** `unity pipeline install --project-path "<path>" --json --non-interactive`
@@ -1833,15 +1838,158 @@ function CopyCommandButton({ command }: { readonly command: string }) {
   );
 }
 
+/** Whether Unity currently has a LIVE, running instance open for this
+ * project — the exact condition plan §3's "Editor-open warning" is gated
+ * on ("shown when the lockfile is present, subject to §2's liveness
+ * rule"). `pipelineList.matched` already IS that liveness-checked
+ * instance (`UnitySetupProbe.ts` only sets `matched` from `pipeline
+ * list`'s own authoritative `isRunning`, not the cheap lockfile-presence
+ * signal), so this reads it directly rather than re-deriving it from
+ * `facts.lockfilePresent`. */
+function isEditorOpenForThisProject(facts: UnitySetupFacts): boolean {
+  return facts.pipelineList?._tag === "ran" && facts.pipelineList.matched?.isRunning === true;
+}
+
+type PreparedUnityConnection = NonNullable<ReturnType<typeof readPreparedConnection>>;
+
+/**
+ * Plan §5's increment 4a — the ONE write action in this whole panel, and
+ * the increment that fixes the owner's motivating failure (Mafia Game
+ * going from S4 "Pipeline missing" to actually working). The consent
+ * dialog's copy is plan §3's own wording verbatim, not a paraphrase:
+ * "the manifest line being added, named plainly... does not promise a
+ * computed diff of packages-lock.json" (F4) — that promise is possible to
+ * keep honestly ONLY because §8-1's real experiment (2026-08-04,
+ * presence-authz) measured exactly what this command does and does not
+ * touch synchronously; see `UnityPipelineClient.ts`'s `install` doc
+ * comment for the numbers. Refusing (closing the dialog) leaves the
+ * sibling `CopyCommandButton` as a working manual path — this component
+ * never replaces it, only stands next to it.
+ */
+function UnityPipelineInstallButton({
+  facts,
+  connection,
+  onInstalled,
+}: {
+  readonly facts: UnitySetupFacts;
+  readonly connection: PreparedUnityConnection | null;
+  readonly onInstalled: () => void;
+}) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const editorIsOpen = isEditorOpenForThisProject(facts);
+
+  const handleInstall = useCallback(async () => {
+    if (!connection) return;
+    setIsInstalling(true);
+    try {
+      const result = await postUnityPipelineInstall(connection);
+      if (result._tag === "ok") {
+        toastManager.add({
+          type: "success",
+          title: result.value.alreadyInstalled
+            ? "Pipeline package already installed"
+            : "Pipeline package installed",
+          description: `com.unity.pipeline@${result.value.version}`,
+        });
+        setDialogOpen(false);
+        onInstalled();
+        return;
+      }
+      const description =
+        result._tag === "error"
+          ? result.message
+          : result._tag === "cliUnavailable"
+            ? "The Unity CLI isn't available."
+            : "Unity isn't ready.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not install Pipeline package",
+          description,
+        }),
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to install Pipeline package.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not install Pipeline package",
+          description: message,
+        }),
+      );
+    } finally {
+      setIsInstalling(false);
+    }
+  }, [connection, onInstalled]);
+
+  return (
+    <Dialog
+      open={dialogOpen}
+      onOpenChange={(open) => {
+        if (!isInstalling) setDialogOpen(open);
+      }}
+    >
+      <DialogTrigger render={<Button size="xs" variant="default" disabled={connection === null} />}>
+        Install
+      </DialogTrigger>
+      <DialogPopup className="max-w-md">
+        <DialogHeader>
+          <DialogTitle>Add Unity&apos;s Pipeline package?</DialogTitle>
+          <DialogDescription>
+            This adds <code className="font-mono text-foreground">com.unity.pipeline</code> to{" "}
+            <code className="font-mono text-foreground">Packages/manifest.json</code> in this
+            project.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-3 text-xs leading-relaxed text-muted-foreground">
+          <p>
+            This will also update{" "}
+            <code className="font-mono text-foreground">Packages/packages-lock.json</code> —
+            Unity&apos;s own dependency resolver decides its exact contents, which may include other
+            package versions changing to satisfy Pipeline&apos;s requirements.
+          </p>
+          <p>
+            Other files under <code className="font-mono text-foreground">Assets/</code> may also
+            show as changed — that&apos;s normal Unity Editor activity, not something this action
+            caused.
+          </p>
+          {editorIsOpen ? (
+            <p className="text-warning">
+              Unity is open. It will reimport this project and be unresponsive for a few seconds.
+            </p>
+          ) : null}
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button variant="outline" disabled={isInstalling} onClick={() => setDialogOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            disabled={isInstalling || connection === null}
+            onClick={() => void handleInstall()}
+          >
+            {isInstalling ? "Installing…" : "Install"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
 /** The four per-item rows (Unity CLI, Pipeline package, selection package,
  * live Unity instance) — rendered only when `facts.isUnityProject` is
  * true; see `UnitySetupSection` for the "not a Unity project" fallback. */
 function UnitySetupRows({
   facts,
   workspaceRoot,
+  connection,
+  onInstalled,
 }: {
   readonly facts: UnitySetupFacts;
   readonly workspaceRoot: string;
+  readonly connection: PreparedUnityConnection | null;
+  readonly onInstalled: () => void;
 }) {
   return (
     <>
@@ -1851,7 +1999,14 @@ function UnitySetupRows({
         description={formatPackageLockStatus(facts.pipelinePackage)}
         control={
           facts.pipelinePackage.installed ? undefined : (
-            <CopyCommandButton command={unityPipelineInstallCommand(workspaceRoot)} />
+            <div className="flex items-center gap-2">
+              <UnityPipelineInstallButton
+                facts={facts}
+                connection={connection}
+                onInstalled={onInstalled}
+              />
+              <CopyCommandButton command={unityPipelineInstallCommand(workspaceRoot)} />
+            </div>
           )
         }
       />
@@ -1895,6 +2050,26 @@ function UnitySetupSection({
         })();
 
   const [result, setResult] = useState<UnitySetupProbeResult | null>(null);
+
+  // Extracted from the effect below so `UnityPipelineInstallButton`'s
+  // post-install success handler can call the SAME fetch (not a
+  // reimplementation of it) to refresh this row's status without a full
+  // page reload — the whole reason the "Pipeline package" row should ever
+  // change out from under the user while they're looking at it.
+  const refetch = useCallback(() => {
+    if (primaryEnvironmentId === null) return;
+    const prepared = readPreparedConnection(primaryEnvironmentId);
+    if (!prepared) return;
+    fetchUnitySetupProbe({
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((value) => setResult(value))
+      .catch((cause) => {
+        console.error("Failed to fetch Unity setup status:", cause);
+      });
+  }, [primaryEnvironmentId]);
+
   useEffect(() => {
     // Fetched on mount and whenever the primary environment changes — this
     // section has no "panel open" or "Play click" moment of its own to
@@ -1921,6 +2096,9 @@ function UnitySetupSection({
     };
   }, [primaryEnvironmentId]);
 
+  const connection: PreparedUnityConnection | null =
+    primaryEnvironmentId === null ? null : readPreparedConnection(primaryEnvironmentId);
+
   if (primaryEnvironmentId === null) return null;
 
   const headerSuffix = project ? ` — ${project.title}` : "";
@@ -1935,7 +2113,12 @@ function UnitySetupSection({
           description="This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found."
         />
       ) : (
-        <UnitySetupRows facts={result.facts} workspaceRoot={project?.workspaceRoot ?? ""} />
+        <UnitySetupRows
+          facts={result.facts}
+          workspaceRoot={project?.workspaceRoot ?? ""}
+          connection={connection}
+          onInstalled={refetch}
+        />
       )}
     </SettingsSection>
   );

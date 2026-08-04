@@ -247,6 +247,27 @@ export interface UnityPipelineListResult {
   readonly unparseableInstanceCount: number;
 }
 
+/** `unity pipeline install --project-path <root> --json --non-interactive`'s
+ * parsed `data`. VERIFIED against a real captured sample (2026-08-04,
+ * presence-authz, plan §8-1's experiment — a disposable scratch project,
+ * never `~/Projects/Mafia Game` or any other real project): `{ packageId,
+ * version, projectPath, alreadyInstalled }`. `projectPath` is deliberately
+ * NOT carried on this type — the caller already supplied it (it's the same
+ * `workspaceRoot` this call was made with), same reasoning
+ * `UnityPipelineListInstance` gives for not re-deriving already-known
+ * facts. §8-1 ALSO settled (real numbers, not inference) that this command
+ * succeeds with no Editor open at all, and that with no Editor open it
+ * writes exactly one line to `manifest.json` and does NOT touch
+ * `packages-lock.json` or download the package — resolution happens later,
+ * asynchronously, whenever Unity's Editor next processes the manifest
+ * change. See plan §3's consent-model section for why the client-side
+ * consent copy promises the manifest line and nothing about the lockfile. */
+export interface UnityPipelineInstallResult {
+  readonly packageId: string;
+  readonly version: string;
+  readonly alreadyInstalled: boolean;
+}
+
 function isNullOr<A>(value: unknown, check: (value: unknown) => value is A): value is A | null {
   return value === null || check(value);
 }
@@ -330,6 +351,18 @@ function parsePipelineListResult(data: unknown): UnityPipelineListResult | null 
     instances.push(instance);
   }
   return { instances, latestVersion: data.latestVersion, unparseableInstanceCount };
+}
+
+/** Parses `pipeline install`'s `data` object. `null` on anything that
+ * doesn't have every field this module reads — same "don't guess at an
+ * unfamiliar shape" posture as every other parser in this module. */
+function parsePipelineInstallResult(data: unknown): UnityPipelineInstallResult | null {
+  if (!isRecord(data)) return null;
+  const { packageId, version, alreadyInstalled } = data;
+  if (typeof packageId !== "string") return null;
+  if (typeof version !== "string") return null;
+  if (typeof alreadyInstalled !== "boolean") return null;
+  return { packageId, version, alreadyInstalled };
 }
 
 /** Parses `editor_status`'s `data.result` object. `null` on anything that
@@ -419,6 +452,21 @@ export class UnityPipelineClient extends Context.Service<
     readonly list: (
       workspaceRoot: string,
     ) => Effect.Effect<UnityPipelineResult<UnityPipelineListResult>>;
+    /** `unity pipeline install --project-path <workspaceRoot> --json
+     * --non-interactive` — plan §5's increment 4a. Adds `com.unity.pipeline`
+     * to `Packages/manifest.json`. §8-1's real experiment (2026-08-04)
+     * settled that this works with no Editor running for the target
+     * project, and that with no Editor open it writes only that one
+     * manifest line — `packages-lock.json` and the actual package download
+     * are NOT touched synchronously by this call; Unity's own resolver
+     * updates those later, on its own schedule, once its Editor next
+     * processes the manifest change. Same `UnityPipelineResult` wrapper as
+     * every other method here, for the same reason `list` keeps it despite
+     * `notReady` being an unlikely outcome for this specific subcommand —
+     * one shape for the caller to handle everywhere. */
+    readonly install: (
+      workspaceRoot: string,
+    ) => Effect.Effect<UnityPipelineResult<UnityPipelineInstallResult>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -571,6 +619,46 @@ export const make = Effect.gen(function* () {
       ),
     );
 
+  /** `unity pipeline install --project-path <workspaceRoot> --json
+   * --non-interactive` — plan §5's increment 4a. Unlike `list`, this DOES
+   * take `--project-path` (confirmed against `unity pipeline install
+   * --help`); `workspaceRoot` is passed through to `runUnityCommand` as
+   * the subprocess `cwd` too, same defensive posture `list` uses, even
+   * though `--project-path` already scopes the target explicitly here.
+   * `--non-interactive` is passed explicitly (not left to the global flag
+   * alone) so this call can never block the server process on a prompt it
+   * has no terminal to answer. No `isNotReadyMessage` folding — that
+   * pattern exists for editor-command dispatch (`runEditorCommand`), whose
+   * "not ready" strings are specific to a live Editor connection; §8-1
+   * settled that install doesn't need one at all, so a real failure here
+   * (bad path, CLI error) is just an `error`, not a `notReady`. */
+  const install: UnityPipelineClient["Service"]["install"] = (workspaceRoot) =>
+    runUnityCommand(
+      ["pipeline", "install", "--project-path", workspaceRoot, "--non-interactive"],
+      workspaceRoot,
+    ).pipe(
+      Effect.map((envelope): UnityPipelineResult<UnityPipelineInstallResult> => {
+        if (envelope === null) {
+          return { _tag: "error", message: "unparseable response from 'unity pipeline install'" };
+        }
+        if (!envelope.success) {
+          const message = envelope.errors[0]?.message ?? "unknown Pipeline error";
+          return { _tag: "error", message };
+        }
+        // No `.result` unwrap here, same reason as `list` — `pipeline
+        // install`'s `data` IS the result directly (verified live,
+        // §8-1's own captured sample).
+        const parsed = parsePipelineInstallResult(envelope.data);
+        return parsed === null
+          ? {
+              _tag: "error",
+              message: "'unity pipeline install' returned an unrecognised result shape",
+            }
+          : { _tag: "ok", value: parsed };
+      }),
+      Effect.catch(processRunErrorToResult<UnityPipelineInstallResult>),
+    );
+
   return UnityPipelineClient.of({
     isAvailable: () =>
       isCommandAvailable(UNITY_CLI_COMMAND).pipe(
@@ -583,6 +671,7 @@ export const make = Effect.gen(function* () {
     stop: (workspaceRoot) => dispatchAndConfirm("editor_stop", workspaceRoot),
     pause: (workspaceRoot) => dispatchAndConfirm("editor_pause", workspaceRoot),
     list,
+    install,
   });
 });
 
