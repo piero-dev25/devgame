@@ -136,11 +136,34 @@ unbounded and must never be pushed — see the append-chain defect below.
 
 **#71 — chips send the wrong project's selection.** Fix first, as above.
 
-**#72 — nothing budgets the total appended message.** Six appenders each cap
-themselves; the 120,000-char limit is enforced only at the provider boundary,
-and `apps/web` never references it. Console logs are exactly the payload that
-would blow it, which is a direct reason console output must be pull-only.
-Reproduce before fixing.
+**#72 — the terminal/console appender is INDIVIDUALLY unbounded.** Reproduced,
+and both halves of the original framing were wrong in ways that strengthen this
+plan:
+
+- The assumed silent failure **does not happen**. A 130,000-char message
+  produces a loud, well-attributed `provider.turn.start.failed` activity and an
+  errored thread session. As a silence bug it is far less urgent than it looked.
+- But it is **not** "six appenders jointly". `buildTerminalContextBlock`
+  (`terminalContext.ts:159-182`) has **no character cap at all**, and
+  `buildTerminalContextBodyLines` adds ~6-8 chars of `"  N | "` prefix per line —
+  it _inflates_ rather than bounds. The 180-char slice at `:79` is a UI chip
+  preview and caps nothing on the wire. **A user selecting a large terminal
+  region crosses 120,000 chars alone, in one ordinary action.**
+
+**This is the strongest evidence in the whole plan that console output must be
+pull-only.** Console context would take exactly that shape — unbounded lines
+with per-line prefixes — and the one existing appender of that shape is already
+the one that can blow the limit by itself.
+
+Note also that a composed-total budget alone would be actively harmful here: a
+budget that "truncates the largest contributor first" would silently truncate
+this one every time, which is precisely the #66 failure mode. Cap the appender.
+
+**#76 — the rejection is unbounded even though the input is capped.** Rejecting
+130,000 chars writes **131,752 chars back** into the thread: the schema
+formatter embeds the entire rejected payload verbatim, then a stack trace is
+appended. One failed message becomes ~394 KB of persisted, broadcast thread
+state, and the stack trace leaks absolute server paths to the client.
 
 ## The owner decision this plan does not make
 
