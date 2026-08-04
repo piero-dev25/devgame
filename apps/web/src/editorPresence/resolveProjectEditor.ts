@@ -46,6 +46,14 @@ export function resolveConnectedEditorForProject(
   return null;
 }
 
-function normalizeWorkspaceRoot(root: string): string {
+/**
+ * Exported so every workspace-root comparison in this module family shares
+ * ONE normalization rule. `store.ts`'s `selectEditorPresenceChipsForProject`
+ * (task #71) is the second caller: a second, subtly-different normalizer
+ * would let the Play/Stop toolbar and the chip attachment disagree about
+ * whether an editor belongs to a project — precisely the class of bug #71
+ * already was.
+ */
+export function normalizeWorkspaceRoot(root: string): string {
   return root.length > 1 && root.endsWith("/") ? root.slice(0, -1) : root;
 }

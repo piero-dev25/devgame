@@ -216,7 +216,10 @@ import {
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
 import { appendEditorSelectionToPrompt } from "../editorPresence/editorSelectionContext";
-import { getCurrentEditorPresenceChips } from "../editorPresence/store";
+import {
+  getCurrentEditorPresenceChips,
+  selectEditorPresenceChipsForProject,
+} from "../editorPresence/store";
 import { useEditorPresence } from "../editorPresence/useEditorPresence";
 import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
@@ -4767,7 +4770,13 @@ function ChatViewContent(props: ChatViewProps) {
         messageTextWithPreviewAnnotations,
         composerReviewCommentsSnapshot,
       ),
-      getCurrentEditorPresenceChips(),
+      // Task #71: scoped to THIS thread's project. The chip row deliberately
+      // shows every connected editor in the environment (owner ruling —
+      // presence is a property of the connected editor, not of a
+      // conversation), but a thread must only ever ship its OWN project's
+      // objects to its model. Without this filter a thread rooted at project
+      // A silently attached project B's selected objects.
+      selectEditorPresenceChipsForProject(getCurrentEditorPresenceChips(), activeProject),
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();

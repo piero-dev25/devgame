@@ -15,6 +15,7 @@ function chip(overrides: Partial<EditorPresenceRenderChip> = {}): EditorPresence
     editorId: "unity",
     editorName: "Unity",
     sessionId: "session-1",
+    workspaceRoot: "/repo",
     pinned: false,
     ...overrides,
   };

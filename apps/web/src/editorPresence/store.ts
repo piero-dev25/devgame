@@ -15,6 +15,7 @@
 import { create } from "zustand";
 
 import type { EditorPresenceEntry, EditorPresenceItem } from "./protocol";
+import { normalizeWorkspaceRoot } from "./resolveProjectEditor";
 
 export interface EditorPresenceChipItem extends EditorPresenceItem {
   /**
@@ -29,6 +30,19 @@ export interface EditorPresenceChipItem extends EditorPresenceItem {
   readonly editorId: string;
   readonly editorName: string;
   readonly sessionId: string;
+  /**
+   * The publishing editor's own `hello.workspace.root` — the only identity a
+   * publisher carries that a T3 project also has (a third-party editor has no
+   * notion of a project id; see resolveProjectEditor.ts).
+   *
+   * Carried ON the chip rather than looked up at send time because the send
+   * path reads a flat, non-reactive snapshot (see
+   * `publishCurrentEditorPresenceChips` below) with no route back to the
+   * `EditorPresenceEntry` a chip came from. Without this field the outgoing
+   * message physically cannot be scoped to the thread's own project — which
+   * is how task #71 happened.
+   */
+  readonly workspaceRoot: string;
 }
 
 function itemKey(sessionId: string, item: EditorPresenceItem): string {
@@ -55,6 +69,7 @@ export function deriveLiveEditorPresenceChips(
         editorId: entry.editor.id,
         editorName: entry.editor.name,
         sessionId: entry.session.id,
+        workspaceRoot: entry.workspace.root,
       });
     }
   }
@@ -115,6 +130,51 @@ export function mergeEditorPresenceChips(
     }
   }
   return merged;
+}
+
+// --------------------------------------------------------------------------
+// Project scoping for ATTACHMENT (not for display)
+// --------------------------------------------------------------------------
+
+/**
+ * The subset of a project this needs — structural, matching
+ * `resolveProjectEditor.ts`'s `ProjectWorkspaceRef` for the same reason: a
+ * test should not have to build an `EnvironmentProject`'s many unrelated
+ * required fields to exercise matching.
+ */
+export interface EditorPresenceProjectRef {
+  readonly workspaceRoot: string;
+}
+
+/**
+ * Narrows a merged chip set to the editors publishing for ONE project, by
+ * normalized `workspace.root`.
+ *
+ * Task #71. Presence is environment-scoped BY OWNER RULING — every connected
+ * editor is visible in the chip row, and that is deliberate ("presence is a
+ * property of the connected editor, not of a conversation", see this file's
+ * header). This function does not touch that: it is applied at SEND time
+ * only, between the snapshot and the `<editor_selection>` block, so the row
+ * keeps showing every editor while a thread only ever ships its OWN
+ * project's objects to its model.
+ *
+ * Those are two different questions and the ruling answers only the first.
+ * A thread rooted at project A silently attaching project B's selected
+ * objects is a correctness bug with a privacy edge, not a display policy.
+ *
+ * Returns `[]` for a null project — a draft thread with no project resolved
+ * yet has no project to scope TO, and attaching every connected editor's
+ * selection is exactly the behaviour being fixed. Empty is the conservative
+ * answer, and it costs nothing: the block is omitted entirely rather than
+ * emitted empty (see editorSelectionContext.ts).
+ */
+export function selectEditorPresenceChipsForProject(
+  chips: ReadonlyArray<EditorPresenceRenderChip>,
+  project: EditorPresenceProjectRef | null,
+): ReadonlyArray<EditorPresenceRenderChip> {
+  if (!project) return [];
+  const targetRoot = normalizeWorkspaceRoot(project.workspaceRoot);
+  return chips.filter((chip) => normalizeWorkspaceRoot(chip.workspaceRoot) === targetRoot);
 }
 
 // --------------------------------------------------------------------------
