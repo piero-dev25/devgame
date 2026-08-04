@@ -39,8 +39,8 @@ function readyFacts(overrides: Partial<UnitySetupFacts> = {}): UnitySetupFacts {
     cliAvailable: true,
     cliDiscoveredPath: null,
     lockfilePresent: true,
-    pipelinePackage: { installed: true, resolvedVersion: "0.4.0-exp.1" },
-    selectionPackage: { installed: false, resolvedVersion: null },
+    pipelinePackage: { installed: true, resolvedVersion: "0.4.0-exp.1", declaredInManifest: true },
+    selectionPackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
     pipelineList: {
       _tag: "ran",
       matched: {
@@ -192,7 +192,9 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
       engineType: "unity",
       connectedEditor: null,
       unitySetup: probeResult(
-        readyFacts({ pipelinePackage: { installed: false, resolvedVersion: null } }),
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
         {
           state: "S4",
           message:
@@ -330,7 +332,9 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
   it("NOT ready: pipelinePackage not installed", () => {
     expect(
       isUnityPlayReady(
-        readyFacts({ pipelinePackage: { installed: false, resolvedVersion: null } }),
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
       ),
     ).toBe(false);
   });
@@ -411,7 +415,9 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
   it("ready even though selectionPackage is NOT installed — Play readiness must be independent of the selection feature entirely", () => {
     expect(
       isUnityPlayReady(
-        readyFacts({ selectionPackage: { installed: false, resolvedVersion: null } }),
+        readyFacts({
+          selectionPackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
       ),
     ).toBe(true);
   });

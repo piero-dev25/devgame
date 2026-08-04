@@ -138,6 +138,13 @@ export const make = Effect.gen(function* () {
       justInstalledThisSession: false,
       lockfilePresent: false,
       pipelinePackageInstalled: false,
+      // Structurally dead in this branch — `classifyUnitySetup` returns
+      // S1/S2/S2' from the CLI-availability check (step 1) before ever
+      // reaching the field this gates (step 4), same reasoning
+      // `justInstalledThisSession: false` above already documents for this
+      // exact branch. Left `false` rather than reading manifest.json for a
+      // value that can't affect the outcome.
+      pipelinePackageDeclaredInManifest: false,
       selectionPackageInstalled: false,
       pipelineList: { _tag: "notRun" },
       selectionPublisherRegistered: false,
@@ -148,8 +155,8 @@ export const make = Effect.gen(function* () {
       cliAvailable: false,
       cliDiscoveredPath,
       lockfilePresent: false,
-      pipelinePackage: { installed: false, resolvedVersion: null },
-      selectionPackage: { installed: false, resolvedVersion: null },
+      pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+      selectionPackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
       selectionPublisherRegistered: false,
       withinPairingGraceWindow: false,
     };
@@ -188,6 +195,16 @@ export const make = Effect.gen(function* () {
       const dependencies = yield* packageLock.readDependencies(workspaceRoot);
       const pipelineEntry = dependencies.get(PIPELINE_PACKAGE_ID) ?? null;
       const selectionEntry = dependencies.get(SELECTION_PACKAGE_ID) ?? null;
+      // Declared-intent read (manifest.json), NOT the installed-check —
+      // see `UnityPackageLock.ts`'s own module doc. Exists so a successful
+      // `unity pipeline install` (plan §5's increment 4a) doesn't report
+      // itself as a failure on the very next probe: found live (2026-08-04,
+      // team-lead + presence-authz), install with no Editor running writes
+      // ONLY this manifest line — the lock stays untouched until Unity
+      // resolves it. See `UnitySetupClassifier.ts`'s S13 branch.
+      const manifestDependencyIds = yield* packageLock.readManifestDependencyIds(workspaceRoot);
+      const pipelinePackageDeclaredInManifest = manifestDependencyIds.has(PIPELINE_PACKAGE_ID);
+      const selectionPackageDeclaredInManifest = manifestDependencyIds.has(SELECTION_PACKAGE_ID);
 
       // ALWAYS called once the CLI is confirmed available — this route
       // itself IS the "on demand" trigger the plan's own cadence table
@@ -252,6 +269,7 @@ export const make = Effect.gen(function* () {
         justInstalledThisSession: false,
         lockfilePresent,
         pipelinePackageInstalled: pipelineEntry !== null,
+        pipelinePackageDeclaredInManifest,
         selectionPackageInstalled: selectionEntry !== null,
         pipelineList: classifierPipelineList,
         selectionPublisherRegistered,
@@ -266,10 +284,12 @@ export const make = Effect.gen(function* () {
         pipelinePackage: {
           installed: pipelineEntry !== null,
           resolvedVersion: pipelineEntry?.version ?? null,
+          declaredInManifest: pipelinePackageDeclaredInManifest,
         },
         selectionPackage: {
           installed: selectionEntry !== null,
           resolvedVersion: selectionEntry?.version ?? null,
+          declaredInManifest: selectionPackageDeclaredInManifest,
         },
         pipelineList: factsPipelineList,
         selectionPublisherRegistered,

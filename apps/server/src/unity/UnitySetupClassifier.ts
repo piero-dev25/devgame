@@ -21,6 +21,17 @@
  * unrecognized) are the two structural fallbacks — S12 short-circuits the
  * MOMENT `pipeline list` itself fails, since nothing downstream of a
  * failed call can be classified from real data.
+ *
+ * S13 (added 2026-08-04, not in plan §2's original table — see that
+ * field's own doc comment) sits inside the same "package presence" check
+ * S4/S5 do, and wins over both: a project whose manifest already declares
+ * `com.unity.pipeline` but whose lock doesn't have it yet is neither
+ * "nobody added it" (S5) nor cleanly awaiting the user's action (S4) — it's
+ * a real install that Unity simply hasn't resolved yet. Found live via a
+ * successful `unity pipeline install` reporting itself back as "package
+ * still missing" on the very next probe — the exact class of false message
+ * this whole feature exists to eliminate, reproduced by its own success
+ * path.
  */
 
 export interface UnitySetupClassifierMatchedInstance {
@@ -62,6 +73,23 @@ export interface UnitySetupClassifierInput {
   readonly justInstalledThisSession: boolean;
   readonly lockfilePresent: boolean;
   readonly pipelinePackageInstalled: boolean;
+  /** Whether `Packages/manifest.json` names `com.unity.pipeline` directly —
+   * DECLARED intent, never the installed-check (`UnityPackageLock.ts`'s own
+   * module doc: manifest is read "only for §3's future consent-prompt
+   * honesty," never as a substitute for the lock). Exists so a successful
+   * `install` (plan §5's increment 4a) doesn't report itself as a failure:
+   * found live (2026-08-04, team-lead + presence-authz, following §8-1's
+   * own experiment) — with no Editor running, `install` writes ONLY this
+   * one manifest line; `packages-lock.json` is untouched until Unity next
+   * resolves it. Without this fact, the very next probe after a SUCCESSFUL
+   * install still reads `pipelinePackageInstalled: false` (correctly, per
+   * F1's ruling — the lock genuinely has no entry yet) and falls through to
+   * S4/S5's "package missing" sentence — a true install, reported as a
+   * failure, by the classifier's own correct rule for a DIFFERENT question.
+   * See `classifyUnitySetup`'s S13 branch for the fix: this fact doesn't
+   * change what "installed" means, it adds the ONE piece of context that
+   * distinguishes "never added" from "added, not yet resolved." */
+  readonly pipelinePackageDeclaredInManifest: boolean;
   readonly selectionPackageInstalled: boolean;
   readonly pipelineList: UnitySetupClassifierPipelineList;
   /** Whether `EditorPresenceRegistry` has a publisher registered for this
@@ -87,7 +115,8 @@ export type UnitySetupPrimaryStateResult =
   | { readonly state: "S10"; readonly message: string }
   | { readonly state: "S10'"; readonly message: string }
   | { readonly state: "S11" }
-  | { readonly state: "S12"; readonly message: string; readonly command: string };
+  | { readonly state: "S12"; readonly message: string; readonly command: string }
+  | { readonly state: "S13"; readonly message: string };
 
 // Every sentence below is copied VERBATIM from plan §2's table — a reader
 // diffing this file against that table should find byte-identical text,
@@ -105,6 +134,16 @@ const S6_MESSAGE =
 const S7A_MESSAGE =
   "Unity is in Safe Mode because of a compile error in this project. Fix the error in the Editor, then Unity will exit Safe Mode on its own.";
 const S7B_MESSAGE = "Waiting for Unity to respond…";
+/** NOT copied from plan §2's table — that table predates this state (added
+ * 2026-08-04, team-lead + presence-authz, found live via §8-1's own
+ * experiment). Deliberately does NOT say "open the project in Unity" the
+ * way the first draft of this fix did — that phrasing is only true when
+ * Unity is currently closed, and this state can just as easily fire while
+ * Unity IS open and simply hasn't re-resolved yet (the exact liveness
+ * ambiguity S4/S4' already exist to avoid making promises about). Worded to
+ * be true either way. */
+const S13_MESSAGE =
+  "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it.";
 const S9_MESSAGE =
   "Unity selection chips are off — this project doesn't have DevGame's selection package.";
 const S10_MESSAGE =
@@ -166,6 +205,14 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
 
   // 4. Pipeline package presence + liveness.
   if (!input.pipelinePackageInstalled) {
+    // S13 wins over BOTH S4 and S5 — "we just wrote it and Unity hasn't
+    // caught up" is a different world from "nobody ever added it," and
+    // that's true whether or not Unity happens to be open right now (S4's
+    // own "DevGame can add it to this project" offer would be actively
+    // wrong here: it's already added, just not yet resolved).
+    if (input.pipelinePackageDeclaredInManifest) {
+      return { state: "S13", message: S13_MESSAGE };
+    }
     return liveMatch !== null
       ? { state: "S4", message: S4_MESSAGE }
       : { state: "S5", message: S5_MESSAGE };

@@ -55,6 +55,12 @@ function stubPipelineClient(
           _tag: "ok",
           value: { instances: [], latestVersion: null, unparseableInstanceCount: 0 },
         }),
+      // Never exercised by this file's own tests (this suite proves
+      // UnitySetupProbe's WIRING, which never calls install) — present
+      // only because UnityPipelineClient.of({...})'s object literal is
+      // checked against the full service interface, same latent-gap
+      // pattern this file's own `list` field closed for #92 increment 1.
+      install: () => Effect.die("unexpected install call"),
       ...overrides,
     }),
   );

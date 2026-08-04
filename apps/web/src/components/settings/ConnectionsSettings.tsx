@@ -1763,7 +1763,13 @@ function unityPipelineInstallCommand(workspaceRoot: string): string {
 }
 
 function formatPackageLockStatus(state: UnitySetupPackageLockState): string {
-  if (!state.installed) return "Not installed";
+  if (!state.installed) {
+    // "declared but not resolved" (S13's own condition) — the manifest has
+    // it, Unity hasn't caught up yet. Distinct from a plain "Not
+    // installed": that phrase alone would make a genuinely successful
+    // install look like it failed. See UnitySetupClassifier.ts's S13.
+    return state.declaredInManifest ? "Added, waiting for Unity to resolve" : "Not installed";
+  }
   return state.resolvedVersion ? `Installed (${state.resolvedVersion})` : "Installed";
 }
 
@@ -1998,7 +2004,13 @@ function UnitySetupRows({
         title="Pipeline package"
         description={formatPackageLockStatus(facts.pipelinePackage)}
         control={
-          facts.pipelinePackage.installed ? undefined : (
+          // Neither button once the package is either installed OR already
+          // declared-but-unresolved (S13's own condition) — re-offering
+          // "Install" (or its copy-paste equivalent) when it's ALREADY
+          // been added has nothing left to do; the status text above says
+          // what's actually happening instead.
+          facts.pipelinePackage.installed ||
+          facts.pipelinePackage.declaredInManifest ? undefined : (
             <div className="flex items-center gap-2">
               <UnityPipelineInstallButton
                 facts={facts}

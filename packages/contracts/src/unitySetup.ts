@@ -32,6 +32,16 @@ export const UnitySetupPackageLockState = Schema.Struct({
    * installed — `null` when not installed, or when the entry exists but
    * carries no readable version field. */
   resolvedVersion: Schema.NullOr(Schema.String),
+  /** Whether `Packages/manifest.json` names this package directly —
+   * DECLARED intent (`UnityPackageLock.ts`'s `readManifestDependencyIds`),
+   * never a substitute for `installed`. Added 2026-08-04 (team-lead +
+   * presence-authz) once a real gap surfaced: with no Unity Editor
+   * running, a successful `unity pipeline install` writes ONLY the
+   * manifest line — the lock stays untouched until Unity resolves it — so
+   * `installed` alone can't distinguish "never added" from "added, Unity
+   * hasn't caught up yet." See `UnitySetupClassifier.ts`'s S13 state,
+   * which is exactly this distinction. */
+  declaredInManifest: Schema.Boolean,
 });
 export type UnitySetupPackageLockState = typeof UnitySetupPackageLockState.Type;
 
@@ -196,6 +206,10 @@ export const UnitySetupPrimaryState = Schema.Union([
   Schema.Struct({ state: Schema.Literal("S10'"), message: Schema.String }),
   Schema.Struct({ state: Schema.Literal("S11") }),
   Schema.Struct({ state: Schema.Literal("S12"), message: Schema.String, command: Schema.String }),
+  /** Added 2026-08-04 (team-lead + presence-authz), not in plan §2's
+   * original table — see `UnitySetupClassifier.ts`'s own doc comment on
+   * this state for why it exists and why it wins over both S4 and S5. */
+  Schema.Struct({ state: Schema.Literal("S13"), message: Schema.String }),
 ]);
 export type UnitySetupPrimaryState = typeof UnitySetupPrimaryState.Type;
 
