@@ -26,7 +26,7 @@ stop→restart→reverify cycle — see section 6.**
 ## 1. Two launch shapes — know which one you're gating
 
 - **`pnpm dev`** (equivalently `vp run --filter=@t3tools/contracts
-  --filter=@t3tools/web --filter=t3 --parallel dev`, which is the literal
+--filter=@t3tools/web --filter=t3 --parallel dev`, which is the literal
   command `scripts/dev-runner.ts` resolves `dev` to): the web-only dev stack.
   Runs the server under `node --watch src/bin.ts`. This is what's actually
   running on this machine right now, shared across lanes, and it's what
@@ -141,7 +141,7 @@ There is a genuine, installed T3 Code desktop app on this machine, reachable
 on port `3773` (not `13773`), whose environment label is **also** "Piero's
 Mac Studio" — documented in `docs/workbench/open-app-connection-failure.md`.
 Any admin CLI action (`t3 pair`, `auth pairing create`, etc.) run without an
-explicit base dir can resolve against *that* instance instead of the dev one,
+explicit base dir can resolve against _that_ instance instead of the dev one,
 and its failure (`invalid_credential`) looks exactly like a broken auth
 system rather than "wrong instance." Pass an explicit base dir / `T3CODE_HOME`
 to every CLI invocation, not just the dev-runner itself — the label alone
@@ -194,15 +194,51 @@ Reconnecting…", "…could not establish a WebSocket connection" — has **two
 separate, already-documented causes** that have nothing to do with each
 other. Check both before treating it as a finding:
 
-| Check | How | If this is the cause |
-| --- | --- | --- |
-| Backend restart churn | `grep "Restarting 'src/bin.ts'"` in the dev-runner's stdout for the ~60s before the failure timestamp you observed | Not a defect. `node --watch` reacted to a live edit from another lane — confirmed live tonight by matching restart timestamps (02:44:23, 02:44:49) to the exact moment the banner flipped in the browser. Wait for a quiesced window (section 2) and retry the same step before concluding anything. |
+| Check                          | How                                                                                                                                                             | If this is the cause                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Backend restart churn          | `grep "Restarting 'src/bin.ts'"` in the dev-runner's stdout for the ~60s before the failure timestamp you observed                                              | Not a defect. `node --watch` reacted to a live edit from another lane — confirmed live tonight by matching restart timestamps (02:44:23, 02:44:49) to the exact moment the banner flipped in the browser. Wait for a quiesced window (section 2) and retry the same step before concluding anything.                                                                                                                                                                                                                                                                                                                                          |
 | Tab visibility / backgrounding | Was the browser tab genuinely foregrounded and focused the whole time, or could it have been occluded (driven by an automation tool, or the window lost focus)? | Not necessarily a defect either. `docs/workbench/open-app-connection-failure.md` traced a near-identical banner to Chrome throttling nested `setTimeout` chains in a hidden tab — a ~200ms `server.getConfig` decode stretched to ~42s against the 15s `CONNECTION_ESTABLISHMENT_TIMEOUT` (`packages/client-runtime/src/connection/supervisor.ts:509-530`). That doc's own one-minute check: bring Chrome to the front, focused and unoccluded, reload. If the banner clears, it was the tab. This is tracked separately (task #29, "likely a measurement artifact," not settled) — don't re-open it as a new finding under a different name. |
 
 If **neither** explains it — no restart in the window, and the tab was
 genuinely foregrounded the whole time — that's the case worth writing down as
 a real finding. Everything else is environment noise, however convincing it
 looks from inside the app.
+
+### The restart check that needs no log access
+
+The `grep "Restarting 'src/bin.ts'"` above assumes you own the terminal running
+`npm run dev`. Often you won't — and there is no file to fall back on:
+`.t3-dev/` holds only `caches/`, `userdata/` and `worktrees/`, no log anywhere.
+A check that depends on someone else's terminal is a check that won't get run.
+
+`node --watch` does **not** restart in place. It keeps its own pid and
+**replaces its child process** on every reload, so the child's start time is a
+restart counter readable by anyone:
+
+```sh
+pgrep -P "$(pgrep -f 'node --watch src/bin.ts')" \
+  | while read p; do ps -o lstart= -p "$p"; done
+```
+
+Confirmed live: watcher parent started `00:02:40`, its child `02:55:55` — the
+parent is stable, the child is what churns.
+
+**Record that start time at the top of each QA step.** If it has moved when a
+step fails, the backend restarted underneath you and it is not a defect.
+
+### A retry that succeeds is still a finding
+
+One row the table above doesn't cover, and the one a tired runner will skip:
+
+| Symptom                                                        | Verdict                          |
+| -------------------------------------------------------------- | -------------------------------- |
+| Failed **and** the child start time moved                      | Environment — redo, don't record |
+| Failed, child start time unchanged                             | **Product defect — record it**   |
+| Failed, then succeeded on retry **with no restart in between** | **Record it**                    |
+
+The third row matters. "It worked the second time" is not a pass — with no
+restart to explain it, that is an intermittent defect being laundered into a
+green. Note it as intermittent rather than dropping it.
 
 ## 5. Existing state — reuse it, don't manufacture over it
 
@@ -234,8 +270,8 @@ Stated plainly rather than left to bleed together:
 2); the healthy-boot curl checks and the `.well-known/t3/environment`
 response shape (section 3); the `T3CODE_HOME` precedence logic, read from
 `scripts/dev-runner.ts` and cross-checked against the live process's actual
-environment; the WS-holds-connection behavior of the *already-running,
-already-connected* instance; the existing-state inventory (section 5).
+environment; the WS-holds-connection behavior of the _already-running,
+already-connected_ instance; the existing-state inventory (section 5).
 
 **Written, not exercised:** the full stop→restart→reverify cycle in section 3
 — the running stack was deliberately left alone, per instruction, since other
