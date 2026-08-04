@@ -140,6 +140,7 @@ before the scope work above.
   `EditorPresenceDispatchCommandInput`'s contract and the web client that
   populates it, i.e. the SAME `workspace.root` scoping problem named
   below, not a separate one. Tracked as follow-up work, not closed here.
+
 - **`workspace.root` scoping.** A session with the right role-scope can see
   (subscriber) or publish as (publisher) presence for **every** workspace on
   the machine, not just its own — `AuthOrchestrationReadScope` /

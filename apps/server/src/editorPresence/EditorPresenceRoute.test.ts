@@ -17,6 +17,7 @@ import {
   AuthOrchestrationReadScope,
   AuthPresenceCommandScope,
   AuthSessionId,
+  EDITOR_PRESENCE_DISPATCH_COMMAND_PATH,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -26,7 +27,13 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { HttpRouter, HttpServer } from "effect/unstable/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpRouter,
+  HttpServer,
+} from "effect/unstable/http";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import * as ServerConfig from "../config.ts";
@@ -36,6 +43,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 import {
   dispatchEditorCommand,
+  editorPresenceCommandRouteLayer,
   editorPresenceRouteLayer,
   runPublisherConnection,
 } from "./EditorPresenceRoute.ts";
@@ -65,6 +73,40 @@ const getSubscriberWsUrl = () =>
     const server = yield* HttpServer.HttpServer;
     const address = server.address as HttpServer.TcpAddress;
     return `ws://127.0.0.1:${address.port}/editor-presence?role=subscriber`;
+  });
+
+/** Posts a real HTTP request to `editorPresenceCommandRouteLayer` — the
+ * browser -> server leg task #52 added. Every other test in this file
+ * drives `dispatchEditorCommand` in-process; this is the one that proves
+ * the wire path itself. */
+const postDispatchCommand = (input: {
+  readonly bearerToken: string;
+  readonly sessionId: string;
+  readonly action: string;
+  readonly params?: Record<string, unknown>;
+}) =>
+  Effect.gen(function* () {
+    // A RELATIVE path, not `http://127.0.0.1:${port}${path}` — matching
+    // server.test.ts's own proven `fetchEffect`/`testRequestUrl` pattern.
+    // `NodeHttpServer.layerTest`'s `HttpClient` is an in-process test
+    // client wired directly to the router, not a real TCP listener; an
+    // absolute host:port URL routes over a REAL socket instead, which this
+    // test server never actually accepts connections on — every response
+    // came back a fast, empty 404 because the request never reached the
+    // router at all. Found by comparing against `server.test.ts`'s working
+    // helper after every other theory (layer structure, merge order,
+    // route path) was ruled out by testing this route served completely
+    // alone and still getting the identical 404.
+    const request = HttpClientRequest.post(EDITOR_PRESENCE_DISPATCH_COMMAND_PATH).pipe(
+      HttpClientRequest.setHeader("authorization", `Bearer ${input.bearerToken}`),
+      HttpClientRequest.bodyJsonUnsafe({
+        sessionId: input.sessionId,
+        action: input.action,
+        ...(input.params ? { params: input.params } : {}),
+      }),
+    );
+    const response = yield* HttpClient.execute(request);
+    return yield* response.json;
   });
 
 interface PresenceFrame {
@@ -1116,6 +1158,152 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
         Effect.provide(
           makeEnvironmentAuthLayer().pipe(
             Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "POST /editor-presence/command reaches a real connected engine over the wire, sharing the same registry the WS route registered it into",
+    () =>
+      Effect.gen(function* () {
+        // Both route layers served together, exactly like server.ts's own
+        // `Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer, ...)`
+        // — this is what actually proves `editorPresenceCommandRouteLayer`'s
+        // `Layer.provide(EditorPresenceRegistry.layer)` shares ONE registry
+        // instance with the WS route's own `provideMerge` of the SAME layer
+        // reference, rather than building a second, disconnected, always-empty
+        // one that would make every dispatch fail `editor_not_connected`
+        // regardless of what a real publisher registered.
+        yield* HttpRouter.serve(
+          Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const publisherIssued = yield* serverAuth.issueSession();
+        const dispatcherIssued = yield* serverAuth.issueSession({
+          scopes: [AuthPresenceCommandScope],
+        });
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const receivedCommandFrames: Array<string> = [];
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          publisherIssued.token,
+          "http-command-repro",
+          undefined,
+          (raw) => {
+            receivedCommandFrames.push(raw);
+            const command = decodeUnknownJson(raw) as { readonly id: string };
+            socket.send(JSON.stringify({ v: 1, type: "commandResult", id: command.id, ok: true }));
+          },
+        );
+        // A finalizer, not a bare call at the end of the happy path — see
+        // the session-id-takeover test's own comment above for why: a
+        // thrown assertion below must still close the socket, or
+        // `NodeHttpServer.layerTest`'s scope teardown waits on it and a
+        // fast, real failure shows up as an uninformative 60s hang instead
+        // (this is exactly what happened the first time this test was
+        // written, before this fix).
+        yield* Effect.addFinalizer(() => Effect.sync(() => socket.close()));
+
+        const outcome = yield* postDispatchCommand({
+          bearerToken: dispatcherIssued.token,
+          sessionId: "http-command-repro",
+          action: "play",
+          params: { sceneIndex: 2 },
+        });
+
+        assert.deepStrictEqual(outcome, { ok: true });
+        assert.strictEqual(receivedCommandFrames.length, 1);
+        const receivedCommand = decodeUnknownJson(receivedCommandFrames[0]!) as {
+          readonly v: 1;
+          readonly type: "command";
+          readonly action: string;
+          readonly params: unknown;
+        };
+        assert.strictEqual(receivedCommand.v, 1);
+        assert.strictEqual(receivedCommand.type, "command");
+        assert.strictEqual(receivedCommand.action, "play");
+        assert.deepStrictEqual(receivedCommand.params, { sceneIndex: 2 });
+      }).pipe(
+        Effect.scoped,
+        // `EditorPresenceRegistry.layer` provided here too, alongside
+        // `editorPresenceRouteLayer`'s own internal use of the exact same
+        // layer reference — see the sibling in-process scope-gate test
+        // above for why (Effect memoizes a layer by identity within one
+        // resolution). Needed explicitly here at the type level even
+        // though `editorPresenceCommandRouteLayer` is bare (no
+        // self-provide): `Layer.mergeAll`'s TYPE signature is the union of
+        // each layer's OWN remaining requirement, not a cross-satisfied
+        // one, so TypeScript can't see that `editorPresenceRouteLayer`'s
+        // sibling presence already supplies it at runtime.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(FetchHttpClient.layer),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "POST /editor-presence/command answers insufficient_scope for a session without presence:command, without reaching the engine",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(
+          Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const publisherIssued = yield* serverAuth.issueSession();
+        // Operate-only, deliberately missing the dedicated command scope —
+        // the same review finding the in-process scope-gate test above
+        // covers, exercised here over the ACTUAL route instead of by
+        // calling `dispatchEditorCommand` directly.
+        const dispatcherIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+        });
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const messagesAfterReady: Array<string> = [];
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          publisherIssued.token,
+          "http-scope-gate-repro",
+          undefined,
+          (raw) => messagesAfterReady.push(raw),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => socket.close()));
+
+        const outcome = yield* postDispatchCommand({
+          bearerToken: dispatcherIssued.token,
+          sessionId: "http-scope-gate-repro",
+          action: "play",
+        });
+
+        assert.deepStrictEqual(outcome, { ok: false, error: "insufficient_scope" });
+        assert.deepStrictEqual(messagesAfterReady, []);
+      }).pipe(
+        Effect.scoped,
+        // `EditorPresenceRegistry.layer` provided here too, alongside
+        // `editorPresenceRouteLayer`'s own internal use of the exact same
+        // layer reference — see the sibling in-process scope-gate test
+        // above for why (Effect memoizes a layer by identity within one
+        // resolution). Needed explicitly here at the type level even
+        // though `editorPresenceCommandRouteLayer` is bare (no
+        // self-provide): `Layer.mergeAll`'s TYPE signature is the union of
+        // each layer's OWN remaining requirement, not a cross-satisfied
+        // one, so TypeScript can't see that `editorPresenceRouteLayer`'s
+        // sibling presence already supplies it at runtime.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(FetchHttpClient.layer),
             Layer.provideMerge(EditorPresenceRegistry.layer),
           ),
         ),

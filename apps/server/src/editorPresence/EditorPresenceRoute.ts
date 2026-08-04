@@ -83,11 +83,14 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPresenceCommandScope,
+  EDITOR_PRESENCE_DISPATCH_COMMAND_PATH,
+  EditorPresenceDispatchCommandInput,
 } from "@t3tools/contracts";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -542,3 +545,117 @@ export const editorPresenceRouteLayer = Layer.unwrap(
   // exactly the setup that lets a sibling accidentally build its own,
   // second, empty registry instead of sharing this one.
 ).pipe(Layer.provideMerge(EditorPresenceRegistry.layer));
+
+/**
+ * `POST /editor-presence/command` — the browser -> server leg task #52
+ * found missing: `dispatchEditorCommand` above existed with nothing
+ * client-reachable calling it. This route is deliberately thin: it
+ * authenticates the caller and calls `dispatchEditorCommand` UNCHANGED,
+ * exactly as ruled — it does not touch `EditorPresenceRegistry.ts`,
+ * `sendCommand`, or the WS publisher/subscriber route above.
+ *
+ * NOT a scope-gated route the way `otlpTracesProxyRouteLayer`
+ * (`../http.ts`) is: `dispatchEditorCommand` already performs its own
+ * `AuthPresenceCommandScope` check and returns `{ok:false,
+ * error:"insufficient_scope"}` as an ordinary result value, not an
+ * HTTP-layer rejection. Gating here too would make that internal check
+ * unreachable dead code. This route only authenticates WHO is calling;
+ * `dispatchEditorCommand` alone decides whether they may.
+ *
+ * UNPROVEN over the wire as of this change: Godot's Play/Stop was verified
+ * by driving `dispatchEditorCommand` in-process (a test harness calling the
+ * Effect function directly), never through an actual HTTP request from a
+ * browser. This route is the first thing that makes that path real —
+ * treat it as unverified until exercised live from apps/web.
+ *
+ * Inherits, rather than fixes, task #60's open finding: commands are
+ * addressed purely by `sessionId` with no `workspace.root` check against
+ * the caller's own project, the same gap `EditorPresenceRoute`'s own module
+ * doc already discloses for the WS route above. `resolveConnectedEditorForProject`
+ * (apps/web/src/editorPresence/resolveProjectEditor.ts) narrows this on the
+ * CLIENT side — it only offers a `sessionId` whose `workspace.root` already
+ * matches the active project — but that is a UI convenience, not a server-side
+ * guarantee; a client could still ask for a foreign `sessionId` today. Left
+ * for presence-authz's review and #60, per this route's explicit review
+ * requirement — not silently absorbed into "done" here.
+ */
+export const editorPresenceCommandRouteLayer = HttpRouter.add(
+  "POST",
+  EDITOR_PRESENCE_DISPATCH_COMMAND_PATH,
+  Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+    const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
+      Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+        failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+      ),
+      Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
+        failEnvironmentInternal("internal_error", error),
+      ),
+    );
+
+    const input = yield* request.json.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(EditorPresenceDispatchCommandInput)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (input === null) {
+      return HttpServerResponse.text("Bad Request: malformed command", { status: 400 });
+    }
+
+    // `dispatchEditorCommand` called UNCHANGED, exactly as ruled.
+    const outcome = yield* dispatchEditorCommand(
+      session,
+      input.sessionId,
+      input.action,
+      input.params,
+    );
+    return yield* HttpServerResponse.json(outcome);
+  }).pipe(
+    Effect.catchTags({
+      EnvironmentAuthInvalidError: HttpServerRespondable.toResponse,
+      EnvironmentInternalError: HttpServerRespondable.toResponse,
+    }),
+  ),
+).pipe(HttpRouter.provideRequest(EditorPresenceRegistry.layer));
+// `HttpRouter.provideRequest`, NOT `Layer.provide`. `HttpRouter.add(...)`
+// does not put a route's requirements in the Layer's bare `R` channel — it
+// wraps each one in a nominal, `unique symbol`-branded marker type,
+// `Request.From<"Requires", X>` (effect/unstable/http/HttpRouter.ts:496).
+// `Layer.provide(layer providing X)` cancels BARE `X` from `R` via a
+// structural `Exclude`; it cannot match `Request<"Requires", X>`, a
+// different, unrelated type by design. So `.pipe(Layer.provide(...))` here
+// type-checks, LOOKS correct, and silently does nothing —
+// `EditorPresenceRegistry` stays wrapped and undischarged, only becoming a
+// bare requirement again inside `HttpRouter.serve(...)`
+// (`Request.Without<R>`), which is why the leak surfaced as a giant
+// server-bootstrap cascade far from this route rather than an error here.
+// `HttpRouter.provideRequest` is the combinator purpose-built to discharge
+// this marker (HttpRouter.ts:1240-1257).
+//
+// This was tried three ways before landing here, each one a real dead end,
+// not a stylistic preference:
+// 1. Bare (no provide at all) — type-checks fine WHEN merged alongside
+//    `editorPresenceRouteLayer` as a sibling (its own `provideMerge` of the
+//    identical `EditorPresenceRegistry.layer` supplies the ambient
+//    context), but leaves the requirement genuinely unsatisfied in any
+//    composition that doesn't happen to include that sibling — which is
+//    exactly what every test file that builds its OWN server composition
+//    hit.
+// 2. `Layer.provide(EditorPresenceRegistry.layer)` — the bug this comment
+//    exists to warn about. It was "verified" once via two real,
+//    over-the-wire round-trip tests that both passed — but those tests
+//    ALWAYS served this route merged with `editorPresenceRouteLayer`, so
+//    they never distinguished "my own provide discharged the requirement"
+//    from "the sibling's ambient supply did, and my provide is a no-op
+//    either way." Never re-tested in isolation before being reported as
+//    fixed.
+// 3. `HttpRouter.provideRequest(EditorPresenceRegistry.layer)` (this one) —
+//    the only one that discharges the marker type at all, verified by
+//    type-checking this layer in isolation (no sibling in scope) and
+//    confirming zero remaining requirements, not just by a test that
+//    happened to pass for an unrelated reason.
+//
+// Proof technique for any future case like this: type-check the composed
+// route+service layer in TOTAL isolation — no surrounding `mergeAll`, no
+// sibling that could be supplying the same service ambiently — before
+// trusting a passing test as proof of which combinator did the work.

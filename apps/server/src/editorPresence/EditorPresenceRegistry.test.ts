@@ -93,7 +93,9 @@ it.effect("hello + selection broadcast to every registered subscriber", () =>
       yield* registry.addSubscriber(subscriberB.send);
 
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
       yield* registry.updatePublisherSelection("session-1", token, {
         seq: 1,
         at: "2026-08-03T00:00:00.000Z",
@@ -125,7 +127,9 @@ it.effect("a later subscriber immediately sees already-connected publishers", ()
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const lateSubscriber = makeRecorder();
       const initialFrame = yield* registry.addSubscriber(lateSubscriber.send);
@@ -140,7 +144,9 @@ it.effect("an out-of-order (<=last seen) seq is dropped, not broadcast", () =>
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       yield* registry.addSubscriber(subscriber.send);
@@ -176,7 +182,9 @@ it.effect("a fresh registration reports playState: null until the publisher repo
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       const initialFrame = yield* registry.addSubscriber(subscriber.send);
@@ -190,7 +198,9 @@ it.effect("updatePublisherPlayState broadcasts the new state to every subscriber
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       yield* registry.addSubscriber(subscriber.send);
@@ -213,10 +223,14 @@ it.effect("a stale (superseded) connection's playState update is a silent no-op"
   withRegistry((registry) =>
     Effect.gen(function* () {
       const staleToken = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", staleToken, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const freshToken = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", freshToken, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", freshToken, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       yield* registry.addSubscriber(subscriber.send);
@@ -242,7 +256,9 @@ it.effect(
     withRegistry((registry) =>
       Effect.gen(function* () {
         const staleToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("session-1", staleToken, HELLO, { claimantSessionId: undefined });
+        yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+          claimantSessionId: undefined,
+        });
         yield* registry.updatePublisherPlayState("session-1", staleToken, "playing");
 
         // A Unity domain reload: the OLD connection dies and a NEW one
@@ -250,7 +266,9 @@ it.effect(
         // doc on `playState: null`, not a lasting regression, since the
         // fresh connection sends its own playState frame right after hello.
         const freshToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("session-1", freshToken, HELLO, { claimantSessionId: undefined });
+        yield* registry.registerPublisher("session-1", freshToken, HELLO, {
+          claimantSessionId: undefined,
+        });
 
         const subscriber = makeRecorder();
         const initialFrame = yield* registry.addSubscriber(subscriber.send);
@@ -269,7 +287,9 @@ it.effect(
         yield* registry.addSubscriber(subscriber.send);
 
         const staleToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("session-1", staleToken, HELLO, { claimantSessionId: undefined });
+        yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+          claimantSessionId: undefined,
+        });
 
         const freshToken = registry.newConnectionToken();
         yield* registry.registerPublisher(
@@ -308,7 +328,9 @@ it.effect("removeSubscriber stops future broadcasts from reaching it", () =>
       yield* registry.removeSubscriber(subscriber.send);
 
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO, { claimantSessionId: undefined });
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       expect(subscriber.frames).toHaveLength(0);
     }),
