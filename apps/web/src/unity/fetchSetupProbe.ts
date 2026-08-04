@@ -47,7 +47,18 @@ function fetchEffect(input: {
       client.execute(request),
     );
     return (yield* response.json) as UnitySetupProbeResult;
-  }).pipe(Effect.provide(FetchHttpClient.layer));
+  }).pipe(
+    // Bounded so a hung connection can never leave a caller's `.then`/
+    // `.catch` both un-fired forever — found live (2026-08-04, team-lead +
+    // presence-authz) as the second half of the "Checking…" panel bug: an
+    // unbounded fetch that never resolves OR rejects is indistinguishable,
+    // from the caller's side, from one that's still loading. 20s matches
+    // this route's own real observed latency (a live probe run against a
+    // real project measured ~200ms; this is generous headroom, not a tight
+    // bound tuned to the happy path).
+    Effect.timeout("20 seconds"),
+    Effect.provide(FetchHttpClient.layer),
+  );
 }
 
 /**

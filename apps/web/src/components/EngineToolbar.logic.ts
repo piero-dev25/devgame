@@ -130,9 +130,24 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * always mean `primary` is one of those (S11 implies the same facts this
  * function's caller already found ready) — checked with `"message" in`
  * rather than assumed, since the two are independently computed from the
- * same facts, not one derived from the other. */
-function unityDisabledReason(setup: UnitySetupProbeResult | null): string | null {
-  if (setup === null) return "Checking Unity's status…";
+ * same facts, not one derived from the other.
+ *
+ * `error` distinguishes "still loading" from "loaded and failed" — found
+ * live (2026-08-04, team-lead + presence-authz): before this, a probe
+ * fetch that REJECTED (network failure, a hung request past its own
+ * timeout, anything) left `setup` at `null` forever, and this function had
+ * no way to tell that apart from "hasn't resolved yet" — "Checking Unity's
+ * status…" stayed on screen permanently instead of ever becoming a stated
+ * failure. Same non-negotiable as `UnitySetupSection`'s own fix
+ * (ConnectionsSettings.tsx): resolve to success or a stated reason, never
+ * an indefinite loading message. */
+function unityDisabledReason(
+  setup: UnitySetupProbeResult | null,
+  error: string | null,
+): string | null {
+  if (setup === null) {
+    return error !== null ? `Couldn't check Unity's status — ${error}` : "Checking Unity's status…";
+  }
   return "message" in setup.primary ? setup.primary.message : null;
 }
 
@@ -215,6 +230,16 @@ export function resolveEngineToolbarView(input: {
    * a generic toast.
    */
   readonly unitySetup?: UnitySetupProbeResult | null;
+  /**
+   * Only consulted for the `"unity-cli"` backend, and only when `unitySetup`
+   * is still `null` — the real reason the fetch never resolved to a value
+   * (a rejected promise's message), so `unityDisabledReason` can show a
+   * stated failure instead of "Checking Unity's status…" forever. `null`/
+   * omitted means "no failure known" — either the fetch hasn't settled yet,
+   * or it succeeded (in which case `unitySetup` itself is non-null and this
+   * is never consulted).
+   */
+  readonly unitySetupError?: string | null;
 }): EngineToolbarView {
   const { engineType, connectedEditor } = input;
   if (engineType === null) {
@@ -253,7 +278,7 @@ export function resolveEngineToolbarView(input: {
       hasConnectedEditor: false,
       availableActions: playReady ? UNITY_CLI_ACTIONS : [],
       playState: input.unityPlayState ?? null,
-      disabledReason: playReady ? null : unityDisabledReason(setup),
+      disabledReason: playReady ? null : unityDisabledReason(setup, input.unitySetupError ?? null),
     };
   }
 

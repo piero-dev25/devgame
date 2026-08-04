@@ -137,7 +137,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     expect(view.disabledReason).toBe("Checking Unity's status…");
   });
 
-  it("unitySetup explicitly null (fetch failed): same disabled treatment as not-yet-fetched, never a guessed-enabled default", () => {
+  it("unitySetup explicitly null, no error known: same disabled treatment as not-yet-fetched, never a guessed-enabled default", () => {
     const view = resolveEngineToolbarView({
       engineType: "unity",
       connectedEditor: null,
@@ -145,6 +145,27 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     });
     expect(view.availableActions).toEqual([]);
     expect(view.disabledReason).toBe("Checking Unity's status…");
+  });
+
+  it("unitySetup null AND unitySetupError set: shows the real failure, not an indefinite 'Checking…' — found live 2026-08-04, a rejected fetch used to leave this stuck forever", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: null,
+      unitySetup: null,
+      unitySetupError: "Request timed out",
+    });
+    expect(view.availableActions).toEqual([]);
+    expect(view.disabledReason).toBe("Couldn't check Unity's status — Request timed out");
+  });
+
+  it("unitySetupError is ignored once unitySetup itself resolves — a stale error from an earlier failed attempt never survives a later success", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: null,
+      unitySetup: probeResult(readyFacts(), S11),
+      unitySetupError: "stale error from a previous attempt",
+    });
+    expect(view.disabledReason).toBeNull();
   });
 
   it("facts fully ready: play/pause/stop enabled, no disabledReason — no step, Pipeline has no scriptable frame step", () => {

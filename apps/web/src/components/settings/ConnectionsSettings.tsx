@@ -2062,12 +2062,22 @@ function UnitySetupSection({
         })();
 
   const [result, setResult] = useState<UnitySetupProbeResult | null>(null);
+  // Populated only on a REJECTED fetch — kept separate from `result` so the
+  // render below can tell "still loading" apart from "loaded and failed."
+  // Found live (2026-08-04, team-lead + presence-authz): before this field
+  // existed, a rejected fetch left `result` at `null` FOREVER with no
+  // distinguishable failure state — this panel showed "Checking… / Reading
+  // this project's Unity setup." permanently, on a real owner build, with
+  // no way to tell whether it was still loading or had already failed.
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
-  // Extracted from the effect below so `UnityPipelineInstallButton`'s
-  // post-install success handler can call the SAME fetch (not a
-  // reimplementation of it) to refresh this row's status without a full
-  // page reload — the whole reason the "Pipeline package" row should ever
-  // change out from under the user while they're looking at it.
+  // Extracted so `UnityPipelineInstallButton`'s post-install success
+  // handler can call the SAME fetch (not a reimplementation of it) to
+  // refresh this row's status without a full page reload, and so the
+  // failure row's Retry button (below) can re-run it too. Simpler than
+  // sharing the effect's own cancellation guard — a user-triggered retry
+  // is not racing a remount the way the mount-time fetch below is, so it
+  // doesn't need one.
   const refetch = useCallback(() => {
     if (primaryEnvironmentId === null) return;
     const prepared = readPreparedConnection(primaryEnvironmentId);
@@ -2076,9 +2086,15 @@ function UnitySetupSection({
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,
     })
-      .then((value) => setResult(value))
+      .then((value) => {
+        setResult(value);
+        setFetchError(null);
+      })
       .catch((cause) => {
         console.error("Failed to fetch Unity setup status:", cause);
+        setFetchError(
+          cause instanceof Error ? cause.message : "Failed to check this project's Unity setup.",
+        );
       });
   }, [primaryEnvironmentId]);
 
@@ -2089,6 +2105,7 @@ function UnitySetupSection({
     // on-demand trigger here, same as the toolbar's own mount-time fetch
     // in ChatView.tsx.
     setResult(null);
+    setFetchError(null);
     if (primaryEnvironmentId === null) return;
     const prepared = readPreparedConnection(primaryEnvironmentId);
     if (!prepared) return;
@@ -2098,10 +2115,25 @@ function UnitySetupSection({
       httpAuthorization: prepared.httpAuthorization,
     })
       .then((value) => {
-        if (!cancelled) setResult(value);
+        if (!cancelled) {
+          setResult(value);
+          setFetchError(null);
+        }
       })
       .catch((cause) => {
+        // Transport failure, a `presence:read`-scope refusal, or the
+        // fetch's own bound (fetchSetupProbe.ts's Effect.timeout)
+        // tripping — sets a real failure message so this panel can render
+        // a stated reason and a retry, never stay on "Checking…"
+        // indefinitely. Found live (2026-08-04, team-lead +
+        // presence-authz): before this, a rejected fetch left `result` at
+        // `null` FOREVER with no distinguishable failure state.
         console.error("Failed to fetch Unity setup status:", cause);
+        if (!cancelled) {
+          setFetchError(
+            cause instanceof Error ? cause.message : "Failed to check this project's Unity setup.",
+          );
+        }
       });
     return () => {
       cancelled = true;
@@ -2118,7 +2150,19 @@ function UnitySetupSection({
   return (
     <SettingsSection title={`Unity integration${headerSuffix}`}>
       {result === null ? (
-        <SettingsRow title="Checking…" description="Reading this project's Unity setup." />
+        fetchError !== null ? (
+          <SettingsRow
+            title="Couldn't check Unity setup"
+            description={fetchError}
+            control={
+              <Button size="xs" variant="outline" onClick={refetch}>
+                Retry
+              </Button>
+            }
+          />
+        ) : (
+          <SettingsRow title="Checking…" description="Reading this project's Unity setup." />
+        )
       ) : !result.facts.isUnityProject ? (
         <SettingsRow
           title="Not a Unity project"

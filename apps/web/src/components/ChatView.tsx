@@ -1483,9 +1483,24 @@ function ChatViewContent(props: ChatViewProps) {
     });
   }, [activeThreadKey, existingOpenTerminalThreadKeys, terminalUiState.terminalOpen]);
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
-  const activeProjectRef = activeThread
-    ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
-    : null;
+  // Memoized on the underlying primitives, not recomputed as a fresh object
+  // every render — `scopeProjectRef` returns a plain object literal
+  // (`packages/client-runtime/src/environment/scoped.ts`), so an
+  // unmemoized call here is a NEW reference on every render regardless of
+  // whether the project actually changed. Found live (2026-08-04,
+  // team-lead + presence-authz): this fed straight into the Unity
+  // setup-probe `useEffect` below (dependency array includes
+  // `activeProjectRef`), which re-fired on every ChatView re-render for
+  // any reason — measured at ~10 requests/second sustained on the
+  // owner's real build, each one shelling out to the real `unity` CLI.
+  // `useProject` a few lines down, and every OTHER consumer of
+  // `activeProjectRef` in this component, get the same stability fix for
+  // free.
+  const activeProjectRef = useMemo(
+    () =>
+      activeThread ? scopeProjectRef(activeThread.environmentId, activeThread.projectId) : null,
+    [activeThread?.environmentId, activeThread?.projectId],
+  );
   const activeProject = useProject(activeProjectRef);
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
@@ -1535,8 +1550,18 @@ function ChatViewContent(props: ChatViewProps) {
   // `EngineToolbarView.unitySetup`'s own doc comment for why that default
   // direction matters.
   const [unitySetup, setUnitySetup] = useState<UnitySetupProbeResult | null>(null);
+  // Populated only on a REJECTED fetch — kept separate from `unitySetup`
+  // (rather than folded into it) so `resolveEngineToolbarView` can tell
+  // "still loading" apart from "loaded and failed." Found live (2026-08-04,
+  // team-lead + presence-authz): before this field existed, a rejected
+  // fetch left `unitySetup` at `null` FOREVER with no distinguishable
+  // failure state — "Checking Unity's status…" stayed on screen
+  // permanently instead of ever becoming a stated reason. See
+  // `unityDisabledReason`'s own doc comment (EngineToolbar.logic.ts).
+  const [unitySetupError, setUnitySetupError] = useState<string | null>(null);
   useEffect(() => {
     setUnitySetup(null);
+    setUnitySetupError(null);
     if (resolvedEngineType !== "unity") return;
     const prepared = readPreparedConnection(environmentId);
     if (!prepared) return;
@@ -1549,12 +1574,17 @@ function ChatViewContent(props: ChatViewProps) {
         if (!cancelled) setUnitySetup(result);
       })
       .catch((cause) => {
-        // Transport failure or a `presence:read`-scope refusal — leaves
-        // `unitySetup` at `null`, the same "not confirmed ready" state a
-        // slow-but-eventually-successful fetch passes through, so the
-        // toolbar degrades to a disabled Play with a generic "Checking…"
-        // reason rather than a thrown exception or a guessed-enabled state.
+        // Transport failure, a `presence:read`-scope refusal, or the fetch's
+        // own bound (fetchSetupProbe.ts's Effect.timeout) tripping — leaves
+        // `unitySetup` at `null` but now ALSO sets a real failure message,
+        // so the toolbar degrades to a disabled Play with the actual reason
+        // rather than a thrown exception or a permanently-loading state.
         console.error("Failed to fetch Unity setup status:", cause);
+        if (!cancelled) {
+          setUnitySetupError(
+            cause instanceof Error ? cause.message : "Failed to check Unity's status.",
+          );
+        }
       });
     return () => {
       cancelled = true;
@@ -1565,6 +1595,7 @@ function ChatViewContent(props: ChatViewProps) {
     connectedEditor: connectedProjectEditor,
     unityPlayState,
     unitySetup,
+    unitySetupError,
   });
   const primarySessionState = usePrimarySessionState();
   // Gates ONLY the editor-presence backend (Godot today) — see
