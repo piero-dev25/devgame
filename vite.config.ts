@@ -22,7 +22,25 @@ export default defineConfig({
   },
   staged: {
     // Formatter only for now — no lint or typecheck on commit.
-    "*": "vp fmt",
+    //
+    // The pattern lists the extensions `vp fmt` can actually format, rather
+    // than `"*"`. With `"*"`, a changeset whose staged files are ALL
+    // unformattable (a Unity `.meta`-only commit, a `.sh`-only commit, an
+    // image-only commit) handed `vp fmt` a file list it filtered down to
+    // nothing and the hook died on
+    //   "Expected at least one target file. All matched files may have been
+    //    excluded by ignore rules."
+    // — a commit blocked for a reason that has nothing to do with the change
+    // (task #64). That failure is what teaches people to reach for
+    // `--no-verify`, which in this repo also skips the formatter, so the
+    // habit it breeds is worse than the bug.
+    //
+    // The extension set is measured, not assumed: each was run through
+    // `vp fmt --check` on a scratch file. Formattable = exit 0 (clean) or 1
+    // (needs reformatting); NOT formattable = exit 2, the empty-target error
+    // above. `.sh`, `.meta`, `.gd`, `.txt`, `.svg` and images are exit 2.
+    // Adding an unformattable extension here reintroduces #64 for that type.
+    "*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,json,jsonc,md,css,scss,html,yml,yaml}": "vp fmt",
   },
   fmt: {
     ignorePatterns: [
@@ -44,11 +62,21 @@ export default defineConfig({
       "*.icon/**",
       // GDScript/Godot project files (.gd, .gd.uid, .tscn, .godot's
       // config-format .tres, project.godot) — not JS/TS, same reasoning as
-      // the mobile native trees above: `vp fmt`'s formatter has no
-      // business touching them, and staging a Godot-only changeset (task
-      // #48, the editor-presence addon) previously failed the commit hook
-      // outright with "Expected at least one target file" once every
-      // staged file fell outside every OTHER ignore pattern here.
+      // the mobile native trees above: `vp fmt`'s formatter has no business
+      // touching them.
+      //
+      // CORRECTION (task #64): this entry was added when a Godot-only
+      // changeset (task #48) failed the commit hook with "Expected at least
+      // one target file", and was believed to have fixed it. IT DID NOT.
+      // Measured in an isolated repo reproducing this exact config: a
+      // godot-only commit failed identically WITH `godot/**` present,
+      // because an `fmt` ignore rule filters files AFTER `vp fmt` has been
+      // invoked — it cannot stop the invocation happening with a list that
+      // then empties. Only the `staged` pattern above decides whether
+      // `vp fmt` runs at all, which is why the real fix lives there.
+      // Keeping this entry anyway: it is still correct as a statement that
+      // the formatter must not rewrite Godot files if one is ever passed
+      // explicitly.
       "godot/**",
     ],
     sortPackageJson: {},
