@@ -213,8 +213,10 @@ import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../revi
 import { appendEditorSelectionToPrompt } from "../editorPresence/editorSelectionContext";
 import {
   getCurrentEditorPresenceChips,
+  getCurrentEditorPresenceEditors,
   selectEditorPresenceChipsForProject,
 } from "../editorPresence/store";
+import { appendEngineHeadlineToPrompt } from "../editorPresence/engineHeadline";
 import { useEditorPresence } from "../editorPresence/useEditorPresence";
 import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
@@ -4740,6 +4742,16 @@ function ChatViewContent(props: ChatViewProps) {
       // A silently attached project B's selected objects.
       selectEditorPresenceChipsForProject(getCurrentEditorPresenceChips(), activeProject),
     );
+    // Appended after the selection block, making it the new outermost trailing
+    // block — MessagesTimeline.tsx strips it first, before the existing
+    // editor-selection/terminal/element/preview-annotation chain runs. One
+    // ambient line so every provider can see an engine is present and live;
+    // it carries counts and levels only, never contents (see engineHeadline.ts).
+    const messageTextWithEngine = appendEngineHeadlineToPrompt(
+      messageTextForSend,
+      getCurrentEditorPresenceEditors(),
+      activeProject,
+    );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
@@ -4747,7 +4759,7 @@ function ChatViewContent(props: ChatViewProps) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      text: messageTextWithEngine || IMAGE_ONLY_BOOTSTRAP_PROMPT,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({

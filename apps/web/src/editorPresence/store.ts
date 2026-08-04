@@ -201,3 +201,26 @@ export function publishCurrentEditorPresenceChips(
 export function getCurrentEditorPresenceChips(): ReadonlyArray<EditorPresenceRenderChip> {
   return currentChipsSnapshot;
 }
+
+// The same read-model, one level lower: the raw entries the chips were derived
+// FROM. A chip is one selected object and deliberately carries no editor-level
+// state, so the `<engine>` headline — which reports the editor's play state and
+// version, not any object's — cannot be built from `currentChipsSnapshot`.
+//
+// Published from the same component, in the same effect, so the two snapshots
+// can never describe different presence frames. Kept as a SEPARATE snapshot
+// rather than folding editors into the chip one because the chip list carries
+// the client-side pin layer (pinned items that have dropped out of the live
+// frame entirely) and this one must not: a headline reports what the editor is
+// doing NOW, and a pin is explicitly a promise to outlive that.
+let currentEditorsSnapshot: ReadonlyArray<EditorPresenceEntry> = [];
+
+export function publishCurrentEditorPresenceEditors(
+  editors: ReadonlyArray<EditorPresenceEntry>,
+): void {
+  currentEditorsSnapshot = editors;
+}
+
+export function getCurrentEditorPresenceEditors(): ReadonlyArray<EditorPresenceEntry> {
+  return currentEditorsSnapshot;
+}

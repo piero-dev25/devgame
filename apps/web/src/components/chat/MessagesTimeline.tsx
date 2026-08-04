@@ -96,6 +96,7 @@ import {
   type ParsedPreviewAnnotation,
 } from "~/lib/previewAnnotation";
 import { extractTrailingEditorSelection } from "~/editorPresence/editorSelectionContext";
+import { extractTrailingEngineHeadline } from "~/editorPresence/engineHeadline";
 import { EditorSelectionMessageChips } from "~/editorPresence/EditorSelectionMessageChips";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -871,10 +872,14 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const userImages = row.message.attachments ?? [];
-  // Sent outermost (see ChatView.tsx's send path), so it's stripped first,
-  // unconditionally, before the existing terminal/element/preview-annotation
-  // chain below ever sees the text.
-  const editorSelection = extractTrailingEditorSelection(row.message.text);
+  // Strip order is the exact reverse of ChatView.tsx's append order, because
+  // every extractor here is trailing-anchored: `<engine>` is appended last so
+  // it comes off first, then `<editor_selection>`, and only then does the
+  // existing terminal/element/preview-annotation chain below see the text.
+  // Get the order wrong and the inner blocks stop matching entirely, leaving
+  // the user looking at raw markup in their own message.
+  const engineHeadline = extractTrailingEngineHeadline(row.message.text);
+  const editorSelection = extractTrailingEditorSelection(engineHeadline.promptText);
   const displayedUserMessage = deriveDisplayedUserMessageState(editorSelection.promptText);
   const terminalContexts = displayedUserMessage.contexts;
   const previewAnnotations: ParsedPreviewAnnotation[] = [];

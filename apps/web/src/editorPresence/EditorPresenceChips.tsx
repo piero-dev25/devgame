@@ -13,6 +13,7 @@ import {
   deriveLiveEditorPresenceChips,
   mergeEditorPresenceChips,
   publishCurrentEditorPresenceChips,
+  publishCurrentEditorPresenceEditors,
   useEditorPresencePinStore,
 } from "./store";
 import { useEditorPresence } from "./useEditorPresence";
@@ -30,10 +31,18 @@ export function EditorPresenceChips({ environmentId, className }: EditorPresence
   const liveChips = deriveLiveEditorPresenceChips(editors);
   const chips = mergeEditorPresenceChips(liveChips, pinned);
 
+  // Both snapshots in ONE effect so they can never describe different presence
+  // frames: the `<engine>` headline reports editor-level state the chips
+  // deliberately do not carry, but it must describe the same instant the
+  // attached selection came from.
   useEffect(() => {
     publishCurrentEditorPresenceChips(chips);
-    return () => publishCurrentEditorPresenceChips([]);
-  }, [chips]);
+    publishCurrentEditorPresenceEditors(editors);
+    return () => {
+      publishCurrentEditorPresenceChips([]);
+      publishCurrentEditorPresenceEditors([]);
+    };
+  }, [chips, editors]);
 
   return (
     <EditorPresenceChipRow
