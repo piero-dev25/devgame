@@ -1025,6 +1025,8 @@ describe("DesktopWindow", () => {
           sandbox: true,
           nodeIntegration: false,
           nodeIntegrationInSubFrames: false,
+          webSecurity: true,
+          allowRunningInsecureContent: false,
           contextIsolation: false,
         });
       }).pipe(Effect.provide(layer));
@@ -1059,6 +1061,65 @@ describe("DesktopWindow", () => {
             sandbox: true,
             nodeIntegration: false,
             nodeIntegrationInSubFrames: false,
+            webSecurity: true,
+            allowRunningInsecureContent: false,
+            contextIsolation: true,
+          });
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  // F2 (independent security review, 2026-08-04), VERIFIED BY EXECUTION:
+  // the vulnerability wasn't that fresh `webPreferences` lacked safe
+  // defaults — it's that a renderer-supplied `<webview>` ATTRIBUTE
+  // (`disablewebsecurity`, `preload="..."`) reaches this handler already
+  // set on the object Electron hands in, and nothing overrode it. Probe:
+  // a webview with `disablewebsecurity` on the real third-party partition
+  // attached with `webSecurity:false`; a renderer-supplied `preload`
+  // executed (`ipcRenderer available: object` logged from inside the
+  // guest). This test starts from exactly that attacker-controlled shape
+  // and proves the handler forces it back, not just that an empty object
+  // ends up correct.
+  it.effect(
+    "overrides a malicious renderer-supplied webPreferences on the third-party partition",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const layer = makeTestLayer({ window: fakeWindow.window, createCount, mainWindow });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const willAttachWebview = fakeWindow.webContentsListeners.get("will-attach-webview");
+          if (!willAttachWebview) {
+            return yield* Effect.die("will-attach-webview listener was not registered");
+          }
+          let prevented = false;
+          // Simulates what `<webview disablewebsecurity preload="file:///evil.js">`
+          // hands Electron BEFORE this handler runs.
+          const webPreferences: Record<string, unknown> = {
+            sandbox: false,
+            nodeIntegration: true,
+            nodeIntegrationInSubFrames: true,
+            webSecurity: false,
+            allowRunningInsecureContent: true,
+            preload: "file:///evil.js",
+            contextIsolation: false,
+          };
+          willAttachWebview({ preventDefault: () => (prevented = true) }, webPreferences, {
+            partition: "persist:devgame-thirdparty-abc",
+          });
+
+          assert.isFalse(prevented);
+          assert.deepEqual(webPreferences, {
+            sandbox: true,
+            nodeIntegration: false,
+            nodeIntegrationInSubFrames: false,
+            webSecurity: true,
+            allowRunningInsecureContent: false,
             contextIsolation: true,
           });
         }).pipe(Effect.provide(layer));

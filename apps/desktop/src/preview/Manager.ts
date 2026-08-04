@@ -1390,9 +1390,27 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.on("did-fail-load", failed as never);
         wc.ipc.on(HUMAN_INPUT_CHANNEL, humanInput);
         wc.setWindowOpenHandler(({ url }) => {
+          // F5 (independent security review, 2026-08-04): this handler
+          // existed to stop uncontrolled new windows from untrusted content
+          // (deny + navigate the same webview instead), but the fallback
+          // navigation itself took the guest's `url` completely
+          // unvalidated — every OTHER navigation path in this file routes
+          // through `normalizePreviewUrl` (http/https only); this one
+          // didn't. Chromium already blocks `file:` and downgrades
+          // `javascript:`, so this wasn't an arbitrary-scheme hole, but an
+          // unvalidated main-process navigation driven by guest content has
+          // no business skipping the check every other navigation gets —
+          // especially now that third-party (untrusted external) content
+          // reaches this same handler via `allowpopups`.
+          let normalizedUrl: string;
+          try {
+            normalizedUrl = normalizePreviewUrl(url);
+          } catch {
+            return { action: "deny" };
+          }
           runFork(
             attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
-              wc.loadURL(url),
+              wc.loadURL(normalizedUrl),
             ).pipe(Effect.ignore),
           );
           return { action: "deny" };

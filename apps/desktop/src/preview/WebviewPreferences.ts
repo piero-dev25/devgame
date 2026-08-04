@@ -32,11 +32,14 @@
  *   `contextIsolation="no"` is truthy → contextIsolation stays ENABLED →
  *   react-grab can't see the React DevTools hook.
  *
- * Defense in depth: `apps/desktop/src/main.ts` also runs a
- * `will-attach-webview` handler that force-sets `sandbox: true` and
- * `nodeIntegration*: false` on the actual webPreferences object, gated on
- * the preview partition, so even if this string is ever wrong, the
- * security-critical flags can't regress on preview tabs.
+ * Defense in depth: `apps/desktop/src/window/DesktopWindow.ts` (NOT
+ * `main.ts` — corrected 2026-08-04, an earlier version of this comment
+ * named the wrong file and there is exactly one `will-attach-webview`
+ * handler in the app) also runs a `will-attach-webview` handler that
+ * force-sets `sandbox`/`nodeIntegration*`/`webSecurity`/
+ * `allowRunningInsecureContent` on the actual webPreferences object, gated
+ * on the preview or third-party partition, so even if this string is ever
+ * wrong, the security-critical flags can't regress.
  */
 export const PREVIEW_WEBVIEW_PREFERENCES =
   "contextIsolation=false,sandbox=true,nodeIntegration=false";
@@ -54,12 +57,20 @@ export const PREVIEW_WEBVIEW_PREFERENCES =
  * depth, unlike preview's `false`, which is a real, documented tradeoff for
  * the picker preload.
  *
- * NOT YET ENFORCED end-to-end: `DesktopWindow.ts`'s `will-attach-webview`
- * handler is a security-relevant CHANGE still pending review before a
- * third-party webview can attach at all (it currently only recognizes the
- * preview partition and hardcodes `contextIsolation=false` for it) — see
- * that handler's own doc note. This constant is correct in isolation and
- * ready for that handler to honor once it's updated.
+ * `DesktopWindow.ts`'s `will-attach-webview` handler now recognizes the
+ * third-party partition and honors this constant (fixed 2026-08-04,
+ * addressing findings F1/F2/F3/F5 from an independent security review,
+ * each verified by execution against a real third-party partition). That
+ * review found the earlier version of this handler and the third-party
+ * session; the fixes made in response are new changes to the SAME
+ * security-relevant surface and are themselves pending their own review
+ * pass before merge — a review addressing version N doesn't clear
+ * version N+1 just because it was written in response.
+ *
+ * STILL NOT LIVE, for a separate reason: the third-party dock panel
+ * (`ThirdPartySourceDockPanel.tsx`) is not yet registered in `ChatDock.tsx`
+ * — that's the dock-migration lane's active territory, sequenced
+ * separately — so no real `<webview>` on this partition attaches yet.
  */
 export const THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES =
   "contextIsolation=true,sandbox=true,nodeIntegration=false";

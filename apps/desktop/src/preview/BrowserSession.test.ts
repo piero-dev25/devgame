@@ -225,6 +225,79 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  // F3 (independent security review, 2026-08-04): `startsWith` matching
+  // meant `persist:devgame-thirdparty-EVIL` attached with the weakened
+  // preference, and a bare prefix with nothing after it was allowed too.
+  // There is exactly one third-party partition (one fixed scope), so exact
+  // match is available at zero cost — no reason to accept a weaker check.
+  it.effect("isThirdPartyPartition rejects a lookalike that merely shares the prefix", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      yield* browserSessions.getThirdPartyBrowserPartition();
+
+      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-EVIL"));
+      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-"));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("isThirdPartyPartition denies everything before any partition has been derived", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+
+      // Deliberately NOT calling getThirdPartyBrowserPartition/Session first
+      // — nothing to compare against yet, so this must fail closed, not
+      // fall back to a prefix check (that fallback would BE the F3 hole).
+      assert.isFalse(browserSessions.isThirdPartyPartition("persist:devgame-thirdparty-anything"));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  // F1 (independent security review, 2026-08-04), VERIFIED BY EXECUTION:
+  // the third-party session was reusing ALLOWED_PREVIEW_PERMISSIONS —
+  // scoped, by that constant's own doc, to the user's OWN dev server — and
+  // silently granting clipboard-read/clipboard-write/geolocation/
+  // notifications to figma.com, notion.so, and anything they link to,
+  // WITHOUT a prompt. `navigator.clipboard.readText()` on any focused
+  // external page, no prompt, on a machine whose clipboard routinely holds
+  // API keys and tokens. Default third-party to denying everything.
+  it.effect("denies every permission preview allows — third party gets no free grants", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getThirdPartyBrowserPartition();
+      yield* browserSessions.getThirdPartyBrowserSession();
+
+      const browserSession = sessions.get(partition);
+      assert.isDefined(browserSession);
+      const requestHandler = browserSession.setPermissionRequestHandler.mock.calls[0]?.[0];
+      const checkHandler = browserSession.setPermissionCheckHandler.mock.calls[0]?.[0];
+      assert.isFunction(requestHandler);
+      assert.isFunction(checkHandler);
+
+      const requestAllows = (permission: string): boolean => {
+        let granted: boolean | undefined;
+        requestHandler(null, permission, (value: boolean) => {
+          granted = value;
+        });
+        assert.isDefined(granted);
+        return granted;
+      };
+
+      for (const permission of [
+        "clipboard-read",
+        "clipboard-sanitized-write",
+        "clipboard-write",
+        "notifications",
+        "geolocation",
+        "midi",
+      ]) {
+        assert.isFalse(requestAllows(permission), `request handler should deny ${permission}`);
+        assert.isFalse(
+          checkHandler(null, permission) as boolean,
+          `check handler should deny ${permission}`,
+        );
+      }
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("memoizes the third-party session the same way preview sessions are memoized", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;

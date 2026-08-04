@@ -450,6 +450,33 @@ export const make = Effect.gen(function* () {
       webPreferences.sandbox = true;
       webPreferences.nodeIntegration = false;
       webPreferences.nodeIntegrationInSubFrames = false;
+      // F2 (independent security review, 2026-08-04), VERIFIED BY
+      // EXECUTION: this handler forced only 3 of 6 security-relevant
+      // flags. Nothing SET `webSecurity`/`allowRunningInsecureContent`,
+      // but nothing FORCED them either — a `<webview disablewebsecurity>`
+      // attribute attached with `webSecurity:false` on the real
+      // third-party partition. Worse, a renderer-supplied `preload`
+      // attribute EXECUTED on that partition (probe logged `ipcRenderer
+      // available: object` from inside the guest) — the partition name is
+      // derivable, not secret, and `getThirdPartyBrowserConfig` hands it
+      // out unauthenticated. A handler whose own comment calls itself "an
+      // ALLOWLIST, not a style-setter" needs to pin the whole posture, not
+      // just the three flags that happened to matter for preview's picker.
+      webPreferences.webSecurity = true;
+      webPreferences.allowRunningInsecureContent = false;
+      // `preload` is scoped to third-party ONLY — preview's own picker
+      // preload is legitimate, main-process-controlled
+      // (`getPreviewConfig`'s `preloadUrl`), and forcing it away here
+      // would break that feature. Third-party's `getThirdPartyBrowserConfig`
+      // always returns `preloadUrl: null`; this is what actually enforces
+      // that a malicious renderer can't supply its own value instead.
+      if (isThirdPartyPartition) {
+        // `delete`, not `= undefined` — Electron's own `WebPreferences`
+        // type has `preload?: string`, and this repo's
+        // `exactOptionalPropertyTypes: true` treats an explicit `undefined`
+        // assignment as a type error distinct from the key being absent.
+        delete webPreferences.preload;
+      }
       // Preview loads the user's OWN dev server, and its picker preload
       // needs `contextIsolation=false` to reach the page's React DevTools
       // hook (see WebviewPreferences.ts). Third-party tabs load ARBITRARY

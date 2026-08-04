@@ -356,6 +356,112 @@ describe("PreviewManager", () => {
     ),
   );
 
+  // F5 (independent security review, 2026-08-04): `setWindowOpenHandler`'s
+  // fallback (`wc.loadURL(url)` on window.open/target="_blank") took the
+  // guest's `url` completely unvalidated — every OTHER navigation path in
+  // this file routes through `normalizePreviewUrl` (http/https only); this
+  // one didn't. Now landing `allowpopups` on third-party (untrusted
+  // external) webviews for the first time, this handler needed the same
+  // check every other navigation already gets.
+  effectIt.effect("setWindowOpenHandler navigates the guest to a valid http(s) URL", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        fromId.mockReturnValue({
+          id: 44,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "about:blank",
+          getTitle: () => "",
+          isLoading: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          loadURL,
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler,
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand: vi.fn(async () => undefined),
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+        } as never);
+
+        yield* manager.createTab("tab_popup_valid");
+        yield* manager.registerWebview("tab_popup_valid", 44);
+        const handler = setWindowOpenHandler.mock.calls[0]?.[0] as (details: { url: string }) => {
+          action: string;
+        };
+        expect(handler).toBeTypeOf("function");
+
+        const result = handler({ url: "https://www.figma.com/oauth/authorize" });
+        expect(result).toEqual({ action: "deny" });
+        yield* Effect.yieldNow;
+
+        expect(loadURL).toHaveBeenCalledOnce();
+        expect(loadURL).toHaveBeenCalledWith("https://www.figma.com/oauth/authorize");
+      }),
+    ),
+  );
+
+  effectIt.effect("setWindowOpenHandler denies without navigating for a non-http(s) URL", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const loadURL = vi.fn(async () => undefined);
+        const setWindowOpenHandler = vi.fn();
+        fromId.mockReturnValue({
+          id: 45,
+          isDestroyed: () => false,
+          getType: () => "webview",
+          getURL: () => "about:blank",
+          getTitle: () => "",
+          isLoading: () => false,
+          getZoomFactor: () => 1,
+          setZoomFactor: vi.fn(),
+          loadURL,
+          on: vi.fn(),
+          off: vi.fn(),
+          ipc: { on: vi.fn(), off: vi.fn() },
+          send: webviewSend,
+          navigationHistory: { canGoBack: () => false, canGoForward: () => false },
+          setWindowOpenHandler,
+          debugger: {
+            isAttached: () => false,
+            attach: vi.fn(),
+            sendCommand: vi.fn(async () => undefined),
+            on: vi.fn(),
+            off: vi.fn(),
+          },
+        } as never);
+
+        yield* manager.createTab("tab_popup_invalid");
+        yield* manager.registerWebview("tab_popup_invalid", 45);
+        const handler = setWindowOpenHandler.mock.calls[0]?.[0] as (details: { url: string }) => {
+          action: string;
+        };
+        expect(handler).toBeTypeOf("function");
+
+        for (const maliciousUrl of [
+          "file:///etc/passwd",
+          "javascript:alert(document.cookie)",
+          "not a url",
+        ]) {
+          const result = handler({ url: maliciousUrl });
+          expect(result).toEqual({ action: "deny" });
+        }
+        yield* Effect.yieldNow;
+
+        expect(loadURL).not.toHaveBeenCalled();
+      }),
+    ),
+  );
+
   effectIt.effect("mirrors Electron's effective zoom across registration and navigation", () =>
     withManager((manager) =>
       Effect.gen(function* () {

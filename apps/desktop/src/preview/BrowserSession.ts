@@ -58,6 +58,19 @@ const ALLOWED_PREVIEW_PERMISSIONS: ReadonlySet<string> = new Set([
   "geolocation",
 ]);
 
+// F1 (independent security review, 2026-08-04), VERIFIED BY EXECUTION: the
+// third-party session was reusing ALLOWED_PREVIEW_PERMISSIONS above —
+// scoped, by ITS OWN doc comment, to the user's own dev server — which
+// silently granted clipboard-read/clipboard-write/geolocation/notifications
+// to figma.com, notion.so, and anything either links to, with NO prompt.
+// `navigator.clipboard.readText()` on any focused external page, no
+// prompt, on a machine whose clipboard routinely holds API keys and
+// tokens. Deliberately EMPTY: deny everything by default. Add specific
+// permissions back only with actual evidence Figma/Notion need them to
+// function — none has been demonstrated yet, and a blanket preview-shaped
+// allow-set for untrusted external content was exactly the mistake.
+const ALLOWED_THIRD_PARTY_PERMISSIONS: ReadonlySet<string> = new Set([]);
+
 export class BrowserSessionPartitionDerivationError extends Schema.TaggedErrorClass<BrowserSessionPartitionDerivationError>()(
   "BrowserSessionPartitionDerivationError",
   {
@@ -181,6 +194,7 @@ export const make = Effect.gen(function* BrowserSessionMake() {
     ref: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
     scope: string,
     partition: string,
+    allowedPermissions: ReadonlySet<string>,
   ) =>
     SynchronizedRef.modifyEffect(ref, (sessions) => {
       const existing = sessions.get(partition);
@@ -194,10 +208,10 @@ export const make = Effect.gen(function* BrowserSessionMake() {
             .replace(/\s*t3code\/[\d.]+/, "");
           browserSession.setUserAgent(userAgent);
           browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-            callback(ALLOWED_PREVIEW_PERMISSIONS.has(permission));
+            callback(allowedPermissions.has(permission));
           });
           browserSession.setPermissionCheckHandler((_webContents, permission) =>
-            ALLOWED_PREVIEW_PERMISSIONS.has(permission),
+            allowedPermissions.has(permission),
           );
           const next = new Map(sessions);
           next.set(partition, browserSession);
@@ -214,20 +228,45 @@ export const make = Effect.gen(function* BrowserSessionMake() {
 
   const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
     const partition = yield* derivePreviewPartition(scope);
-    return yield* resolveSession(sessionsRef, scope, partition);
+    return yield* resolveSession(sessionsRef, scope, partition, ALLOWED_PREVIEW_PERMISSIONS);
   });
+
+  // F3 (independent security review, 2026-08-04): `isThirdPartyPartition`
+  // used to be a `startsWith` prefix check, which let
+  // `persist:devgame-thirdparty-EVIL` (or a bare prefix with nothing after
+  // it) attach with the weakened preference. There is exactly ONE
+  // third-party partition — one fixed scope — so exact match is available
+  // at zero cost. Cached here on first successful derivation rather than
+  // recomputed synchronously (the digest is an Effect, `isThirdPartyPartition`
+  // is a plain sync predicate the `will-attach-webview` handler calls). Safe
+  // in practice: a webview can only ever request this partition after the
+  // renderer has already called `getThirdPartyBrowserConfig`, which calls
+  // `getThirdPartyBrowserSession` (→ this derivation) BEFORE handing out the
+  // partition string at all — so the cache is always populated before any
+  // attach attempt could plausibly reach the handler. Before that, or if
+  // nothing has ever derived it, this fails CLOSED (denies everything)
+  // rather than falling back to a prefix check, which would reintroduce
+  // the exact hole this fixes.
+  let thirdPartyBrowserPartitionCache: string | null = null;
 
   const getThirdPartyPartition = derivePartition(THIRD_PARTY_PARTITION_PREFIX);
   const getThirdPartyBrowserPartition = Effect.fn("BrowserSession.getThirdPartyBrowserPartition")(
     function* () {
-      return yield* getThirdPartyPartition(THIRD_PARTY_BROWSER_SCOPE);
+      const partition = yield* getThirdPartyPartition(THIRD_PARTY_BROWSER_SCOPE);
+      thirdPartyBrowserPartitionCache = partition;
+      return partition;
     },
   );
 
   const getThirdPartyBrowserSession = Effect.fn("BrowserSession.getThirdPartyBrowserSession")(
     function* () {
       const partition = yield* getThirdPartyBrowserPartition();
-      return yield* resolveSession(thirdPartySessionsRef, THIRD_PARTY_BROWSER_SCOPE, partition);
+      return yield* resolveSession(
+        thirdPartySessionsRef,
+        THIRD_PARTY_BROWSER_SCOPE,
+        partition,
+        ALLOWED_THIRD_PARTY_PERMISSIONS,
+      );
     },
   );
 
@@ -237,7 +276,8 @@ export const make = Effect.gen(function* BrowserSessionMake() {
     getSession,
     getThirdPartyBrowserPartition,
     getThirdPartyBrowserSession,
-    isThirdPartyPartition: (partition) => partition.startsWith(THIRD_PARTY_PARTITION_PREFIX),
+    isThirdPartyPartition: (partition) =>
+      thirdPartyBrowserPartitionCache !== null && partition === thirdPartyBrowserPartitionCache,
     clearCookies: Effect.fn("BrowserSession.clearCookies")(function* () {
       const sessions = yield* SynchronizedRef.get(sessionsRef);
       yield* Effect.all(

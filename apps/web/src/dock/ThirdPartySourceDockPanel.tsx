@@ -34,11 +34,13 @@
  * has. No active route at all → the action is unavailable with a stated
  * reason, not a silent no-op.
  *
- * NOT YET LIVE: mounting a `<webview>` on the third-party partition is
- * still gated on `DesktopWindow.ts`'s `will-attach-webview` allowlist,
- * which does not yet recognize that partition — see
- * `WebviewPreferences.ts`'s own note. This panel is correct and ready; the
- * webview itself will render blank until that gate is updated.
+ * NOT YET LIVE — corrected 2026-08-04, the reason changed: the
+ * `will-attach-webview` allowlist gate is fixed (an independent security
+ * review found real issues in it — F1/F2/F3/F5 — since resolved and
+ * pending their own review pass, see `WebviewPreferences.ts`'s own note).
+ * What's still pending is this panel's OWN registration into
+ * `ChatDock.tsx` — the dock-migration lane's active territory, sequenced
+ * separately. Nothing walks through any of this until that lands.
  */
 import { useContext, useState } from "react";
 

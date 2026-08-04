@@ -79,6 +79,18 @@ export function ThirdPartySourceWebview(props: { readonly source: ThirdPartySour
 
   const setWebviewRef = useCallback((node: HTMLElement | null) => {
     webviewRef.current = node as ElectronWebview | null;
+    // F5 (independent security review, 2026-08-04): without this,
+    // window.open/target="_blank" silently do nothing — Chromium's popup
+    // handler in the main process never even fires. That meant Google SSO
+    // sign-in popups, the standard login path for both Figma and Notion,
+    // were silently swallowed: a user couldn't complete the FIRST login the
+    // persistent-session work exists to avoid repeating. Matches
+    // HostedBrowserWebview.tsx's own `allowpopups` handling. Landing this
+    // makes Manager.ts's `setWindowOpenHandler` (attachListeners) live for
+    // untrusted third-party content for the first time — see that
+    // handler's own note on why its fallback navigation is validated
+    // through `normalizePreviewUrl` in the same change as this attribute.
+    if (node && !node.hasAttribute("allowpopups")) node.setAttribute("allowpopups", "true");
   }, []);
 
   const reportNavigation = useCallback(() => {
