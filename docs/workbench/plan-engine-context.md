@@ -18,9 +18,24 @@ present and live.
 
 ```
 <engine>
-Unity 6000.3.14f1 · Level01.unity · playing · 3 objects selected
+Unity 6000.3.14f1 · playing · 3 objects selected
 </engine>
 ```
+
+**Corrected after this plan was written: the active scene is NOT on the
+editor-presence wire.** An earlier draft of this example read
+`Unity 6000.3.14f1 · Level01.unity · playing · …`. That scene name does not
+exist — `EditorPresenceEntry` carries `editor`, `session`, `workspace`,
+`connected`, `lastSeenAt`, `selection`, `capabilities` and `playState`, and
+nothing else. Adding scene needs a field in both hand-maintained protocol twins
+plus a publisher change in **each** of Godot, Unreal and Unity. Tracked as #73.
+
+Do not couple the cheap win to the expensive one: the headline ships now
+without scene, because play state and selection count both change mid-session
+and are both available today. And when #73 is picked up, **check Pipeline
+first** — `editor_status` already returns play, compilation and domain-reload
+state in one ~235 ms call, so if it also reports the open scene then Unity gets
+it free and only Godot and Unreal need publisher work.
 
 This is the same split ACP already encodes as `resource_link` vs `resource`,
 and the same one `buildPreviewAnnotationPrompt` uses today: the text says a
@@ -84,6 +99,23 @@ Constraints, all of which exist to preserve the saving that justifies the tool:
 
 **3. The `<engine>` headline.** Cheap, and it is what makes the tools
 discoverable across all five providers.
+
+Do **not** implement this by adding `playState` to the existing
+`<editor_selection>` block, which looks like the one-line version and is wrong
+for three reasons. The fatal one: `buildEditorSelectionBlock` returns `""` on an
+empty chip set — the block family's empty-input contract — so play state would
+reach the model **only when something is selected**. "Why isn't my game
+running?" is asked with nothing selected, so the signal would be absent at
+exactly the moment it is the answer, and its absence would read as "not
+playing" rather than "not reported". Play state is also per-editor, so a
+block-level line has no owner once two publishers are connected, and loading
+editor-level state into the selection block makes that block stop meaning one
+thing.
+
+The headline must be **project-scoped from day one**, using the same selector
+that fixed #71. With a real Unity publisher live (`6799b7b4b`) alongside Godot
+and Unreal, a headline naming the wrong engine is worse than no headline —
+confidently wrong beats absent.
 
 **4. `engine_status` and `engine_console` as tools.** Console output is
 unbounded and must never be pushed — see the append-chain defect below.
