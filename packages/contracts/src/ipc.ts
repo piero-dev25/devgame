@@ -1075,6 +1075,15 @@ export interface DesktopPreviewBridge {
   /** Cancel an in-flight preview annotation session. */
   cancelPickElement: (tabId: string) => Promise<void>;
   captureScreenshot: (tabId: string) => Promise<DesktopPreviewScreenshotArtifact>;
+  /**
+   * A dataURL-based capture, NOT a variant of `captureScreenshot` above —
+   * that one writes a PNG to disk and returns a path with no route back
+   * into the renderer as attachable image bytes. Generic by `tabId`, no
+   * preview-specific behaviour: reuses the same internal capture helper
+   * `pickElement`'s own embedded screenshot already exercises, just
+   * without the DOM-picking UX around it.
+   */
+  captureTabScreenshotDataUrl: (tabId: string) => Promise<PreviewAnnotationScreenshot | null>;
   revealArtifact: (path: string) => Promise<void>;
   copyArtifactToClipboard: (path: string) => Promise<void>;
   pictureInPicture: {

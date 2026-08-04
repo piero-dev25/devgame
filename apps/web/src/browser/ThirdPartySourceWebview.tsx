@@ -46,11 +46,19 @@ interface ElectronWebview extends HTMLElement {
 
 const THIRD_PARTY_TAB_ID_PREFIX = "third-party-browser:";
 
+/** Shared with `ThirdPartySourceDockPanel.tsx`'s "Add to chat" handler,
+ * which needs the same tabId to call `captureTabScreenshotDataUrl` against
+ * the exact webview the user is looking at — exported so both sides derive
+ * it from one source rather than duplicating the prefix literal. */
+export function thirdPartySourceTabId(source: ThirdPartySourceKind): string {
+  return `${THIRD_PARTY_TAB_ID_PREFIX}${source}`;
+}
+
 export function ThirdPartySourceWebview(props: { readonly source: ThirdPartySourceKind }) {
   const { source } = props;
   const config = useThirdPartyBrowserWebviewConfig();
   const tab = useThirdPartySourceBrowserStore((state) => state.tabs[source]);
-  const tabId = `${THIRD_PARTY_TAB_ID_PREFIX}${source}`;
+  const tabId = thirdPartySourceTabId(source);
   const webviewRef = useRef<ElectronWebview | null>(null);
   const tabLeaseRef = useRef<AcquiredDesktopTab | null>(null);
   // Read once on mount, not re-synced from later store updates — matches

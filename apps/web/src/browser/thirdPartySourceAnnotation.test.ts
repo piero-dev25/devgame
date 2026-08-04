@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  appendThirdPartySourceAnnotationPrompt,
   buildThirdPartySourceChip,
   buildThirdPartySourceAnnotationPrompt,
 } from "./thirdPartySourceAnnotation";
@@ -107,5 +108,55 @@ describe("buildThirdPartySourceAnnotationPrompt", () => {
         "</third_party_source>",
       ].join("\n"),
     );
+  });
+});
+
+describe("appendThirdPartySourceAnnotationPrompt", () => {
+  it("appends the block to a non-empty prompt with a blank line separator", () => {
+    const result = appendThirdPartySourceAnnotationPrompt("Match this spacing please", {
+      identity: notionIdentity,
+      pageUrl: "https://www.notion.so/Project-Plan-1429989fe8ac4effbc8f57f56486db54",
+      pageTitle: "Project Plan",
+      comment: "",
+      screenshot: null,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    });
+    expect(result).toBe(
+      [
+        "Match this spacing please",
+        "",
+        "<third_party_source>",
+        "Source: notion",
+        "Page: Project Plan",
+        "URL: https://www.notion.so/Project-Plan-1429989fe8ac4effbc8f57f56486db54",
+        "Page id: 1429989f-e8ac-4eff-bc8f-57f56486db54",
+        "</third_party_source>",
+      ].join("\n"),
+    );
+  });
+
+  it("produces just the block when the prompt is empty, no leading blank line", () => {
+    const result = appendThirdPartySourceAnnotationPrompt("", {
+      identity: notionIdentity,
+      pageUrl: "https://www.notion.so/Project-Plan-1429989fe8ac4effbc8f57f56486db54",
+      pageTitle: "Project Plan",
+      comment: "",
+      screenshot: null,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    });
+    expect(result.startsWith("<third_party_source>")).toBe(true);
+    expect(result.includes("\n\n<third_party_source>")).toBe(false);
+  });
+
+  it("trims trailing whitespace off the existing prompt before appending", () => {
+    const result = appendThirdPartySourceAnnotationPrompt("Existing text   \n\n", {
+      identity: notionIdentity,
+      pageUrl: "https://www.notion.so/Project-Plan-1429989fe8ac4effbc8f57f56486db54",
+      pageTitle: "Project Plan",
+      comment: "",
+      screenshot: null,
+      createdAt: "2026-08-04T00:00:00.000Z",
+    });
+    expect(result.startsWith("Existing text\n\n<third_party_source>")).toBe(true);
   });
 });

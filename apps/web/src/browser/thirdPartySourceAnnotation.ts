@@ -84,3 +84,40 @@ export function buildThirdPartySourceAnnotationPrompt(
   lines.push("</third_party_source>");
   return lines.join("\n");
 }
+
+/**
+ * Appends a `<third_party_source>` block onto an existing composer prompt —
+ * mirrors `previewAnnotation.ts`'s `appendPreviewAnnotationPrompt`, but for
+ * plain text rather than a structured payload. That's the whole point: no
+ * send-time rendering step is needed, because this IS the rendered text —
+ * see `ThirdPartySourceDockPanel.tsx`'s own doc comment on why that let
+ * "Add to chat" skip a parallel annotations array and a composer-cards UI
+ * entirely for v1.
+ */
+export function appendThirdPartySourceAnnotationPrompt(
+  prompt: string,
+  annotation: ThirdPartySourceAnnotation,
+): string {
+  const annotationText = buildThirdPartySourceAnnotationPrompt(annotation);
+  const trimmed = prompt.trim();
+  return trimmed ? `${trimmed}\n\n${annotationText}` : annotationText;
+}
+
+/**
+ * Turns a dataURL-based screenshot into a `File` for a composer image
+ * attachment — mirrors `previewAnnotation.ts`'s `previewAnnotationScreenshotFile`
+ * (same thin, untested fetch-of-a-data-url shape; that one has no test
+ * coverage either, this doesn't add a new gap). Takes a bare
+ * `PreviewAnnotationScreenshot` rather than a full `PreviewAnnotationPayload`
+ * since `captureTabScreenshotDataUrl` (Manager.ts) returns just the
+ * screenshot, generic by tabId — there is no enclosing annotation payload
+ * to pull one out of here.
+ */
+export async function thirdPartySourceScreenshotFile(
+  screenshot: PreviewAnnotationScreenshot,
+  fileNamePrefix: string,
+): Promise<File> {
+  const response = await fetch(screenshot.dataUrl);
+  const blob = await response.blob();
+  return new File([blob], `${fileNamePrefix}.png`, { type: blob.type || "image/png" });
+}

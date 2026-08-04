@@ -2042,6 +2042,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     };
   });
 
+  // A dataURL-based capture, deliberately NOT a variant of `captureScreenshot`
+  // above: that one writes to disk and returns a path, which has no route
+  // back into the renderer as attachable image bytes (confirmed — no
+  // existing bridge method reads an artifact path back as bytes/dataURL).
+  // Reuses `captureAnnotationScreenshot`, the SAME helper `pickElement`
+  // already exercises for its own embedded screenshot, just without the
+  // DOM-picking UX around it — generic by `tabId`, no partition coupling.
+  const captureTabScreenshotDataUrl = Effect.fn("PreviewManager.captureTabScreenshotDataUrl")(
+    function* (tabId: string) {
+      const wc = yield* requireWebContents(tabId);
+      return yield* captureAnnotationScreenshot(tabId, wc, null);
+    },
+  );
+
   const capturePreviewFrame = Effect.fn("PreviewManager.capturePreviewFrame")(function* (
     tabId: string,
   ) {
@@ -3264,6 +3278,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     automationWaitFor,
     cancelPickElement,
     captureScreenshot,
+    captureTabScreenshotDataUrl,
     closeTab,
     copyArtifactToClipboard,
     createTab,
@@ -3598,6 +3613,16 @@ export class PreviewManager extends Context.Service<
     readonly captureScreenshot: (
       tabId: string,
     ) => Effect.Effect<DesktopPreviewScreenshotArtifact, PreviewManagerError>;
+    /** A dataURL-based capture of a tab's current view — NOT a variant of
+     * `captureScreenshot` above (which writes a PNG to disk and returns a
+     * path; that shape has no route back into the renderer as attachable
+     * image bytes). Reuses the SAME internal capture helper `pickElement`
+     * already exercises for its own embedded screenshot, just without the
+     * DOM-picking UX around it: generic by `tabId`, no partition coupling,
+     * no preview-specific behaviour. */
+    readonly captureTabScreenshotDataUrl: (
+      tabId: string,
+    ) => Effect.Effect<PreviewAnnotationPayload["screenshot"], PreviewManagerError>;
     readonly revealArtifact: (path: string) => Effect.Effect<void, PreviewManagerError>;
     readonly copyArtifactToClipboard: (path: string) => Effect.Effect<void, PreviewManagerError>;
     readonly openPictureInPicture: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
@@ -3736,6 +3761,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     pickElement: operations.pickElement,
     cancelPickElement: operations.cancelPickElement,
     captureScreenshot: operations.captureScreenshot,
+    captureTabScreenshotDataUrl: operations.captureTabScreenshotDataUrl,
     revealArtifact: operations.revealArtifact,
     copyArtifactToClipboard: operations.copyArtifactToClipboard,
     openPictureInPicture: operations.openPictureInPicture,

@@ -17,6 +17,7 @@ import {
   DesktopPreviewTabInputSchema,
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationPayloadSchema,
+  PreviewAnnotationScreenshotSchema,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
 } from "@t3tools/contracts";
@@ -262,6 +263,20 @@ export const captureScreenshot = DesktopIpc.makeIpcMethod({
   }),
 });
 
+// Generic by tabId, not preview-specific — see PreviewManager.ts's own note
+// on captureTabScreenshotDataUrl for why this is not a variant of
+// captureScreenshot above (that one writes to disk and returns a path with
+// no route back into the renderer as attachable image bytes).
+export const captureTabScreenshotDataUrl = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.CAPTURE_TAB_SCREENSHOT_DATA_URL_CHANNEL,
+  payload: DesktopPreviewTabInputSchema,
+  result: Schema.NullOr(PreviewAnnotationScreenshotSchema),
+  handler: Effect.fn("desktop.ipc.preview.captureTabScreenshotDataUrl")(function* ({ tabId }) {
+    const manager = yield* PreviewManager.PreviewManager;
+    return yield* manager.captureTabScreenshotDataUrl(tabId);
+  }),
+});
+
 export const revealArtifact = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_REVEAL_ARTIFACT_CHANNEL,
   payload: DesktopPreviewArtifactInputSchema,
@@ -394,6 +409,7 @@ export const methods = [
   pickElement,
   cancelPickElement,
   captureScreenshot,
+  captureTabScreenshotDataUrl,
   revealArtifact,
   copyArtifactToClipboard,
   openPictureInPicture,
