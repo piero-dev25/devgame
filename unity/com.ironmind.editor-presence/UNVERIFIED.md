@@ -123,6 +123,57 @@ from the original build (`EditorPresenceItemBuilder.cs`'s
   TypeScript source in this pass, and not exercised against a live redeem
   request from this plugin.
 
+## Task #49 (Unity Play/Stop) — new C# added, still not compiled or run
+
+This machine has `dotnet`/`mono` neither installed, and this pass was
+explicitly instructed not to open, modify, or launch Unity (a separate
+driver handles live verification) — so, same as every prior pass, **none of
+this C# has been compiled or run.** New files:
+`EditorPresenceCommandDispatcher.cs`, `EditorPresencePlayModeController.cs`,
+`EditorPresenceColdStartEntryPoint.cs`; modified:
+`EditorPresenceProtocol.cs`, `EditorPresenceConnection.cs`.
+
+- **`EditorApplication.pauseStateChanged` and `EditorApplication.isPaused`
+  exist and behave as documented on Unity 6000.3.** Asserted from public
+  Unity Editor scripting API documentation, not independently confirmed
+  against this project's exact Editor build.
+- **`WebSocketReceiveResult.EndOfMessage`-driven multi-fragment
+  accumulation via a `MemoryStream`, decoded once via
+  `Encoding.UTF8.GetString` at the end, is the correct way to reassemble a
+  logical `ClientWebSocket` text message.** Standard, documented
+  `System.Net.WebSockets` usage, but — same caveat as every other claim
+  about `ClientWebSocket`'s behavior inside this Editor's Mono/CoreCLR
+  runtime in this file's own header comment — not exercised here.
+- **`JsonUtility.FromJson<CommandFrameDto>` silently ignores JSON keys with
+  no matching C# field (e.g. an inbound `params` object) rather than
+  throwing.** This is documented `JsonUtility` behavior and is relied on by
+  `CommandFrameDto` deliberately omitting a `params` field entirely (no
+  action this build implements reads it) — not independently re-confirmed
+  by running it.
+- **The exact ordering guarantee the hazard section of
+  docs/workbench/spec-unity-play-stop.md demands** — `commandResult` fully
+  sent and awaited-complete BEFORE the corresponding
+  `EditorPresencePlayModeController.Dispatch` call ever runs, since the
+  dispatch is queued for a LATER `EditorApplication.update` tick rather than
+  invoked inline — is reasoned from the shape of `async`/await and
+  `ConcurrentQueue` in this codebase's existing async patterns, not observed
+  against a real domain reload actually racing the socket.
+- **Whether `EditorApplication.playModeStateChanged` reliably fires (and in
+  what order relative to `isPlaying`/`isPaused` settling) around a domain
+  reload in THIS project's specific `EnterPlayModeOptions` configuration**
+  (`m_EnterPlayModeOptionsEnabled: 1`, neither `DisableDomainReload` nor
+  `DisableSceneReload` set, per the frozen spec's own citation of
+  `EditorSettings.asset`) is asserted from the frozen spec's description,
+  not independently re-measured.
+- **The cold-path entry point's `-executeMethod` contract** —
+  that Unity actually invokes a public static parameterless method named on
+  the command line, once, after the project finishes loading — is
+  documented, standard Unity CLI behavior, not exercised here (no cold
+  launch was performed; see
+  `apps/server/src/editorPresence/UnityColdStart.test.ts` for what WAS
+  exercised: the pure argv-construction and lockfile-probe logic only, both
+  of which are TypeScript and run under `npm test`).
+
 ## What was intentionally NOT changed
 
 - `EditorPresenceConnectionState.cs`'s three-state enum

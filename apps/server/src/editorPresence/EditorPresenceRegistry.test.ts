@@ -21,6 +21,9 @@ interface ParsedPresenceFrame {
       readonly seq: number;
       readonly items: ReadonlyArray<{ readonly label: string }>;
     } | null;
+    // Task #49 (spec-unity-play-stop.md): the publisher's own reported
+    // play/pause state, or null before it has reported one.
+    readonly playState: string | null;
   }>;
 }
 
@@ -163,6 +166,98 @@ it.effect("an out-of-order (<=last seen) seq is dropped, not broadcast", () =>
       expect(latest.editors[0]!.selection!.seq).toBe(5);
     }),
   ),
+);
+
+// Task #49 (spec-unity-play-stop.md's ruling): play state is a LEVEL,
+// reported through presence, independent of any one command's
+// commandResult — these tests exercise the same connectionToken-guarded
+// update path `updatePublisherSelection` already has, but for `playState`.
+it.effect("a fresh registration reports playState: null until the publisher reports one", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const token = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", token, HELLO);
+
+      const subscriber = makeRecorder();
+      const initialFrame = yield* registry.addSubscriber(subscriber.send);
+      const parsed = parseFrame(initialFrame);
+      expect(parsed.editors[0]!.playState).toBeNull();
+    }),
+  ),
+);
+
+it.effect("updatePublisherPlayState broadcasts the new state to every subscriber", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const token = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", token, HELLO);
+
+      const subscriber = makeRecorder();
+      yield* registry.addSubscriber(subscriber.send);
+
+      yield* registry.updatePublisherPlayState("session-1", token, "playing");
+      const afterPlaying = parseFrame(subscriber.frames.at(-1)!);
+      expect(afterPlaying.editors[0]!.playState).toBe("playing");
+
+      // Unlike selection's seq guard, playState has no monotonic ordering —
+      // every report replaces the last one, including going "backwards"
+      // (paused -> playing is a legitimate resume, not a stale frame).
+      yield* registry.updatePublisherPlayState("session-1", token, "paused");
+      const afterPaused = parseFrame(subscriber.frames.at(-1)!);
+      expect(afterPaused.editors[0]!.playState).toBe("paused");
+    }),
+  ),
+);
+
+it.effect("a stale (superseded) connection's playState update is a silent no-op", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const staleToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", staleToken, HELLO);
+
+      const freshToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", freshToken, HELLO);
+
+      const subscriber = makeRecorder();
+      yield* registry.addSubscriber(subscriber.send);
+      const framesBefore = subscriber.frames.length;
+
+      // The stale connection's late playState frame (e.g. a report that
+      // was already in flight when the reconnect/takeover happened) must
+      // not resurrect state onto the record its own connection no longer
+      // owns.
+      yield* registry.updatePublisherPlayState("session-1", staleToken, "playing");
+      expect(subscriber.frames.length).toBe(framesBefore);
+
+      const stillNull = yield* registry.addSubscriber(makeRecorder().send);
+      const parsed = parseFrame(stillNull);
+      expect(parsed.editors[0]!.playState).toBeNull();
+    }),
+  ),
+);
+
+it.effect(
+  "a reconnect (session takeover) resets playState to null until the fresh connection reports one",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const staleToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("session-1", staleToken, HELLO);
+        yield* registry.updatePublisherPlayState("session-1", staleToken, "playing");
+
+        // A Unity domain reload: the OLD connection dies and a NEW one
+        // takes over the same session id — self-healing per protocol.ts's
+        // doc on `playState: null`, not a lasting regression, since the
+        // fresh connection sends its own playState frame right after hello.
+        const freshToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("session-1", freshToken, HELLO);
+
+        const subscriber = makeRecorder();
+        const initialFrame = yield* registry.addSubscriber(subscriber.send);
+        const parsed = parseFrame(initialFrame);
+        expect(parsed.editors[0]!.playState).toBeNull();
+      }),
+    ),
 );
 
 it.effect(

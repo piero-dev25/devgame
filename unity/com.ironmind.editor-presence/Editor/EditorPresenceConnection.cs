@@ -39,6 +39,7 @@
 // drop every post-reload selection update until the counter catches up).
 // UNVERIFIED against a real Unity project — see UNVERIFIED.md.
 using System;
+using System.IO;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -125,6 +126,14 @@ namespace Ironmind.EditorPresence
             AssemblyReloadEvents.beforeAssemblyReload += HandleBeforeAssemblyReload;
             EditorApplication.quitting += HandleEditorQuitting;
             EditorApplication.update += HandleEditorUpdate;
+            // Task #49: live play/pause changes while a connection is
+            // already open (no reconnect involved, e.g. a plain pause) —
+            // the reconnect-after-reload case is covered separately by
+            // ConnectAndRunAsync sending a fresh playState right after
+            // every hello. See EditorPresencePlayModeController.cs's
+            // module doc for why this is the sole truth source, never
+            // inferred from having sent a command.
+            EditorPresencePlayModeController.PlayStateChanged += HandlePlayStateChanged;
         }
 
         // Plain method (not a pattern-matching expression) deliberately —
@@ -221,6 +230,14 @@ namespace Ironmind.EditorPresence
 
             SetState(EditorPresenceConnectionState.Connected);
             await SendHelloAsync();
+            // Republish on every (re)connect, not only on change — per the
+            // frozen spec's "Consequences to handle": the FIRST post-reload
+            // presence frame must already carry the play state that
+            // changed, not wait for some later event. See
+            // EditorPresenceRegistry.ts's registerPublisher, which resets
+            // playState to null on every (re)registration specifically
+            // expecting this frame to follow immediately.
+            await SendPlayStateAsync(EditorPresencePlayModeController.CurrentPlayState);
 
             await ReceiveUntilClosedAsync(_cts.Token);
         }
@@ -237,6 +254,7 @@ namespace Ironmind.EditorPresence
                 },
                 session = new SessionIdentityDto { id = SessionId },
                 workspace = new WorkspaceDto { root = ResolveWorkspaceRoot() },
+                capabilities = EditorPresenceProtocol.Capabilities,
             };
             await SendJsonAsync(JsonUtility.ToJson(hello));
         }
@@ -244,6 +262,40 @@ namespace Ironmind.EditorPresence
         public static Task SendSelectionAsync(SelectionFrameDto frame)
         {
             return SendJsonAsync(JsonUtility.ToJson(frame));
+        }
+
+        /// Task #49: replies to ONE command — see
+        /// EditorPresenceCommandDispatcher.cs, the sole caller. Safe to
+        /// call from the background receive loop (network I/O, not a
+        /// Unity API) — this is deliberately what makes "commandResult
+        /// before EnterPlaymode()" possible at all; see that file's module
+        /// doc.
+        public static Task SendCommandResultAsync(string id, bool ok, string error)
+        {
+            var dto = new CommandResultFrameDto { id = id, ok = ok, error = error ?? "" };
+            return SendJsonAsync(JsonUtility.ToJson(dto));
+        }
+
+        /// Task #49: reports this publisher's own play/pause state — see
+        /// docs/workbench/spec-unity-play-stop.md's ruling. Called (a) once
+        /// right after every hello, above, and (b) from
+        /// HandlePlayStateChanged below whenever
+        /// EditorPresencePlayModeController observes a live change.
+        public static Task SendPlayStateAsync(string playState)
+        {
+            var dto = new PlayStateFrameDto { playState = playState };
+            return SendJsonAsync(JsonUtility.ToJson(dto));
+        }
+
+        // Fire-and-forget, same discard pattern
+        // EditorPresenceSelectionWatcher.PublishCurrentSelection already
+        // uses for the identical situation (kicking off an async send from
+        // a synchronous event callback) — not a second `async void`
+        // entry point; SendJsonAsync's own try/catch means a failure here
+        // can't become an unobserved crash either way.
+        private static void HandlePlayStateChanged(string playState)
+        {
+            _ = SendPlayStateAsync(playState);
         }
 
         private static async Task SendJsonAsync(string json)
@@ -267,9 +319,27 @@ namespace Ironmind.EditorPresence
             }
         }
 
-        // We never need to act on inbound frame content (Unity is a
-        // publisher only — it doesn't render the `presence` fan-out), so
-        // this just drains frames to detect a server-initiated close.
+        // TASK #49: this loop used to just drain every non-Close frame to
+        // detect a server-initiated close — Unity was a publisher-only
+        // client with nothing inbound to act on. That is no longer true:
+        // `command` frames now arrive here, and dropping them silently is
+        // exactly the "a dropped command is indistinguishable from a hung
+        // editor" failure the frozen spec calls out. Every inbound TEXT
+        // frame's accumulated payload is now handed to
+        // EditorPresenceCommandDispatcher.HandleInboundText — off the main
+        // thread, same as this whole loop; see that file for why that's
+        // safe (it only parses JSON and sends network I/O here, never a
+        // UnityEditor.* call).
+        //
+        // MULTI-FRAGMENT ACCUMULATION: a single logical WebSocket message
+        // can arrive as more than one `ReceiveAsync` result
+        // (`EndOfMessage == false` until the last fragment) — the ORIGINAL
+        // drain-only loop never had to care, since it ignored payloads
+        // entirely. Buffered into a MemoryStream and decoded ONCE at the
+        // end (rather than decoding each chunk independently with
+        // Encoding.UTF8.GetString) specifically because a multi-byte UTF-8
+        // character could straddle a chunk boundary — decoding each
+        // fragment on its own could corrupt exactly that character.
         //
         // CLOSE-CODE DIAGNOSIS (added during the cross-engine contract
         // audit — this loop previously always closed with
@@ -289,19 +359,36 @@ namespace Ironmind.EditorPresence
             var buffer = new byte[ReceiveBufferSize];
             while (_socket.State == WebSocketState.Open && !cancellationToken.IsCancellationRequested)
             {
-                var result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
-                if (result.MessageType == WebSocketMessageType.Close)
+                using (var messageStream = new MemoryStream())
                 {
-                    var closeCode = _socket.CloseStatus.HasValue ? (int)_socket.CloseStatus.Value : -1;
-                    var closeDescription = _socket.CloseStatusDescription ?? "";
+                    WebSocketReceiveResult result;
+                    do
+                    {
+                        result = await _socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                        if (result.MessageType == WebSocketMessageType.Close)
+                        {
+                            var closeCode = _socket.CloseStatus.HasValue ? (int)_socket.CloseStatus.Value : -1;
+                            var closeDescription = _socket.CloseStatusDescription ?? "";
 
-                    await _socket.CloseAsync(
-                        WebSocketCloseStatus.NormalClosure,
-                        "",
-                        CancellationToken.None);
+                            await _socket.CloseAsync(
+                                WebSocketCloseStatus.NormalClosure,
+                                "",
+                                CancellationToken.None);
 
-                    HandleServerClose(closeCode, closeDescription);
-                    break;
+                            HandleServerClose(closeCode, closeDescription);
+                            return;
+                        }
+                        messageStream.Write(buffer, 0, result.Count);
+                    } while (!result.EndOfMessage);
+
+                    if (result.MessageType == WebSocketMessageType.Text)
+                    {
+                        var text = Encoding.UTF8.GetString(messageStream.ToArray());
+                        EditorPresenceCommandDispatcher.HandleInboundText(text);
+                    }
+                    // Binary frames are not part of this protocol (JSON
+                    // text only) — read and discarded above, same as every
+                    // frame type was before this change.
                 }
             }
         }

@@ -267,6 +267,17 @@ export const runPublisherConnection = (
                 );
                 return;
               }
+              case "playState": {
+                // Same "applies to whichever session this connection most
+                // recently said hello as" semantics as `selection` above —
+                // see spec-unity-play-stop.md's ruling: play state is a
+                // level reported through presence, not correlated to any
+                // one command.
+                if (registeredSessionIds.size === 0) return;
+                const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
+                yield* registry.updatePublisherPlayState(latestSessionId, token, frame.playState);
+                return;
+              }
             }
           }),
         {

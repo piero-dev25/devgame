@@ -35,6 +35,7 @@ import {
   type EditorPresenceCommandOutcome,
   type EditorPresenceEditorIdentity,
   type EditorPresenceEntry,
+  type EditorPresencePlayState,
   type EditorPresenceSelection,
 } from "./protocol.ts";
 
@@ -144,6 +145,7 @@ function toEntry(record: PublisherRecord): EditorPresenceEntry {
     lastSeenAt: record.lastSeenAt,
     selection: record.selection,
     capabilities: record.capabilities,
+    playState: record.playState,
   };
 }
 
@@ -198,6 +200,23 @@ export class EditorPresenceRegistry extends Context.Service<
       sessionId: string,
       connectionToken: EditorPresenceConnectionToken,
       selection: EditorPresenceSelection,
+    ) => Effect.Effect<void>;
+    /**
+     * Records a publisher's own reported play/pause state (its `playState`
+     * frame — see protocol.ts) and broadcasts the updated presence, same
+     * connectionToken-guarded shape as `updatePublisherSelection`. No `seq`
+     * to compare against — this is a single WebSocket connection, so TCP
+     * already orders frames within it, and `connectionToken` is what guards
+     * against a stale, superseded connection's late update clobbering a
+     * newer one, the same protection `updatePublisherSelection` relies on.
+     * A stale/unknown `sessionId`+`connectionToken` pair (an old connection
+     * whose takeover has already happened) is a silent no-op, matching
+     * every other guarded mutation in this file.
+     */
+    readonly updatePublisherPlayState: (
+      sessionId: string,
+      connectionToken: EditorPresenceConnectionToken,
+      playState: EditorPresencePlayState,
     ) => Effect.Effect<void>;
     readonly removePublisher: (
       sessionId: string,
@@ -328,6 +347,13 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
             lastSeenAt,
             selection: null,
             capabilities: hello.capabilities ?? DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+            // Reset on every (re)registration, including a reconnect that
+            // takes over an existing session — same self-healing shape as
+            // `selection: null` above. A `playState` frame follows
+            // immediately after `hello` (see EditorPresenceConnection.cs /
+            // plugin.gd), so this null window is momentary, not a lasting
+            // regression to "unknown" on every domain-reload reconnect.
+            playState: null,
           });
           const next = { ...current, publishers };
           const frame = buildPresenceFrame(Array.from(publishers.values(), toEntry));
@@ -372,6 +398,22 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
         if (existing.selection && selection.seq <= existing.selection.seq) return null;
         const next = new Map(publishers);
         next.set(sessionId, { ...existing, selection, lastSeenAt });
+        return next;
+      });
+    });
+
+  const updatePublisherPlayState: EditorPresenceRegistry["Service"]["updatePublisherPlayState"] = (
+    sessionId,
+    connectionToken,
+    playState,
+  ) =>
+    Effect.gen(function* () {
+      const lastSeenAt = yield* nowIso;
+      yield* applyPublisherChange((publishers) => {
+        const existing = publishers.get(sessionId);
+        if (!existing || existing.connectionToken !== connectionToken) return null;
+        const next = new Map(publishers);
+        next.set(sessionId, { ...existing, playState, lastSeenAt });
         return next;
       });
     });
@@ -571,6 +613,7 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
     newConnectionToken: () => Symbol("editor-presence-connection"),
     registerPublisher,
     updatePublisherSelection,
+    updatePublisherPlayState,
     removePublisher,
     addSubscriber,
     removeSubscriber,
