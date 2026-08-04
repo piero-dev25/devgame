@@ -29,6 +29,38 @@ check is a low-stakes bug. A _command_ channel with no scope check means any
 authenticated session can make someone's editor run code. Commands do not ship
 before enforcement does.
 
+## Commands need their own scope, and it must be obtainable
+
+Do **not** authorize commands with `orchestration:operate`. That scope already
+authorizes `dispatchCommand`, `projectsWriteFile`, `vcsPull` and
+`sourceControlCloneRepository`, and `AuthStandardClientScopes` grants it to
+every standard client — the browser app, every `t3 pair` token, the Unity
+plugin's own exchange request. "Make the user's editor execute code" must not be
+authorized by a scope everything already holds.
+
+So: a dedicated scope, introduced in the same change as the command frames.
+Retrofitting a narrower scope after plugins are in the field is a coordinated
+release, not a patch.
+
+**And it must be mintable in the same change.** A scope excluded from every
+default grant is correct; a scope excluded from every grant *and* from every
+path that could request one is inert — a control that has never been
+exercisable, plus a doc comment describing a way to obtain it that does not
+exist. The first version of this shipped exactly that: four independent
+chokepoints, and the only way to construct a session holding it was to fabricate
+one inside a test.
+
+The minting path is an explicit request, never a default:
+- an entry in the token-exchange scope allowlist, so it CAN be asked for
+- an option in the pairing UI, so a human consciously grants "allow this client
+  to control my editor"
+- a test that exchange grants it only when the underlying grant carries it
+
+The failure mode to design against is not someone forgetting the scope. It is
+the next task finding the scope unobtainable and "fixing" it by adding it to
+`AuthStandardClientScopes` — which silently restores exactly the condition this
+scope was created to end.
+
 ## Wire shape
 
 `protocol.ts` documents an asymmetry that has already cost one wrong
@@ -89,8 +121,25 @@ Frame-step is Unity-only through supported APIs. Driving it elsewhere would
 mean synthesising clicks on a toolbar button, which is fragile and needs the
 editor focused — out of scope.
 
-A `hello` with no `capabilities` key is treated as `["play", "stop"]`, so an
-older plugin keeps working instead of appearing capability-less.
+**A `hello` with no `capabilities` key means `[]` — no commands.** An earlier
+version of this spec said the default was `["play", "stop"]`, "so an older
+plugin keeps working." That was wrong, and wrong in the exact way the section
+above forbids.
+
+No plugin in the field implements commands at all. Godot's `_handle_inbound`
+only substring-matches `"pong"`; Unity's `ReceiveUntilClosedAsync` discards
+every non-Close frame. So a permissive default advertises play/stop for **100%
+of publishers**, none of which can honour either — producing an enabled Play
+button, a ten-second wait, and a timeout. That is precisely the experience the
+capability table exists to prevent, caused by the table's own default.
+
+An older plugin does keep working under `[]`. It keeps doing exactly what it
+can do, which is publish selection. It simply does not advertise a capability it
+does not have.
+
+The general rule, worth carrying beyond this field: **a default that claims a
+capability is a lie whenever it is wrong. A default that claims none is merely
+conservative.** Capability defaults belong at the floor.
 
 ## Registry change
 
