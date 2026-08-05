@@ -30,6 +30,51 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
+/**
+ * Task #108, round 6 (live QA, diagnostic-build repro, all four windows
+ * log-confirmed): T3's thread list is itself an ordinary dock panel —
+ * `ChatDock.tsx` registers it as `id: SIDEBAR_PANEL_ID, singleton: true,
+ * closeable: false` — not a route-level nav element outside the dock. That
+ * means clicking a thread to navigate is, to dockview-core, a genuine click
+ * INSIDE that panel's content area, which dockview treats as "this panel
+ * becomes active" and fires `onDidActivePanelChange` for it SYNCHRONOUSLY,
+ * as part of native DOM click handling — strictly BEFORE React commits the
+ * new `activationKey` prop and the effect that updates
+ * `activationKeyRef.current` (`DockviewLayout.tsx`) runs. So every single
+ * thread switch recorded `panelId: SIDEBAR_PANEL_ID` under the OUTGOING
+ * (soon-to-be-stale) thread's key, silently overwriting whatever real
+ * Files/Diff selection that thread actually had — root-caused via an
+ * instrumented diagnostic build + a computer-use driver replaying a literal
+ * 12-step timestamped click sequence, confirmed at all four "return to a
+ * thread" windows (every one read back `"sidebar"`, never the panel that
+ * was actually clicked).
+ *
+ * `SIDEBAR_PANEL_ID` is defined HERE, not in `ChatDock.tsx` (where it
+ * conceptually belongs), because `ChatDock.tsx` already imports
+ * `DockviewLayout.tsx`, which imports THIS module — `ChatDock.tsx` importing
+ * this constant back out of here is the only cycle-free direction.
+ * `ChatDock.tsx`'s own local `const SIDEBAR_PANEL_ID = "sidebar"` was
+ * replaced with an import from here so there's exactly one source of truth,
+ * not two string literals that could drift.
+ *
+ * `CHROME_PANEL_IDS` is the general concept this constant is one member of:
+ * navigation/UI CHROME — panels that exist to let you get somewhere, not
+ * panels that represent "content the user is looking at for THIS thread" —
+ * must never become a per-thread remembered selection, REGARDLESS of
+ * whatever caused them to transiently activate. `recordActivePanelForKeyUnlessRestoring`
+ * below (the write side) and `restoreActivePanelForKey`
+ * (`lib/restoreActivePanel.ts`, the read side) both filter against this same
+ * set. Deliberately NOT solved with click-attribution machinery (was
+ * "which click caused this activation, and does it also change the
+ * thread") — that's genuinely general infrastructure this app doesn't need
+ * yet; the chrome-exclusion principle covers the one case that exists today.
+ * If a future panel is ALSO navigation chrome rather than thread-scoped
+ * content, its id joins this set — that is the intended extension point,
+ * not a sign the approach needs to change.
+ */
+export const SIDEBAR_PANEL_ID = "sidebar";
+export const CHROME_PANEL_IDS: ReadonlySet<string> = new Set([SIDEBAR_PANEL_ID]);
+
 interface DockActiveSelectionStoreState {
   byActivationKey: Record<string, string>;
   /**
@@ -132,6 +177,14 @@ export function recordActivePanelForKey(
  * directly testable decision — same reasoning `recordActivePanelForKey`
  * itself already applies; the ref lives in the component, this function
  * doesn't need to know it's a ref to decide what to do with its value.
+ *
+ * Task #108, round 6: also ignores `CHROME_PANEL_IDS` (`SIDEBAR_PANEL_ID`'s
+ * own doc comment above has the traced mechanism this closes). Filtering
+ * HERE — the one seam both of `DockviewLayout.tsx`'s subscriptions already
+ * funnel through — is deliberate, not incidental: a per-group-subscription-only
+ * filter would be insufficient, since the TOP-LEVEL `onDidActivePanelChange`
+ * fires for the sidebar's own group-activation independently of whether any
+ * per-group subscription also exists for it.
  */
 export function recordActivePanelForKeyUnlessRestoring(
   isRestoring: boolean,
@@ -139,5 +192,6 @@ export function recordActivePanelForKeyUnlessRestoring(
   panelId: string | null,
 ): void {
   if (isRestoring) return;
+  if (panelId !== null && CHROME_PANEL_IDS.has(panelId)) return;
   recordActivePanelForKey(activationKey, panelId);
 }

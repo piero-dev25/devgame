@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  CHROME_PANEL_IDS,
   recordActivePanelForKey,
   recordActivePanelForKeyUnlessRestoring,
   selectActivePanelForKey,
+  SIDEBAR_PANEL_ID,
   useDockActiveSelectionStore,
 } from "./dockActiveSelectionStore";
 
@@ -135,5 +137,34 @@ describe("recordActivePanelForKeyUnlessRestoring", () => {
     expect(
       selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
     ).toBe("files");
+  });
+
+  // Task #108, round 6 (live QA, diagnostic-build repro, all four "return to
+  // a thread" windows log-confirmed): the sidebar thread-list panel is a
+  // real dockview panel, so clicking a thread to navigate fires a genuine
+  // onDidActivePanelChange for it SYNCHRONOUSLY, before React commits the
+  // new activationKey — landing a "sidebar" write under the OUTGOING
+  // thread's key on every single switch. See CHROME_PANEL_IDS's own doc
+  // comment (dockActiveSelectionStore.ts) for the full traced mechanism.
+  it("ignores a CHROME_PANEL_IDS member even when isRestoring is false — a real, unsuppressed sidebar activation must not overwrite a thread's real selection", () => {
+    recordActivePanelForKey("thread-A", "files");
+
+    recordActivePanelForKeyUnlessRestoring(false, "thread-A", SIDEBAR_PANEL_ID);
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+    ).toBe("files");
+  });
+
+  it("still records a non-chrome panelId normally — the filter is scoped to CHROME_PANEL_IDS, not a blanket suppression", () => {
+    recordActivePanelForKeyUnlessRestoring(false, "thread-A", "diff");
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+    ).toBe("diff");
+  });
+
+  it("CHROME_PANEL_IDS contains SIDEBAR_PANEL_ID — sanity check the fixture matches the real set, not a copy of the literal", () => {
+    expect(CHROME_PANEL_IDS.has(SIDEBAR_PANEL_ID)).toBe(true);
   });
 });

@@ -1,6 +1,6 @@
 import type { DockviewApi, IDockviewPanel } from "dockview";
 
-import { selectActivePanelForKey } from "~/dockActiveSelectionStore";
+import { CHROME_PANEL_IDS, selectActivePanelForKey } from "~/dockActiveSelectionStore";
 
 /**
  * The core decision behind restoring a thread's remembered dock selection
@@ -53,6 +53,21 @@ import { selectActivePanelForKey } from "~/dockActiveSelectionStore";
  * panel in a test stub (see `restoreActivePanel.test.ts`'s `fakePanel`) may
  * not model a group at all, and that must stay a safe no-op for the group
  * half, not a throw.
+ *
+ * Task #108, round 6 (live QA, diagnostic-build repro): a `rememberedPanelId`
+ * that names a `CHROME_PANEL_IDS` member (`dockActiveSelectionStore.ts` —
+ * `SIDEBAR_PANEL_ID`'s own doc comment has the traced mechanism) is treated
+ * as NO ENTRY, falling straight through to `fallbackPanelId`, exactly like
+ * `rememberedPanelId: null`. This is needed on the READ side independently
+ * of the round-6 write-side filter (`recordActivePanelForKeyUnlessRestoring`):
+ * `byActivationKey` is persisted to `localStorage`
+ * (`t3code:dock-active-selection-state:v1`), so every entry the pre-fix
+ * write-side bug already clobbered to `"sidebar"` — which is most entries,
+ * given the bug fired on every thread switch — survives an app restart and
+ * would otherwise still restore to the sidebar forever, even on a build
+ * with the write-side fix, until this thread happened to get a fresh real
+ * selection recorded. Filtering on read closes that gap for every
+ * already-poisoned entry without requiring a manual `localStorage` wipe.
  */
 export function restoreActivePanelForKey(
   api: DockviewApi,
@@ -61,8 +76,12 @@ export function restoreActivePanelForKey(
     fallbackPanelId,
   }: { rememberedPanelId: string | null; fallbackPanelId?: string },
 ): void {
-  if (rememberedPanelId !== null) {
-    const panel = api.getPanel(rememberedPanelId);
+  const effectiveRememberedPanelId =
+    rememberedPanelId !== null && CHROME_PANEL_IDS.has(rememberedPanelId)
+      ? null
+      : rememberedPanelId;
+  if (effectiveRememberedPanelId !== null) {
+    const panel = api.getPanel(effectiveRememberedPanelId);
     if (panel) {
       activatePanelInItsGroup(panel);
       return;

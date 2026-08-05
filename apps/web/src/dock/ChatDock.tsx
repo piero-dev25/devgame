@@ -36,6 +36,7 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
+import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
 import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
@@ -64,7 +65,6 @@ import {
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
 import { SidebarPanel } from "./SidebarPanel";
 
-const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";

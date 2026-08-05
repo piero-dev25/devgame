@@ -1,6 +1,8 @@
 import type { DockviewApi, DockviewGroupPanel, IDockviewPanel } from "dockview";
 import { describe, expect, it } from "vite-plus/test";
 
+import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
+
 import { restoreActivePanelForKey, restoreActivePanelForThread } from "./restoreActivePanel";
 
 function fakePanel(
@@ -282,5 +284,70 @@ describe("restoreActivePanelForThread", () => {
 
     expect(diffActivated).toBe(true);
     expect(browserActivated).toBe(false);
+  });
+});
+
+// Task #108, round 6 (live QA, diagnostic-build repro): a `rememberedPanelId`
+// that names a chrome panel (the thread-list sidebar) must be treated as NO
+// ENTRY, not as a real remembered selection — see `restoreActivePanelForKey`'s
+// own doc comment for the traced mechanism (every thread switch recorded
+// "sidebar" under the OUTGOING thread's key) and why this read-side guard is
+// needed independently of the write-side one: `byActivationKey` persists to
+// localStorage, so already-poisoned entries from before this fix survive an
+// app restart.
+describe("restoreActivePanelForKey — a remembered panel is a chrome id (task #108, round 6)", () => {
+  it("falls through to fallbackPanelId when the remembered panel is SIDEBAR_PANEL_ID, exactly like rememberedPanelId: null", () => {
+    let chatActivated = false;
+    let sidebarActivated = false;
+    const api = fakeApi({
+      getPanel: (id) => {
+        if (id === "chat") return fakePanel("chat", () => (chatActivated = true));
+        if (id === SIDEBAR_PANEL_ID)
+          return fakePanel(SIDEBAR_PANEL_ID, () => (sidebarActivated = true));
+        return undefined;
+      },
+    });
+
+    restoreActivePanelForKey(api, {
+      rememberedPanelId: SIDEBAR_PANEL_ID,
+      fallbackPanelId: "chat",
+    });
+
+    expect(chatActivated).toBe(true);
+    expect(sidebarActivated).toBe(false);
+  });
+
+  it("no-ops silently (no fallback given) rather than activating the sidebar — mirrors the null-rememberedPanelId, no-fallback case", () => {
+    let sidebarActivated = false;
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === SIDEBAR_PANEL_ID
+          ? fakePanel(SIDEBAR_PANEL_ID, () => (sidebarActivated = true))
+          : undefined,
+    });
+
+    expect(() =>
+      restoreActivePanelForKey(api, { rememberedPanelId: SIDEBAR_PANEL_ID }),
+    ).not.toThrow();
+    expect(sidebarActivated).toBe(false);
+  });
+
+  it("restoreActivePanelForThread carries the same guard end to end, from a poisoned byActivationKey entry", () => {
+    let chatActivated = false;
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "chat" ? fakePanel("chat", () => (chatActivated = true)) : undefined,
+    });
+
+    // Models exactly the persisted-localStorage shape round 6's live repro
+    // produced: A's real "files" selection clobbered to "sidebar" the moment
+    // the user switched away.
+    restoreActivePanelForThread(api, {
+      byActivationKey: { "env-1:thread-A": SIDEBAR_PANEL_ID },
+      activationKey: "env-1:thread-A",
+      fallbackPanelId: "chat",
+    });
+
+    expect(chatActivated).toBe(true);
   });
 });
