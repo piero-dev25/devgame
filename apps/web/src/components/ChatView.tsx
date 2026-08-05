@@ -1574,6 +1574,12 @@ function ChatViewContent(props: ChatViewProps) {
     unityPlayState,
     unitySetup,
     unitySetupError,
+    // F13 (merge-gate review, low): this was computed by `useEnvironmentQuery`
+    // all along and simply never threaded anywhere — the toolbar had no way
+    // to distinguish "still checking" from "confirmed not ready" during the
+    // ~35s the connection-wait + HTTP fetch can take. See
+    // `EngineToolbarView.unitySetupPending`'s own doc comment.
+    unitySetupPending: unitySetupQuery.isPending,
   });
   const primarySessionState = usePrimarySessionState();
   // Gates ONLY the editor-presence backend (Godot today) — see
@@ -5475,7 +5481,17 @@ function ChatViewContent(props: ChatViewProps) {
           }),
         );
       });
-  }, [environmentId, unitySetupQuery]);
+    // F10 (merge-gate review, non-blocking): depend on `unitySetupQuery.refresh`,
+    // NOT the whole `unitySetupQuery` object — `useEnvironmentQuery`
+    // (state/query.ts) returns a fresh object literal `{data, error,
+    // isPending, refresh}` on every render, so depending on the object
+    // itself changes this callback's identity every render and silently
+    // defeats `ChatHeader`'s `memo` (the callback threads down as a prop).
+    // `refresh` alone (from `useAtomRefresh`) is the referentially stable
+    // part — the exact same fix `ConnectionsSettings.tsx`'s
+    // `retryUnitySetupProbe` already applies to the identical shape
+    // (`[primaryEnvironmentId, unitySetupQuery.refresh]`).
+  }, [environmentId, unitySetupQuery.refresh]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
     if (

@@ -33,6 +33,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { Group, GroupSeparator } from "./ui/group";
 import { Button } from "./ui/button";
 import { Badge } from "./ui/badge";
+import { Spinner } from "./ui/spinner";
 
 const ENGINE_LABELS: Readonly<Record<EngineType, string>> = {
   unity: "Unity",
@@ -300,6 +301,32 @@ function ControlCluster(props: {
         </Tooltip>
       ) : null;
 
+    // F13 (merge-gate review, low): the connection-wait + HTTP fetch behind
+    // `reason` can run up to ~35s (`UNITY_SETUP_CONNECTION_WAIT_TIMEOUT_MS`
+    // + `fetchSetupProbe.ts`'s own 20s bound), and until this existed
+    // nothing here distinguished "still checking" from "confirmed not
+    // ready" — same static text and disabled button either way, no visual
+    // sense of progress, and the reason only ever reached a screen reader
+    // as the button's `aria-label` (heard once, on focus — never again if
+    // it changes without a refocus). `role="status"`/`aria-live="polite"`
+    // is the SAME pattern `GitActionsControl.tsx`'s publish-in-progress
+    // state already uses (this file's own styling model — see the top doc
+    // comment) — a live region independent of focus, plus a visible
+    // spinner for sighted users. Purely ADDITIVE: it never changes
+    // `reason`, `disabledPlayButton`, or whether Retry/the CTA render —
+    // those stay governed entirely by `unitySetupCheckFailed`/
+    // `unityInstallOffered`, unchanged.
+    const pendingIndicator = view.unitySetupPending ? (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-1.5 text-xs text-muted-foreground"
+      >
+        <Spinner className="size-3 shrink-0" aria-hidden />
+        <span>Checking Unity's status…</span>
+      </div>
+    ) : null;
+
     // The owner's mock: not-ready Unity gets a loud CTA (the header saying
     // what to do next) beside the same disabled Play a sighted user would
     // otherwise stare at with no obvious next step — but ONLY when
@@ -334,17 +361,19 @@ function ControlCluster(props: {
           </Button>
           {disabledPlayButton}
           {retryButton}
+          {pendingIndicator}
         </div>
       );
     }
 
-    if (!retryButton) {
+    if (!retryButton && !pendingIndicator) {
       return disabledPlayButton;
     }
     return (
       <div className="flex shrink-0 items-center gap-1">
         {disabledPlayButton}
         {retryButton}
+        {pendingIndicator}
       </div>
     );
   }

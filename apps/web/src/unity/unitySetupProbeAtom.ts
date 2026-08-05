@@ -47,8 +47,16 @@ export class UnitySetupConnectionWaitTimeoutError extends Schema.TaggedErrorClas
   "UnitySetupConnectionWaitTimeoutError",
   {},
 ) {
+  // F8 (merge-gate review, low): this used to restate "Unity's status" on
+  // its own ("...ready — Unity's status can't be checked yet."), but this
+  // message is NEVER shown bare — `unityDisabledReason` (EngineToolbar.logic.ts)
+  // is its only consumer, and it already prefixes every error with
+  // "Couldn't check Unity's status — ". The old wording composed into a
+  // double-dash run-on repeating that same phrase twice. This message
+  // describes only what IT adds (the connection wait, not Unity itself),
+  // letting the prefix supply the "Unity's status" framing exactly once.
   override get message(): string {
-    return "Still waiting for this app's connection to be ready — Unity's status can't be checked yet.";
+    return "Still waiting for this app's connection to be ready.";
   }
 }
 

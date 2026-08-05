@@ -288,6 +288,28 @@ export interface EngineToolbarView {
    * own resolution already uses).
    */
   readonly unityInstallOffered: boolean;
+  /**
+   * Whether Unity's status check is CURRENTLY in flight — `unitySetupQuery.isPending`
+   * (`useEnvironmentQuery`, `state/query.ts`), threaded straight through
+   * (see `resolveEngineToolbarView`'s own `unitySetupPending` param doc
+   * comment for why nothing here re-derives it). Only ever `true` for the
+   * `"unity-cli"` backend; always `false` otherwise.
+   *
+   * F13 (merge-gate review, low): the connection-wait + HTTP fetch this
+   * covers is bounded but can still run up to ~35s
+   * (`UNITY_SETUP_CONNECTION_WAIT_TIMEOUT_MS` + `fetchSetupProbe.ts`'s own
+   * 20s bound), and until this field existed nothing in `EngineToolbarView`
+   * distinguished "still checking" from "confirmed not ready" — the
+   * generic "Checking Unity's status…" placeholder rendered with no
+   * visual sense of progress and no live region, so a screen-reader user
+   * heard it once (on focus) and never again if it later changed.
+   * `EngineToolbar.tsx` uses this to render a `role="status"` spinner
+   * ADDITIVE to (never instead of) whatever the not-ready branch already
+   * renders — it does not change what `disabledReason` says or whether
+   * Retry/the CTA render, both governed entirely by `unitySetupCheckFailed`/
+   * `unityInstallOffered` as before.
+   */
+  readonly unitySetupPending: boolean;
 }
 
 function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): ReadonlySet<string> {
@@ -328,6 +350,18 @@ export function resolveEngineToolbarView(input: {
    * is never consulted).
    */
   readonly unitySetupError?: string | null;
+  /**
+   * Only consulted for the `"unity-cli"` backend — `unitySetupQuery.isPending`
+   * (`useEnvironmentQuery`), threaded straight through with no re-derivation:
+   * this function already has no way to independently know whether a fetch
+   * is in flight (it sees only settled inputs — `unitySetup`/`unitySetupError`),
+   * so the caller is the only place this can come from. `undefined`/omitted
+   * means "caller hasn't wired this" and defaults to `false`, same posture
+   * every other optional field here uses — never a guess that something IS
+   * pending. See `EngineToolbarView.unitySetupPending`'s own doc comment
+   * for why this exists (F13).
+   */
+  readonly unitySetupPending?: boolean;
 }): EngineToolbarView {
   const { engineType, connectedEditor } = input;
   if (engineType === null) {
@@ -341,6 +375,7 @@ export function resolveEngineToolbarView(input: {
       disabledReason: null,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
+      unitySetupPending: false,
     };
   }
 
@@ -357,6 +392,7 @@ export function resolveEngineToolbarView(input: {
       disabledReason: null,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
+      unitySetupPending: false,
     };
   }
 
@@ -383,6 +419,7 @@ export function resolveEngineToolbarView(input: {
       // default-to-offered guess.
       unityInstallOffered:
         !playReady && setup !== null && shouldOfferUnityPipelineInstall(setup.facts),
+      unitySetupPending: input.unitySetupPending ?? false,
     };
   }
 
@@ -398,6 +435,7 @@ export function resolveEngineToolbarView(input: {
       disabledReason: null,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
+      unitySetupPending: false,
     };
   }
   const actionSet = toActionSet(connectedEditor.capabilities);
@@ -411,6 +449,7 @@ export function resolveEngineToolbarView(input: {
     disabledReason: null,
     unitySetupCheckFailed: false,
     unityInstallOffered: false,
+    unitySetupPending: false,
   };
 }
 

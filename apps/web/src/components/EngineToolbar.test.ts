@@ -242,6 +242,64 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     });
   });
 
+  // Task: F13 (merge-gate review, low) — `unitySetupPending` threads
+  // `unitySetupQuery.isPending` straight through with no re-derivation
+  // (this function only ever sees SETTLED inputs, so it has no other way
+  // to know a fetch is in flight). One explicit case per posture, same
+  // discipline the rest of this suite uses.
+  describe("unitySetupPending — F13's threaded-through 'still checking' signal", () => {
+    it("true when the caller says a fetch is in flight", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetupPending: true,
+      });
+      expect(view.unitySetupPending).toBe(true);
+    });
+
+    it("false when the caller says nothing is in flight", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetupPending: false,
+      });
+      expect(view.unitySetupPending).toBe(false);
+    });
+
+    it("defaults to false when the caller omits it entirely — never a guessed-pending default", () => {
+      const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
+      expect(view.unitySetupPending).toBe(false);
+    });
+
+    it("stays true even once a classified result has ALSO arrived — a refresh can be in flight over already-resolved data (e.g. Retry, or the post-install refresh)", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts(), S11),
+        unitySetupPending: true,
+      });
+      expect(view.unitySetupPending).toBe(true);
+    });
+
+    it("always false for non-unity-cli backends, even if a caller passes true — editor-presence has no probe to be pending on", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "godot",
+        connectedEditor: null,
+        unitySetupPending: true,
+      });
+      expect(view.unitySetupPending).toBe(false);
+    });
+
+    it("always false when no engine is resolved at all, even if a caller passes true", () => {
+      const view = resolveEngineToolbarView({
+        engineType: null,
+        connectedEditor: null,
+        unitySetupPending: true,
+      });
+      expect(view.unitySetupPending).toBe(false);
+    });
+  });
+
   it("facts fully ready: play/pause/stop enabled, no disabledReason — no step, Pipeline has no scriptable frame step", () => {
     const view = resolveEngineToolbarView({
       engineType: "unity",

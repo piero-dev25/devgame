@@ -21,6 +21,7 @@ const THREEJS_VIEW: EngineToolbarView = {
   disabledReason: null,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
+  unitySetupPending: false,
 };
 
 function renderToolbar(overrides: Partial<EngineToolbarProps> = {}) {
@@ -156,6 +157,7 @@ const UNITY_NOT_READY_INSTALL_OFFERED_VIEW: EngineToolbarView = {
     "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.",
   unitySetupCheckFailed: false,
   unityInstallOffered: true,
+  unitySetupPending: false,
 };
 
 // The literal S5 sentence team-lead cited live as what to show INSTEAD of
@@ -172,6 +174,7 @@ const UNITY_NOT_READY_NO_INSTALL_VIEW: EngineToolbarView = {
     "This project doesn't have Unity's Pipeline package, and Unity isn't open. Add the package, then open the project in Unity.",
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
+  unitySetupPending: false,
 };
 
 const UNITY_READY_VIEW: EngineToolbarView = {
@@ -184,6 +187,7 @@ const UNITY_READY_VIEW: EngineToolbarView = {
   disabledReason: null,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
+  unitySetupPending: false,
 };
 
 function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineToolbarProps> = {}) {
@@ -249,6 +253,57 @@ describe("EngineToolbar — Unity not-ready state withholds the CTA when an inst
     // accessible name (already fixed for #107 below) is where that
     // sentence lands; still present and unchanged by the CTA's absence.
     expect(hasAriaLabel(html, UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? "")).toBe(true);
+  });
+});
+
+// Task: F13 (merge-gate review, low) — the not-ready state used to show
+// nothing but a static disabled Play + tooltip for the ENTIRE ~35s the
+// connection-wait + probe fetch can take, with no visual sense of progress
+// and no live region (a screen reader heard the reason once, on focus,
+// never again if it changed without a refocus). Proves the rendered half
+// of `unitySetupPending` — `EngineToolbar.test.ts`'s own suite proves the
+// pure derivation.
+describe("EngineToolbar — Unity not-ready state shows a live 'still checking' indicator while a fetch is in flight (F13)", () => {
+  it("renders a role=status/aria-live=polite region with the checking text while pending", () => {
+    const html = renderUnityToolbar({
+      ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
+      unitySetupPending: true,
+    });
+
+    expect(html).toContain('role="status"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain("Checking Unity&#x27;s status…");
+  });
+
+  it("renders nothing extra while NOT pending — purely additive, not a replacement for the existing disabled button/CTA", () => {
+    const html = renderUnityToolbar({
+      ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
+      unitySetupPending: false,
+    });
+
+    expect(html).not.toContain('role="status"');
+    expect(html).not.toContain("Checking Unity&#x27;s status…");
+  });
+
+  it("does not change the disabled Play's own accessible name or tooltip — the pending indicator is a SEPARATE region, not a substitute for the classifier's own reason", () => {
+    const html = renderUnityToolbar({
+      ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
+      unitySetupPending: true,
+    });
+
+    expect(hasAriaLabel(html, UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? "")).toBe(
+      true,
+    );
+  });
+
+  it("still renders alongside the CTA when both an install offer AND a pending refresh are true at once (e.g. Retry, or the post-install refresh, over already-classified data)", () => {
+    const html = renderUnityToolbar(
+      { ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW, unitySetupPending: true },
+      { onSetupUnityIntegrations: () => {} },
+    );
+
+    expect(html).toContain(">Setup Unity Integrations<");
+    expect(html).toContain('role="status"');
   });
 });
 
@@ -342,6 +397,7 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
     disabledReason: null,
     unitySetupCheckFailed: false,
     unityInstallOffered: false,
+    unitySetupPending: false,
   };
 
   it("still renders the full Play/Pause/Stop cluster and play-target chevron for Godot", () => {
@@ -389,6 +445,7 @@ describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
       disabledReason: null,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
+      unitySetupPending: false,
     };
     const html = renderToStaticMarkup(
       <EngineToolbar
