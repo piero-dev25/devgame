@@ -18,7 +18,7 @@
 import {
   UNITY_COMMAND_PATH,
   type UnityCommandAction,
-  type UnityCommandResult,
+  UnityCommandResult,
 } from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
@@ -28,9 +28,16 @@ import {
   withEnvironmentCredentials,
 } from "@t3tools/client-runtime/state/environmentHttpAuth";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { runtime } from "../lib/runtime";
+
+// Pre-composed once at module scope — same convention as
+// `fetchSetupProbe.ts`'s `decodeUnitySetupProbeResult` (#99/#100). This is
+// the Play/Stop dispatch path, so an unvalidated response here would feed
+// straight into the toolbar's state (#101).
+const decodeUnityCommandResult = Schema.decodeUnknownEffect(UnityCommandResult);
 
 function dispatchEffect(input: {
   readonly httpBaseUrl: string;
@@ -59,7 +66,7 @@ function dispatchEffect(input: {
       input.httpAuthorization,
       client.execute(request),
     );
-    return (yield* response.json) as UnityCommandResult;
+    return yield* decodeUnityCommandResult(yield* response.json);
   }).pipe(Effect.provide(FetchHttpClient.layer));
 }
 

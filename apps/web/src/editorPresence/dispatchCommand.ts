@@ -12,7 +12,7 @@
 // sits beside (see `EditorPresenceRoute.ts`'s own module doc for why).
 import {
   EDITOR_PRESENCE_DISPATCH_COMMAND_PATH,
-  type EditorPresenceDispatchCommandResult,
+  EditorPresenceDispatchCommandResult,
 } from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
@@ -23,9 +23,17 @@ import {
 } from "@t3tools/client-runtime/state/environmentHttpAuth";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { runtime } from "../lib/runtime";
+
+// Pre-composed once at module scope — same convention as
+// `unity/dispatchCommand.ts`'s `decodeUnityCommandResult` (#101). This is
+// Godot's Play/Stop dispatch path.
+const decodeEditorPresenceDispatchCommandResult = Schema.decodeUnknownEffect(
+  EditorPresenceDispatchCommandResult,
+);
 
 function dispatchEffect(input: {
   readonly httpBaseUrl: string;
@@ -56,7 +64,7 @@ function dispatchEffect(input: {
       input.httpAuthorization,
       client.execute(request),
     );
-    return (yield* response.json) as EditorPresenceDispatchCommandResult;
+    return yield* decodeEditorPresenceDispatchCommandResult(yield* response.json);
   }).pipe(Effect.provide(FetchHttpClient.layer));
 }
 
