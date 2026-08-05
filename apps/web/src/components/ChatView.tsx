@@ -223,7 +223,7 @@ import { resolveConnectedEditorForProject } from "../editorPresence/resolveProje
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
-import { fetchUnitySetupProbe } from "../unity/fetchSetupProbe";
+import { fetchUnitySetupProbeCached } from "../unity/setupProbeCache";
 import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
@@ -1566,7 +1566,8 @@ function ChatViewContent(props: ChatViewProps) {
     const prepared = readPreparedConnection(environmentId);
     if (!prepared) return;
     let cancelled = false;
-    fetchUnitySetupProbe({
+    fetchUnitySetupProbeCached({
+      environmentId,
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,
     })

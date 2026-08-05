@@ -142,7 +142,10 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
 import { useProjects } from "~/state/entities";
 import { readPreparedConnection } from "~/state/session";
-import { fetchUnitySetupProbe } from "../../unity/fetchSetupProbe";
+import {
+  fetchUnitySetupProbeCached,
+  invalidateUnitySetupProbeCache,
+} from "../../unity/setupProbeCache";
 import { postUnityPipelineInstall } from "../../unity/postPipelineInstall";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
@@ -2082,7 +2085,18 @@ function UnitySetupSection({
     if (primaryEnvironmentId === null) return;
     const prepared = readPreparedConnection(primaryEnvironmentId);
     if (!prepared) return;
-    fetchUnitySetupProbe({
+    // Bypasses the cache rather than reading it — `refetch` is what
+    // `UnityPipelineInstallButton`'s `onInstalled` calls after a
+    // successful install, and this panel's own Retry button. Both want
+    // provably fresh data: serving a cached "not installed" moments after
+    // a real install just succeeded is the exact S13 defect class
+    // (193abfb89), now reachable through the cache instead of the
+    // classifier. Invalidating first also reseeds the cache with this
+    // fresh result, so ChatView's own mount-effect doesn't pay for a
+    // second real fetch if it asks again shortly after.
+    invalidateUnitySetupProbeCache(primaryEnvironmentId);
+    fetchUnitySetupProbeCached({
+      environmentId: primaryEnvironmentId,
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,
     })
@@ -2110,7 +2124,8 @@ function UnitySetupSection({
     const prepared = readPreparedConnection(primaryEnvironmentId);
     if (!prepared) return;
     let cancelled = false;
-    fetchUnitySetupProbe({
+    fetchUnitySetupProbeCached({
+      environmentId: primaryEnvironmentId,
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,
     })
