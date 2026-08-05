@@ -239,10 +239,30 @@ describe("EngineToolbar — Unity not-ready state renders the Setup CTA when an 
     expect(html).not.toContain("Setup Unity Integrations");
   });
 
-  it("does NOT render the CTA once Unity is ready", () => {
+  it("does NOT render the CTA once Unity is FULLY ready (nothing offered)", () => {
     const html = renderUnityToolbar(UNITY_READY_VIEW, { onSetupUnityIntegrations: () => {} });
 
     expect(html).not.toContain("Setup Unity Integrations");
+  });
+
+  it("S9 (#129): renders the CTA INSIDE the ready trio when the view still offers an install — Play works, chips are off, the click fixes it", () => {
+    const html = renderUnityToolbar(
+      { ...UNITY_READY_VIEW, unityInstallOffered: true },
+      { onSetupUnityIntegrations: () => {} },
+    );
+
+    expect(html).toContain("Setup Unity Integrations");
+    // Still the ready trio around it — offering setup must not demote the
+    // working controls back to the not-ready branch.
+    expect(html).toContain(">Play<");
+    expect(html).toContain(">Stop<");
+  });
+
+  it("S9 render is handler-gated like the not-ready CTA: no handler, no CTA, trio intact", () => {
+    const html = renderUnityToolbar({ ...UNITY_READY_VIEW, unityInstallOffered: true });
+
+    expect(html).not.toContain("Setup Unity Integrations");
+    expect(html).toContain(">Play<");
   });
 });
 

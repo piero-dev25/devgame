@@ -103,14 +103,16 @@ export interface EngineToolbarProps {
    */
   readonly onRetryUnitySetup?: () => void;
   /**
-   * Installs Unity's Pipeline package directly — no chat turn, no agent, no
-   * second confirmation dialog (owner ruling, mid-build revision: the click
-   * IS the consent). Calls `postUnityPipelineInstall` (see
+   * Installs BOTH Unity packages directly (Pipeline via the CLI, the
+   * selection package as an embedded copy — f95c1731c) — no chat turn, no
+   * agent, no second confirmation dialog (owner ruling, mid-build revision:
+   * the click IS the consent). Calls `postUnityPipelineInstall` (see
    * `ChatView.tsx`'s `handleSetupUnityIntegrations`, the sole implementation
-   * of this prop). Only ever rendered/called for the `"unity-cli"`
-   * backend's not-ready state, and only while `EngineToolbarView.unityInstallOffered`
-   * is true — see that field's own doc comment in `EngineToolbar.logic.ts`
-   * for exactly which not-ready reasons an install can fix.
+   * of this prop). Rendered while `EngineToolbarView.unityInstallOffered`
+   * is true — in the not-ready branch (Pipeline missing) AND in the ready
+   * trio (S9: Play works, selection package missing — chips silently off,
+   * #129); see `shouldOfferUnityPipelineInstall`'s doc comment for the
+   * exact facts.
    *
    * `unitySetupPrompt.ts` — the chat-turn prompt builder this doc comment
    * used to point at — was deleted with the CTA's install-direct revision;
@@ -462,6 +464,20 @@ function ControlCluster(props: {
     const stopLabel = engaged ? "Stop" : "Nothing is playing to stop.";
     return (
       <div className="flex shrink-0 items-center gap-1">
+        {/* S9 (#129): Play works but the SELECTION package is missing —
+            chips are silently off, which the owner hit live. The one click
+            installs both packages now (f95c1731c), so the ready trio
+            offers the same filled CTA the not-ready branch does whenever
+            `unityInstallOffered` says a click would fix something. Gated on
+            the same facts predicate; disappears as soon as the embedded
+            copy lands (the probe reads the embedded package.json without
+            waiting for Unity's resolver). Pairing (S10) never offers this
+            — that step is a human's. */}
+        {view.unityInstallOffered && props.onSetupUnityIntegrations ? (
+          <Button size="xs" variant="default" onClick={() => props.onSetupUnityIntegrations?.()}>
+            Setup Unity Integrations
+          </Button>
+        ) : null}
         {/* QA round 2 (#124): `aria-disabled`, not `disabled` — see
             `ThreeJsPlayButton`'s doc comment for why. No onClick to guard;
             this control never had one. */}

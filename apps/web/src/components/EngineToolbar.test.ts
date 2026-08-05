@@ -519,14 +519,39 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
       expect(view.unityInstallOffered).toBe(false);
     });
 
-    it("false once ready — mutually exclusive with a working control cluster; nothing left to install and nothing to offer installing", () => {
+    it("false once FULLY ready (selection installed too) — nothing left to install and nothing to offer installing", () => {
       const view = resolveEngineToolbarView({
         engineType: "unity",
         connectedEditor: null,
-        unitySetup: probeResult(readyFacts(), S11),
+        // #129: the default fixture's selection package is MISSING, which
+        // is now itself an installation opportunity (the click installs
+        // both packages) — pin it installed so this case isolates "truly
+        // nothing left".
+        unitySetup: probeResult(
+          readyFacts({
+            selectionPackage: {
+              installed: true,
+              resolvedVersion: "0.1.0",
+              declaredInManifest: false,
+            },
+          }),
+          S11,
+        ),
       });
       expect(view.availableActions).toEqual(["play", "pause", "stop"]);
       expect(view.unityInstallOffered).toBe(false);
+    });
+
+    it("S9 (#129): STILL offered while play-ready when only the selection package is missing — Play works, chips are off, and the click fixes it", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        // readyFacts() default: pipeline installed, selection missing.
+        unitySetup: probeResult(readyFacts(), S11),
+      });
+      // Ready AND offered — the two are no longer mutually exclusive.
+      expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+      expect(view.unityInstallOffered).toBe(true);
     });
 
     it("true for S5 (Unity not open, package missing) — corrected from this suite's own earlier version: install needs no live Editor, so S5 is offered identically to S4", () => {
@@ -776,8 +801,38 @@ describe("shouldOfferUnityPipelineInstall — offered (package missing is the on
 });
 
 describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an install genuinely can't fix)", () => {
-  it("withholds when the package is already installed — nothing to add", () => {
-    expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(false);
+  it("withholds when BOTH packages are already installed — nothing to add", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("offers at S9 (#129): pipeline installed but the selection package missing — the click installs it", () => {
+    // readyFacts() default IS S9's package state (selection missing).
+    expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(true);
+  });
+
+  it("withholds at S10 (selection installed but not paired) — pairing is a human's step, a click can't do it", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
+          selectionPublisherRegistered: false,
+        }),
+      ),
+    ).toBe(false);
   });
 
   it("withholds when the CLI isn't available — install can't run at all", () => {
@@ -791,11 +846,16 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
     ).toBe(false);
   });
 
-  it("withholds when the package is already declared in the manifest (S13: added, Unity hasn't resolved it yet) — re-installing has nothing left to do", () => {
+  it("withholds when the pipeline package is declared in the manifest (S13) AND selection is installed — re-installing has nothing left to do", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
           pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: true },
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
         }),
       ),
     ).toBe(false);

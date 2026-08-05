@@ -177,12 +177,22 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * a real, separate design question this change does not answer.
  */
 export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean {
-  return (
-    facts.isUnityProject &&
-    facts.cliAvailable &&
-    !facts.pipelinePackage.installed &&
-    !facts.pipelinePackage.declaredInManifest
-  );
+  if (!facts.isUnityProject || !facts.cliAvailable) {
+    return false;
+  }
+  const pipelineMissing =
+    !facts.pipelinePackage.installed && !facts.pipelinePackage.declaredInManifest;
+  // The one click now installs BOTH packages (f95c1731c), so a missing
+  // SELECTION package is an installation opportunity too — the owner hit
+  // exactly this live: Pipeline installed, Play working, chips silently
+  // off, and nothing to click (#129). `installed` flips as soon as the
+  // embedded copy lands (the probe reads the embedded package.json without
+  // waiting for Unity's resolver), so the CTA disappears right after a
+  // successful click rather than lingering until Unity re-resolves.
+  // Pairing (S10) is deliberately NOT offered: that step is a human's
+  // (mint a token, paste it in Unity) — a click can't do it.
+  const selectionMissing = !facts.selectionPackage.installed;
+  return pipelineMissing || selectionMissing;
 }
 
 /** The message to show when Unity's controls are disabled — `primary`'s own
@@ -419,9 +429,12 @@ export function resolveEngineToolbarView(input: {
       unitySetupCheckFailed: !playReady && setup === null && unitySetupError !== null,
       // `setup !== null` guards the same "unknown treated as not-ready" way
       // `playReady` itself does — no probe result yet means no CTA, not a
-      // default-to-offered guess.
-      unityInstallOffered:
-        !playReady && setup !== null && shouldOfferUnityPipelineInstall(setup.facts),
+      // default-to-offered guess. Deliberately NOT gated on `!playReady`
+      // any more: S9 (Pipeline working, selection package missing) is
+      // play-ready AND install-fixable, and the owner's "loud when setup
+      // is needed, quiet once it works" applies to chips too — the ready
+      // trio renders the CTA alongside a working Play in that state.
+      unityInstallOffered: setup !== null && shouldOfferUnityPipelineInstall(setup.facts),
       unitySetupPending: input.unitySetupPending ?? false,
     };
   }
