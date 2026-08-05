@@ -74,8 +74,19 @@ function isInsideButton(html: string, text: string): boolean {
 // disabled or not — that string match would report every button as
 // disabled, catching nothing. Found by running this suite against the fix
 // and getting a false failure on an ENABLED Play button.
+//
+// QA round 2 (#124): every disabled-with-a-tooltip button in this file now
+// uses `aria-disabled="true"` instead of the native `disabled` attribute —
+// native `disabled` makes a browser skip the element during hit-testing,
+// which silently kills its Tooltip's hover trigger along with the click
+// (see `ThreeJsPlayButton`'s own doc comment in EngineToolbar.tsx for the
+// full root cause a live QA pass confirmed). "Disabled" in this file's
+// markup can now mean either mechanism depending on which control it is —
+// this helper checks both, so every EXISTING call site below keeps meaning
+// "is this button disabled," not "does this button happen to use the OLD
+// mechanism."
 function isDisabled(buttonHtml: string): boolean {
-  return /\sdisabled=""/.test(buttonHtml);
+  return /\sdisabled=""/.test(buttonHtml) || /\saria-disabled="true"/.test(buttonHtml);
 }
 
 describe("EngineToolbar three.js Play button accessible name (#111)", () => {
@@ -458,5 +469,93 @@ describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
 
     expect(hasAriaLabel(html, "No editor connected")).toBe(false);
     expect(hasAriaLabel(html, "No editor is connected for this project.")).toBe(true);
+  });
+});
+
+// QA round 2 (#124): a live computer-use pass hovered the disabled Play
+// button in the chat header for ~1.8s — the accessible name read correctly
+// on focus, but no visible tooltip ever appeared. Root cause: a browser
+// skips a natively `disabled` element during hit-testing, so it never
+// receives pointer events (mouseenter/mouseover included) — a
+// Tooltip/TooltipTrigger wrapped around a `disabled` button can therefore
+// never open on hover, for ANY sighted pointer user, not just this one
+// instance. The fix swaps every disabled-with-a-tooltip control in this
+// file from the native `disabled` attribute to `aria-disabled`, which the
+// browser does NOT exempt from hit-testing (and which leaves the control
+// keyboard-focusable too — a genuine improvement, not a side effect).
+//
+// HONEST LIMIT (stated up front, not discovered after the fact): this
+// codebase's tests render via `renderToStaticMarkup` — no jsdom, no real
+// event dispatch (see `TerminalDockPanel.test.tsx`'s own doc comment).
+// These tests can only prove the STRUCTURAL precondition for hover to work
+// — the native `disabled` attribute is genuinely gone, `aria-disabled`
+// genuinely present — not that hovering actually opens the tooltip, and
+// not that the Stop button's click guard actually no-ops on a real click.
+// Both remain open until the next live QA pass.
+function hasNativeDisabled(buttonHtml: string): boolean {
+  return /\sdisabled=""/.test(buttonHtml);
+}
+
+function hasAriaDisabledTrue(buttonHtml: string): boolean {
+  return /\saria-disabled="true"/.test(buttonHtml);
+}
+
+function findButtonByContent(html: string, marker: string): string | undefined {
+  const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+  return buttons.find((block) => block.includes(marker));
+}
+
+describe("EngineToolbar — disabled-with-tooltip controls stay hoverable/focusable (#124)", () => {
+  it("the disabled Play button (Unity not-ready, no install offered) uses aria-disabled, never the native attribute", () => {
+    const html = renderUnityToolbar(UNITY_NOT_READY_NO_INSTALL_VIEW);
+    const playButton = findButtonByContent(html, ">Play<");
+
+    expect(playButton).toBeDefined();
+    expect(hasNativeDisabled(playButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(playButton ?? "")).toBe(true);
+  });
+
+  it("the 'Bring Unity to the front' button uses aria-disabled, never the native attribute", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW);
+    const unityButton = findButtonByContent(html, ">Unity<");
+
+    expect(unityButton).toBeDefined();
+    expect(hasNativeDisabled(unityButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(unityButton ?? "")).toBe(true);
+  });
+
+  it("Stop uses aria-disabled (never native) while nothing is playing, and carries no disabled marker at all once engaged", () => {
+    const stoppedHtml = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "stopped" });
+    const stopButtonStopped = findButtonByContent(stoppedHtml, ">Stop<");
+    expect(stopButtonStopped).toBeDefined();
+    expect(hasNativeDisabled(stopButtonStopped ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(stopButtonStopped ?? "")).toBe(true);
+
+    const playingHtml = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "playing" });
+    const stopButtonPlaying = findButtonByContent(playingHtml, ">Stop<");
+    expect(stopButtonPlaying).toBeDefined();
+    expect(hasNativeDisabled(stopButtonPlaying ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(stopButtonPlaying ?? "")).toBe(false);
+  });
+
+  it("the disabled three.js Play button uses aria-disabled, never the native attribute, and stays wrapped in its Tooltip", () => {
+    const reason = "Preview only runs in the DevGame desktop app, not a browser tab.";
+    const html = renderToolbar({ threeJsUnavailableReason: reason });
+    const playButton = findButtonByContent(html, ">Play<");
+
+    expect(playButton).toBeDefined();
+    expect(hasNativeDisabled(playButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(playButton ?? "")).toBe(true);
+    // The tooltip body is still present — the fix touches the attribute
+    // mechanism, not whether the Tooltip wrapper is there at all.
+    expect(html).toContain(reason);
+  });
+
+  it("the enabled three.js Play button carries no aria-disabled marker at all", () => {
+    const html = renderToolbar({ onPlayThreeJs: () => {} });
+    const playButton = findButtonByContent(html, ">Play<");
+
+    expect(playButton).toBeDefined();
+    expect(hasAriaDisabledTrue(playButton ?? "")).toBe(false);
   });
 });

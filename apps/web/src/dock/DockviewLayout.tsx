@@ -224,6 +224,64 @@ export interface DockviewLayoutHandle {
 }
 
 /**
+ * The Reset + Restore-maximized control cluster overlaid on the dock.
+ * Pulled out into its own named, exported component for one reason only —
+ * testability under QA round 2's fix (#125, see the call site's own doc
+ * comment for the full defect and the positioning fix itself): DockviewLayout
+ * only ever sets `maximizedGroupId` from the mount effect's
+ * `onDidMaximizedGroupChange` subscription, and this codebase's tests render
+ * via `renderToStaticMarkup` (no jsdom/testing-library — see
+ * `TerminalDockPanel.test.tsx`'s own doc comment), which never runs
+ * `useEffect`. There is no way to drive that state through the real
+ * `DockviewLayout` component in a test. This component takes it as a plain
+ * prop instead, so `DockControlsCluster.test.tsx` can render it directly
+ * with `maximizedGroupId` set and assert the real markup.
+ */
+export function DockControlsCluster(props: {
+  readonly maximizedGroupId: string | null;
+  readonly onReset: () => void;
+  readonly onRestoreMaximized: () => void;
+}) {
+  return (
+    <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
+      {/*
+        Task #109: dockview's own maximize (right-click a tab -> Maximize)
+        had NO visible way back — only the same right-click menu's "Restore"
+        item, or Escape (fix-round finding #6, added for the identical "no
+        way out" complaint but equally undiscoverable without already
+        knowing it exists). Rendered first (left side of this cluster) so it
+        never shifts Reset's position when it appears/disappears — Reset
+        stays flush against the cluster's own right edge either way.
+      */}
+      {props.maximizedGroupId !== null ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          aria-label="Restore maximized panel"
+          title="Restore maximized panel"
+          onClick={props.onRestoreMaximized}
+        >
+          <Minimize2 size={14} strokeWidth={2} />
+          Restore
+        </Button>
+      ) : null}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Reset workspace layout"
+        title="Reset workspace layout"
+        onClick={props.onReset}
+        className="text-muted-foreground hover:text-foreground"
+      >
+        <RotateCcw size={14} strokeWidth={2} />
+      </Button>
+    </div>
+  );
+}
+
+/**
  * Renders one live dock panel's content, reached through the portal store.
  * `PanelErrorBoundary` wraps ALL THREE branches (the real component, the
  * `QuarantinePanel` fallback, and — fix-round finding #1 — the
@@ -1016,53 +1074,41 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       <div className={cn("relative flex h-full min-h-0 flex-col", className)}>
         {notice ? <LayoutNotice message={notice} onDismiss={() => setNotice(null)} /> : null}
         {/*
-          Fix round, finding #1 ("app bricks in 3 clicks"): the reachable
-          recovery affordance for `DockviewLayoutHandle.reset()` — implemented
-          since step 1, never attached to anything a person could actually
-          click. A SIBLING of `containerRef`'s div, not a child, and
-          absolutely positioned over it: it must render (and stay clickable)
+          Fix round, finding #1 ("app bricks in 3 clicks") + task #109 +
+          QA round 2 (#125): both the Reset and Restore-maximized controls
+          are a SIBLING of `containerRef`'s div, not a child, absolutely
+          positioned over it — they must render (and stay clickable)
           regardless of whatever dockview itself is currently showing in
-          there, blank or not — the whole point is this can't itself become
-          part of the brick. The empty-layout guards above make reaching a
-          genuinely blank dock unlikely now, but this is deliberately
-          unconditional, not shown only when things look broken: a
-          defense-in-depth escape hatch for any OTHER way this workspace's
-          layout could end up stuck that this fix round didn't anticipate.
+          there, blank or not.
+
+          Originally two INDEPENDENTLY absolutely-positioned buttons —
+          Restore at `top-1.5 left-1.5`, deliberately the opposite corner
+          from Reset's `top-1.5 right-1.5` — reasoned (correctly, for two
+          buttons that can each only collide with each other) to never
+          overlap. What that reasoning missed: in the packaged Electron
+          window, the macOS traffic-light controls are ALWAYS overlaid at
+          the extreme top-left, a THIRD occupant of that corner neither
+          button's own positioning accounted for. Restore landed
+          underneath/against them — technically clickable, but a QA pass
+          reported it wasn't findable without already being told it was
+          there, and looked broken.
+
+          Fixed by giving up on per-button absolute coordinates entirely:
+          both controls now live in `DockControlsCluster` (above) as ONE
+          absolutely-positioned flex cluster anchored at `top-1.5 right-1.5`
+          (Reset's old corner, clear of the traffic lights on every platform
+          this app ships for — a right-side cluster is the one corner an OS
+          never overlays its own window chrome onto). A flex row with
+          `gap-1` can't overlap its own children by construction, so the
+          original never-overlap property is preserved for free, and stays
+          true even if a third control is ever added here later — no new
+          magic offset to pick and verify.
         */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label="Reset workspace layout"
-          title="Reset workspace layout"
-          onClick={handleReset}
-          className="absolute top-1.5 right-1.5 z-10 text-muted-foreground hover:text-foreground"
-        >
-          <RotateCcw size={14} strokeWidth={2} />
-        </Button>
-        {/*
-          Task #109: dockview's own maximize (right-click a tab -> Maximize)
-          had NO visible way back — only the same right-click menu's
-          "Restore" item, or Escape (fix-round finding #6, added for the
-          identical "no way out" complaint but equally undiscoverable
-          without already knowing it exists). A SIBLING of `containerRef`'s
-          div, same positioning approach as the Reset button above, opposite
-          corner so the two can never overlap when both are visible at once.
-        */}
-        {maximizedGroupId !== null ? (
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            aria-label="Restore maximized panel"
-            title="Restore maximized panel"
-            onClick={handleRestoreMaximized}
-            className="absolute top-1.5 left-1.5 z-10"
-          >
-            <Minimize2 size={14} strokeWidth={2} />
-            Restore
-          </Button>
-        ) : null}
+        <DockControlsCluster
+          maximizedGroupId={maximizedGroupId}
+          onReset={handleReset}
+          onRestoreMaximized={handleRestoreMaximized}
+        />
         <div ref={containerRef} className="min-h-0 flex-1" />
         {panelEntries.map((entry) =>
           createPortal(

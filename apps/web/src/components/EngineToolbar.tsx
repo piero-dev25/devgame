@@ -181,19 +181,37 @@ function ThreeJsPlayButton(props: {
   // preview" bug (and #107's Unity twin) drifted from the real disabled
   // reason. One expression, two consumers, divergence impossible.
   const label = props.onPlay || !props.unavailableReason ? "Run preview" : props.unavailableReason;
+  // QA round 2 (#124): a NATIVELY `disabled` control never receives pointer
+  // events (mouseenter/mouseover) — browsers skip disabled form controls
+  // during hit-testing — so a Tooltip/TooltipTrigger wrapped around one can
+  // never open on hover. The accessible name was always correct (aria-label
+  // doesn't depend on hover), but a sighted pointer user — exactly the
+  // audience `unavailableReason` exists for — saw nothing. `aria-disabled`
+  // instead of `disabled` keeps the element in the pointer AND focus flow
+  // (a genuine improvement: it's now keyboard-reachable too) so the
+  // tooltip/focus-visible ring can actually fire; the disabled LOOK
+  // (`cursor-not-allowed`/dimmed) is now hand-drawn via `className` since
+  // the base button's `disabled:opacity-64` Tailwind variant no longer
+  // applies without the native attribute. No separate click guard needed
+  // here — `props.onPlay?.()` was already a no-op when `onPlay` is absent.
+  // Same fix applied at every other disabled+Tooltip instance in this file
+  // (`disabledPlayButton`, "Bring Unity to the front", Stop) — see those
+  // call sites for the one variant that DOES need an explicit guard.
+  const disabled = !props.onPlay;
   const button = (
     <Button
       size="xs"
       variant="outline"
       aria-label={label}
-      disabled={!props.onPlay}
+      aria-disabled={disabled || undefined}
+      className={disabled ? "cursor-not-allowed opacity-64" : undefined}
       onClick={() => props.onPlay?.()}
     >
       <PlayIcon className="size-3.5" aria-hidden />
       <span className="ml-0.5">Play</span>
     </Button>
   );
-  if (props.onPlay || !props.unavailableReason) return button;
+  if (!disabled || !props.unavailableReason) return button;
   return (
     <Tooltip>
       <TooltipTrigger render={button} />
@@ -264,11 +282,23 @@ function ControlCluster(props: {
     // `reason` had Unity's own specific classified message. Same fix as
     // #111's `ThreeJsPlayButton`/`RightPanelMaximizeControl`: one expression
     // drives both the aria-label and the tooltip body, so they can't drift.
+    // QA round 2 (#124): `aria-disabled` + hand-drawn disabled styling
+    // instead of the native `disabled` attribute — see `ThreeJsPlayButton`'s
+    // own doc comment for the full root-cause explanation (natively
+    // disabled controls never receive pointer events, so a wrapping
+    // Tooltip's hover trigger never fires). No onClick here to guard —
+    // this button never had one.
     const disabledPlayButton = (
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button size="xs" variant="outline" disabled aria-label={reason}>
+            <Button
+              size="xs"
+              variant="outline"
+              aria-disabled="true"
+              className="cursor-not-allowed opacity-64"
+              aria-label={reason}
+            >
               <PlayIcon className="size-3.5" aria-hidden />
               <span className="ml-0.5">Play</span>
             </Button>
@@ -430,10 +460,19 @@ function ControlCluster(props: {
     const stopLabel = engaged ? "Stop" : "Nothing is playing to stop.";
     return (
       <div className="flex shrink-0 items-center gap-1">
+        {/* QA round 2 (#124): `aria-disabled`, not `disabled` — see
+            `ThreeJsPlayButton`'s doc comment for why. No onClick to guard;
+            this control never had one. */}
         <Tooltip>
           <TooltipTrigger
             render={
-              <Button size="xs" variant="outline" disabled aria-label="Bring Unity to the front">
+              <Button
+                size="xs"
+                variant="outline"
+                aria-disabled="true"
+                className="cursor-not-allowed opacity-64"
+                aria-label="Bring Unity to the front"
+              >
                 Unity
               </Button>
             }
@@ -459,15 +498,24 @@ function ControlCluster(props: {
           />
           <TooltipPopup side="bottom">{toggleLabel}</TooltipPopup>
         </Tooltip>
+        {/* QA round 2 (#124): `aria-disabled`, not `disabled` — see
+            `ThreeJsPlayButton`'s doc comment for why. Unlike the other three
+            instances, this one's onClick is unconditional, so removing the
+            native attribute needs an explicit no-op guard — a keyboard user
+            can now focus and "activate" this control while nothing is
+            playing, and it must genuinely do nothing when they do. */}
         <Tooltip>
           <TooltipTrigger
             render={
               <Button
                 size="xs"
                 variant="outline"
-                disabled={!engaged}
+                aria-disabled={!engaged || undefined}
+                className="aria-disabled:cursor-not-allowed aria-disabled:opacity-64"
                 aria-label={stopLabel}
-                onClick={() => props.onAction("stop")}
+                onClick={() => {
+                  if (engaged) props.onAction("stop");
+                }}
               >
                 <SquareIcon className="size-3.5" aria-hidden />
                 <span className="ml-0.5">Stop</span>
