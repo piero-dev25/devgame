@@ -51,6 +51,12 @@ export { openPanelInDock, togglePanelInDock } from "./openPanel";
 // active-panel selection — same "no jsdom to drive the ref" extraction
 // reason as openPanelInDock/togglePanelInDock above.
 export { restoreActivePanelForKey } from "./restoreActivePanel";
+// Task #109: which groups should be hidden from assistive tech while
+// another group is maximized — same extraction reason as the others above.
+export {
+  applyMaximizedGroupAccessibility,
+  type MaximizableGroup,
+} from "./maximizedGroupAccessibility";
 // Fix round after 7606dff45: migrates a saved layout forward when the
 // catalog has grown, instead of the workspaceId-bump-and-discard pattern
 // that used to be the only way this dock handled that case.

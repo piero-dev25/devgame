@@ -25,7 +25,7 @@
 // twMerge(...)` signature, so every call site below is unchanged).
 import { createDockview, type DockviewApi, type DockviewTheme } from "dockview";
 import "dockview/dist/styles/dockview.css";
-import { RotateCcw } from "lucide-react";
+import { Minimize2, RotateCcw } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -43,6 +43,7 @@ import { selectActivePanelForKey, useDockActiveSelectionStore } from "~/dockActi
 import { cn } from "~/lib/utils";
 
 import {
+  applyMaximizedGroupAccessibility,
   buildLayoutFile,
   buildLayoutFilename,
   buildPresetSafely,
@@ -292,6 +293,14 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // place `activationKey` is read.
     const activationKeyRef = useRef(activationKey);
     const [notice, setNotice] = useState<string | null>(null);
+    // Task #109: which group (if any) is currently maximized — drives the
+    // visible "Restore" button below. dockview's own maximize mechanism
+    // (right-click a tab -> Maximize) has NO visible affordance to get back
+    // out; the only documented ways are that same context menu's "Restore"
+    // item or Escape (fix-round finding #6, added earlier for the identical
+    // "no way out" complaint). Neither is discoverable without already
+    // knowing it exists — this button is the third, visible one.
+    const [maximizedGroupId, setMaximizedGroupId] = useState<string | null>(null);
     // When the saved layout was refused because it's a *newer* schema version
     // than this build understands, the automatic save must not overwrite it
     // with a current-version file the instant the user touches anything —
@@ -521,6 +530,9 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // the loaded/default tree is still being applied" reason as the two
       // subscriptions above.
       let activePanelChangeSub: ReturnType<DockviewApi["onDidActivePanelChange"]> | undefined;
+      // Task #109: drives both the visible Restore button and the
+      // hidden-from-assistive-tech attributes on every non-maximized group.
+      let maximizedGroupSub: ReturnType<DockviewApi["onDidMaximizedGroupChange"]> | undefined;
       let persistTimer: ReturnType<typeof setTimeout> | undefined;
       // Tracks whether a debounced save is currently outstanding — separate
       // from `persistTimer` itself, which still holds the last timer id even
@@ -742,6 +754,27 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
             .getState()
             .setActivePanel(String(activationKeyRef.current), panel?.id ?? null);
         });
+        // Task #109: both the visible "Restore" button's state AND the
+        // hidden-from-assistive-tech attributes on every OTHER group are
+        // driven off this one subscription — one source of truth for
+        // "what's currently maximized," so the button and the a11y
+        // attributes can never disagree about it.
+        maximizedGroupSub = api.onDidMaximizedGroupChange(({ group, isMaximized }) => {
+          const nextMaximizedGroupId = isMaximized ? group.id : null;
+          setMaximizedGroupId(nextMaximizedGroupId);
+          applyMaximizedGroupAccessibility(api.groups, nextMaximizedGroupId);
+        });
+        // A saved layout CAN load already maximized (`gridview.js`'s
+        // `serialize()` includes `maximizedNode`) — `api.fromJSON()` above
+        // fires `onDidMaximizedGroupChange` internally when it does, but
+        // this subscription wasn't listening yet (deliberately — see this
+        // block's own opening comment on why subscriptions start only after
+        // load settles). Without this, a workspace that was left maximized
+        // would reopen maximized with no visible Restore button and no a11y
+        // attributes applied until the NEXT maximize-state change.
+        const initiallyMaximized = api.groups.find((group) => group.api.isMaximized());
+        setMaximizedGroupId(initiallyMaximized?.id ?? null);
+        applyMaximizedGroupAccessibility(api.groups, initiallyMaximized?.id ?? null);
       }
 
       void loadInitialLayout();
@@ -773,6 +806,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
         activePanelChangeSub?.dispose();
+        maximizedGroupSub?.dispose();
         api.dispose();
         apiRef.current = null;
       };
@@ -905,6 +939,13 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       [panelRegistry],
     );
 
+    // Task #109: the visible counterpart to the context-menu "Restore" item
+    // and Escape (fix-round finding #6) — see `maximizedGroupId`'s own
+    // comment for why neither of those is discoverable on its own.
+    const handleRestoreMaximized = useCallback(() => {
+      apiRef.current?.exitMaximizedGroup();
+    }, []);
+
     useImperativeHandle(
       forwardedRef,
       () => ({
@@ -957,6 +998,29 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         >
           <RotateCcw size={14} strokeWidth={2} />
         </Button>
+        {/*
+          Task #109: dockview's own maximize (right-click a tab -> Maximize)
+          had NO visible way back — only the same right-click menu's
+          "Restore" item, or Escape (fix-round finding #6, added for the
+          identical "no way out" complaint but equally undiscoverable
+          without already knowing it exists). A SIBLING of `containerRef`'s
+          div, same positioning approach as the Reset button above, opposite
+          corner so the two can never overlap when both are visible at once.
+        */}
+        {maximizedGroupId !== null ? (
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            aria-label="Restore maximized panel"
+            title="Restore maximized panel"
+            onClick={handleRestoreMaximized}
+            className="absolute top-1.5 left-1.5 z-10"
+          >
+            <Minimize2 size={14} strokeWidth={2} />
+            Restore
+          </Button>
+        ) : null}
         <div ref={containerRef} className="min-h-0 flex-1" />
         {panelEntries.map((entry) =>
           createPortal(
