@@ -22,7 +22,6 @@ import {
   ProviderDriverKind,
   RuntimeMode,
   TerminalOpenInput,
-  type UnitySetupProbeResult,
 } from "@t3tools/contracts";
 import {
   connectionStatusTitle,
@@ -223,7 +222,7 @@ import { resolveConnectedEditorForProject } from "../editorPresence/resolveProje
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
-import { fetchUnitySetupProbeCached } from "../unity/setupProbeCache";
+import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
 import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
@@ -1540,57 +1539,31 @@ function ChatViewContent(props: ChatViewProps) {
   useEffect(() => {
     setUnityPlayState(null);
   }, [activeProjectRef]);
-  // #92 increment 2: the probe-driven replacement for "always show the
-  // control cluster enabled, discover it doesn't work by clicking Play."
-  // Fetched on mount and whenever the project/resolved-engine changes —
-  // matching the plan's own "on demand" cadence (§1's cadence table: panel
-  // open / Play click / explicit refresh), not a poll. `null` (still
-  // loading, or fetch failed) is treated by `resolveEngineToolbarView` as
-  // "not confirmed ready yet," never as "assume enabled" — see
-  // `EngineToolbarView.unitySetup`'s own doc comment for why that default
-  // direction matters.
-  const [unitySetup, setUnitySetup] = useState<UnitySetupProbeResult | null>(null);
-  // Populated only on a REJECTED fetch — kept separate from `unitySetup`
-  // (rather than folded into it) so `resolveEngineToolbarView` can tell
-  // "still loading" apart from "loaded and failed." Found live (2026-08-04,
-  // team-lead + presence-authz): before this field existed, a rejected
-  // fetch left `unitySetup` at `null` FOREVER with no distinguishable
-  // failure state — "Checking Unity's status…" stayed on screen
-  // permanently instead of ever becoming a stated reason. See
-  // `unityDisabledReason`'s own doc comment (EngineToolbar.logic.ts).
-  const [unitySetupError, setUnitySetupError] = useState<string | null>(null);
-  useEffect(() => {
-    setUnitySetup(null);
-    setUnitySetupError(null);
-    if (resolvedEngineType !== "unity") return;
-    const prepared = readPreparedConnection(environmentId);
-    if (!prepared) return;
-    let cancelled = false;
-    fetchUnitySetupProbeCached({
-      environmentId,
-      httpBaseUrl: prepared.httpBaseUrl,
-      httpAuthorization: prepared.httpAuthorization,
-    })
-      .then((result) => {
-        if (!cancelled) setUnitySetup(result);
-      })
-      .catch((cause) => {
-        // Transport failure, a `presence:read`-scope refusal, or the fetch's
-        // own bound (fetchSetupProbe.ts's Effect.timeout) tripping — leaves
-        // `unitySetup` at `null` but now ALSO sets a real failure message,
-        // so the toolbar degrades to a disabled Play with the actual reason
-        // rather than a thrown exception or a permanently-loading state.
-        console.error("Failed to fetch Unity setup status:", cause);
-        if (!cancelled) {
-          setUnitySetupError(
-            cause instanceof Error ? cause.message : "Failed to check Unity's status.",
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProjectRef, resolvedEngineType, environmentId]);
+  // #92 increment 2 / #106 fix: the probe-driven replacement for "always
+  // show the control cluster enabled, discover it doesn't work by clicking
+  // Play." `unitySetupProbeAtom` (apps/web/src/unity/unitySetupProbeAtom.ts)
+  // REACTIVELY waits on the environment's prepared-connection atom becoming
+  // ready, rather than reading it as a one-shot snapshot — the root cause of
+  // #106: the OLD version of this effect called `readPreparedConnection`
+  // (a synchronous `appAtomRegistry.get(...)` read) exactly once per
+  // `[activeProjectRef, resolvedEngineType, environmentId]` tuple; if that
+  // snapshot ran before the environment's async connection-prep/auth
+  // handshake finished, the effect bailed out (`if (!prepared) return;`)
+  // having set NEITHER a result NOR an error, and nothing in that
+  // dependency array ever changed again to retry — a permanent "Checking
+  // Unity's status…" with no way out. `useEnvironmentQuery` (already used a
+  // few lines up for `activeEnvironmentShell`) is the established wrapper
+  // for exactly this shape of atom: `data`/`error`/`refresh` map onto the
+  // classified `UnitySetupProbeResult`, a stated failure reason (a rejected
+  // fetch OR the atom's own bounded wait for the connection timing out —
+  // never a silent, indefinite bail), and the toolbar's retry affordance.
+  // `null` when `resolvedEngineType !== "unity"` so no probe is even
+  // mounted for a non-Unity project.
+  const unitySetupQuery = useEnvironmentQuery(
+    resolvedEngineType === "unity" ? unitySetupProbeAtom(environmentId) : null,
+  );
+  const unitySetup = unitySetupQuery.data;
+  const unitySetupError = unitySetupQuery.error;
   const engineToolbarView = resolveEngineToolbarView({
     engineType: resolvedEngineType,
     connectedEditor: connectedProjectEditor,
@@ -5847,6 +5820,7 @@ function ChatViewContent(props: ChatViewProps) {
               : { onPlayThreeJs: handlePlayThreeJs })}
             hasPresenceCommandScope={hasPresenceCommandScope}
             onOpenConnectionsSettings={handleOpenConnectionsSettings}
+            onRetryUnitySetup={unitySetupQuery.refresh}
           />
         </header>
 

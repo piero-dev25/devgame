@@ -168,6 +168,78 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     expect(view.disabledReason).toBeNull();
   });
 
+  describe("unitySetupCheckFailed — #106's retry affordance gate", () => {
+    it("false while still loading (no unitySetup, no error yet) — a failed CHECK is a different thing from a check in flight", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: null,
+      });
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+
+    it("true when the check itself failed (no unitySetup, a real error) — this is what unlocks the toolbar's Retry control", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: null,
+        unitySetupError: "Request timed out",
+      });
+      expect(view.unitySetupCheckFailed).toBe(true);
+    });
+
+    it("false once a real classified state has arrived, even one that keeps Play disabled (S4, Pipeline package missing) — retrying a confirmed 'not set up yet' answer wouldn't change it", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(
+          readyFacts({
+            pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          }),
+          {
+            state: "S4",
+            message:
+              "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.",
+          },
+        ),
+      });
+      expect(view.disabledReason).not.toBeNull();
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+
+    it("false once a real classified state has arrived, even with a STALE error still hanging around from an earlier failed attempt", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts(), S11),
+        unitySetupError: "stale error from a previous attempt",
+      });
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+
+    it("false when Play is fully ready (S11)", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts(), S11),
+      });
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+
+    it("always false for non-unity-cli backends — editor-presence has no probe to fail", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "godot",
+        connectedEditor: null,
+      });
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+
+    it("always false when no engine is resolved at all", () => {
+      const view = resolveEngineToolbarView({ engineType: null, connectedEditor: null });
+      expect(view.unitySetupCheckFailed).toBe(false);
+    });
+  });
+
   it("facts fully ready: play/pause/stop enabled, no disabledReason — no step, Pipeline has no scriptable frame step", () => {
     const view = resolveEngineToolbarView({
       engineType: "unity",

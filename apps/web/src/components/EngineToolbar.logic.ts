@@ -200,6 +200,19 @@ export interface EngineToolbarView {
    * paraphrase, and never `primary.state` itself for the enable/disable
    * decision (see `isUnityPlayReady`). */
   readonly disabledReason: string | null;
+  /**
+   * Whether `disabledReason` reflects a FAILED status check — a rejected
+   * `unitySetupProbeAtom` fetch, or the atom's own bounded wait for the
+   * environment's connection giving up (#106) — rather than a genuine
+   * classified state (S1-S13, e.g. "Pipeline package missing"). Only ever
+   * `true` for the `"unity-cli"` backend; always `false` otherwise. Drives
+   * whether the toolbar offers a Retry control: retrying a confirmed
+   * classifier state wouldn't change the answer (the project genuinely
+   * isn't set up yet), but retrying a failed/timed-out CHECK might — see
+   * `unityDisabledReason`'s doc comment for the two branches this
+   * distinguishes.
+   */
+  readonly unitySetupCheckFailed: boolean;
 }
 
 function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): ReadonlySet<string> {
@@ -251,6 +264,7 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unitySetupCheckFailed: false,
     };
   }
 
@@ -265,11 +279,13 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unitySetupCheckFailed: false,
     };
   }
 
   if (backend === "unity-cli") {
     const setup = input.unitySetup ?? null;
+    const unitySetupError = input.unitySetupError ?? null;
     const playReady = setup !== null && isUnityPlayReady(setup.facts);
     return {
       engineType,
@@ -278,7 +294,13 @@ export function resolveEngineToolbarView(input: {
       hasConnectedEditor: false,
       availableActions: playReady ? UNITY_CLI_ACTIONS : [],
       playState: input.unityPlayState ?? null,
-      disabledReason: playReady ? null : unityDisabledReason(setup, input.unitySetupError ?? null),
+      disabledReason: playReady ? null : unityDisabledReason(setup, unitySetupError),
+      // A failed CHECK, not a confirmed classifier state — see this field's
+      // own doc comment. Only possible while `setup` is still `null`
+      // (`unityDisabledReason` only reads `error` in that branch); once a
+      // real `UnitySetupProbeResult` has arrived, `disabledReason` (if any)
+      // is always a classified S1-S13 sentence, never a failure.
+      unitySetupCheckFailed: !playReady && setup === null && unitySetupError !== null,
     };
   }
 
@@ -292,6 +314,7 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unitySetupCheckFailed: false,
     };
   }
   const actionSet = toActionSet(connectedEditor.capabilities);
@@ -303,6 +326,7 @@ export function resolveEngineToolbarView(input: {
     availableActions: CONTROL_ACTION_ORDER.filter((action) => actionSet.has(action)),
     playState: connectedEditor.playState,
     disabledReason: null,
+    unitySetupCheckFailed: false,
   };
 }
 

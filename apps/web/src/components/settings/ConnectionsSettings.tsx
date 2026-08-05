@@ -34,7 +34,6 @@ import {
   type UnitySetupFacts,
   type UnitySetupPackageLockState,
   type UnitySetupPipelineListOutcome,
-  type UnitySetupProbeResult,
 } from "@t3tools/contracts";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
 import {
@@ -142,10 +141,8 @@ import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
 import { useProjects } from "~/state/entities";
 import { readPreparedConnection } from "~/state/session";
-import {
-  fetchUnitySetupProbeCached,
-  invalidateUnitySetupProbeCache,
-} from "../../unity/setupProbeCache";
+import { invalidateUnitySetupProbeCache } from "../../unity/setupProbeCache";
+import { unitySetupProbeAtom } from "../../unity/unitySetupProbeAtom";
 import { postUnityPipelineInstall } from "../../unity/postPipelineInstall";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
@@ -2064,96 +2061,43 @@ function UnitySetupSection({
           return matches.length === 1 ? matches[0]! : null;
         })();
 
-  const [result, setResult] = useState<UnitySetupProbeResult | null>(null);
-  // Populated only on a REJECTED fetch — kept separate from `result` so the
-  // render below can tell "still loading" apart from "loaded and failed."
-  // Found live (2026-08-04, team-lead + presence-authz): before this field
-  // existed, a rejected fetch left `result` at `null` FOREVER with no
-  // distinguishable failure state — this panel showed "Checking… / Reading
-  // this project's Unity setup." permanently, on a real owner build, with
-  // no way to tell whether it was still loading or had already failed.
-  const [fetchError, setFetchError] = useState<string | null>(null);
+  // #106 fix: `unitySetupProbeAtom` REACTIVELY waits on the environment's
+  // prepared-connection atom becoming ready, instead of reading it as a
+  // one-shot snapshot — see `ChatView.tsx`'s identical wiring (same atom,
+  // same root cause, same fix) for the full mechanism writeup. The old
+  // version of this section had its own hand-rolled mount `useEffect` +
+  // `readPreparedConnection` snapshot, the SAME shape as ChatView.tsx's,
+  // and the SAME defect: if that snapshot ran before the environment's
+  // async connection-prep/auth handshake finished, the effect bailed out
+  // having set neither `result` nor `fetchError`, and nothing in its
+  // dependency array (`[primaryEnvironmentId]`) ever changed again to
+  // retry — this panel showed "Checking… / Reading this project's Unity
+  // setup." permanently, exactly the live QA finding (#95/#106).
+  // `useEnvironmentQuery` gives `data`/`error`/`refresh` for free, so this
+  // panel no longer hand-rolls its own mount effect or cancellation guard.
+  const unitySetupQuery = useEnvironmentQuery(
+    primaryEnvironmentId === null ? null : unitySetupProbeAtom(primaryEnvironmentId),
+  );
+  const result = unitySetupQuery.data;
+  const fetchError = unitySetupQuery.error;
 
-  // Extracted so `UnityPipelineInstallButton`'s post-install success
-  // handler can call the SAME fetch (not a reimplementation of it) to
-  // refresh this row's status without a full page reload, and so the
-  // failure row's Retry button (below) can re-run it too. Simpler than
-  // sharing the effect's own cancellation guard — a user-triggered retry
-  // is not racing a remount the way the mount-time fetch below is, so it
-  // doesn't need one.
-  const refetch = useCallback(() => {
+  // `useAtomRefresh` (inside `useEnvironmentQuery`) re-runs the atom's own
+  // Effect, but `fetchUnitySetupProbeCached`'s OWN 5s TTL cache
+  // (module-level, keyed by `environmentId`, `unity/setupProbeCache.ts`)
+  // sits IN FRONT of that fetch — a bare `refresh()` within the window
+  // would just replay the same cached value, reintroducing the exact S13
+  // staleness class (193abfb89): a just-installed package reporting itself
+  // as still missing moments after a real install. Invalidating the cache
+  // FIRST, same as the old `refetch`, is still required here for provably
+  // fresh data — unlike the toolbar's own retry in ChatView.tsx, whose only
+  // job is recovering from a FAILED check, which this cache never stores in
+  // the first place (a rejected fetch self-evicts immediately — see that
+  // module's own doc comment), so no invalidation is needed there.
+  const retryUnitySetupProbe = useCallback(() => {
     if (primaryEnvironmentId === null) return;
-    const prepared = readPreparedConnection(primaryEnvironmentId);
-    if (!prepared) return;
-    // Bypasses the cache rather than reading it — `refetch` is what
-    // `UnityPipelineInstallButton`'s `onInstalled` calls after a
-    // successful install, and this panel's own Retry button. Both want
-    // provably fresh data: serving a cached "not installed" moments after
-    // a real install just succeeded is the exact S13 defect class
-    // (193abfb89), now reachable through the cache instead of the
-    // classifier. Invalidating first also reseeds the cache with this
-    // fresh result, so ChatView's own mount-effect doesn't pay for a
-    // second real fetch if it asks again shortly after.
     invalidateUnitySetupProbeCache(primaryEnvironmentId);
-    fetchUnitySetupProbeCached({
-      environmentId: primaryEnvironmentId,
-      httpBaseUrl: prepared.httpBaseUrl,
-      httpAuthorization: prepared.httpAuthorization,
-    })
-      .then((value) => {
-        setResult(value);
-        setFetchError(null);
-      })
-      .catch((cause) => {
-        console.error("Failed to fetch Unity setup status:", cause);
-        setFetchError(
-          cause instanceof Error ? cause.message : "Failed to check this project's Unity setup.",
-        );
-      });
-  }, [primaryEnvironmentId]);
-
-  useEffect(() => {
-    // Fetched on mount and whenever the primary environment changes — this
-    // section has no "panel open" or "Play click" moment of its own to
-    // hook the plan's cadence table to; visiting this settings page IS the
-    // on-demand trigger here, same as the toolbar's own mount-time fetch
-    // in ChatView.tsx.
-    setResult(null);
-    setFetchError(null);
-    if (primaryEnvironmentId === null) return;
-    const prepared = readPreparedConnection(primaryEnvironmentId);
-    if (!prepared) return;
-    let cancelled = false;
-    fetchUnitySetupProbeCached({
-      environmentId: primaryEnvironmentId,
-      httpBaseUrl: prepared.httpBaseUrl,
-      httpAuthorization: prepared.httpAuthorization,
-    })
-      .then((value) => {
-        if (!cancelled) {
-          setResult(value);
-          setFetchError(null);
-        }
-      })
-      .catch((cause) => {
-        // Transport failure, a `presence:read`-scope refusal, or the
-        // fetch's own bound (fetchSetupProbe.ts's Effect.timeout)
-        // tripping — sets a real failure message so this panel can render
-        // a stated reason and a retry, never stay on "Checking…"
-        // indefinitely. Found live (2026-08-04, team-lead +
-        // presence-authz): before this, a rejected fetch left `result` at
-        // `null` FOREVER with no distinguishable failure state.
-        console.error("Failed to fetch Unity setup status:", cause);
-        if (!cancelled) {
-          setFetchError(
-            cause instanceof Error ? cause.message : "Failed to check this project's Unity setup.",
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [primaryEnvironmentId]);
+    unitySetupQuery.refresh();
+  }, [primaryEnvironmentId, unitySetupQuery.refresh]);
 
   const connection: PreparedUnityConnection | null =
     primaryEnvironmentId === null ? null : readPreparedConnection(primaryEnvironmentId);
@@ -2170,7 +2114,7 @@ function UnitySetupSection({
             title="Couldn't check Unity setup"
             description={fetchError}
             control={
-              <Button size="xs" variant="outline" onClick={refetch}>
+              <Button size="xs" variant="outline" onClick={retryUnitySetupProbe}>
                 Retry
               </Button>
             }
@@ -2188,7 +2132,7 @@ function UnitySetupSection({
           facts={result.facts}
           workspaceRoot={project?.workspaceRoot ?? ""}
           connection={connection}
-          onInstalled={refetch}
+          onInstalled={retryUnitySetupProbe}
         />
       )}
     </SettingsSection>

@@ -12,7 +12,14 @@
 // state Play is in) lives in `EngineToolbar.logic.ts`, already covered by
 // its own mutation-proven test suite — this file is deliberately thin.
 import type { EngineType } from "@t3tools/contracts";
-import { ChevronDownIcon, PauseIcon, PlayIcon, SquareIcon, StepForwardIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  PauseIcon,
+  PlayIcon,
+  RotateCcwIcon,
+  SquareIcon,
+  StepForwardIcon,
+} from "lucide-react";
 
 import {
   isPlayEngaged,
@@ -80,6 +87,15 @@ export interface EngineToolbarProps {
    */
   readonly hasPresenceCommandScope: boolean;
   readonly onOpenConnectionsSettings?: () => void;
+  /**
+   * Re-runs `unitySetupProbeAtom` for this environment (`useEnvironmentQuery`'s
+   * `refresh`, threaded down from `ChatView.tsx`) — the toolbar's escape
+   * hatch from a FAILED status check (see `EngineToolbarView.unitySetupCheckFailed`),
+   * closing the "unbounded spinner with no way out" half of #106.
+   * `ConnectionsSettings.tsx`'s Settings panel already has an equivalent
+   * Retry button; this is the toolbar's.
+   */
+  readonly onRetryUnitySetup?: () => void;
 }
 
 export function EngineToolbar(props: EngineToolbarProps) {
@@ -121,6 +137,7 @@ export function EngineToolbar(props: EngineToolbarProps) {
           {...(props.onOpenConnectionsSettings
             ? { onOpenConnectionsSettings: props.onOpenConnectionsSettings }
             : {})}
+          {...(props.onRetryUnitySetup ? { onRetryUnitySetup: props.onRetryUnitySetup } : {})}
         />
       ) : null}
     </div>
@@ -176,6 +193,8 @@ function ControlCluster(props: {
   readonly hasPresenceCommandScope: boolean;
   readonly onAction: (action: EngineToolbarAction) => void;
   readonly onOpenConnectionsSettings?: () => void;
+  /** See `EngineToolbarProps.onRetryUnitySetup`'s own doc comment. */
+  readonly onRetryUnitySetup?: () => void;
 }) {
   const { view } = props;
 
@@ -215,7 +234,7 @@ function ControlCluster(props: {
       (view.hasConnectedEditor
         ? "The connected editor hasn't advertised any commands yet."
         : "No editor is connected for this project.");
-    return (
+    const disabledPlayButton = (
       <Tooltip>
         <TooltipTrigger
           render={
@@ -227,6 +246,35 @@ function ControlCluster(props: {
         />
         <TooltipPopup side="bottom">{reason}</TooltipPopup>
       </Tooltip>
+    );
+    // Retry only ever offered for a FAILED status check (a rejected fetch,
+    // or the probe atom's own bounded wait for the connection giving up —
+    // #106), never for a confirmed classifier state: retrying "Pipeline
+    // package missing" wouldn't produce a different answer, so no control
+    // is shown there — see `unitySetupCheckFailed`'s own doc comment.
+    if (!view.unitySetupCheckFailed || !props.onRetryUnitySetup) {
+      return disabledPlayButton;
+    }
+    const onRetryUnitySetup = props.onRetryUnitySetup;
+    return (
+      <div className="flex shrink-0 items-center gap-1">
+        {disabledPlayButton}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant="outline"
+                aria-label="Retry checking Unity's status"
+                onClick={() => onRetryUnitySetup()}
+              />
+            }
+          >
+            <RotateCcwIcon className="size-3.5" aria-hidden />
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">Retry checking Unity's status</TooltipPopup>
+        </Tooltip>
+      </div>
     );
   }
 

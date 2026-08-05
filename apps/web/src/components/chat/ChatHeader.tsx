@@ -62,6 +62,8 @@ interface ChatHeaderProps {
   threeJsUnavailableReason?: string;
   hasPresenceCommandScope: boolean;
   onOpenConnectionsSettings: () => void;
+  /** See `EngineToolbarProps.onRetryUnitySetup`'s own doc comment. */
+  onRetryUnitySetup?: () => void;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -103,6 +105,7 @@ export const ChatHeader = memo(function ChatHeader({
   threeJsUnavailableReason,
   hasPresenceCommandScope,
   onOpenConnectionsSettings,
+  onRetryUnitySetup,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const fileScripts = useT3ProjectFileScripts(
@@ -205,6 +208,7 @@ export const ChatHeader = memo(function ChatHeader({
             {...(threeJsUnavailableReason ? { threeJsUnavailableReason } : {})}
             hasPresenceCommandScope={hasPresenceCommandScope}
             onOpenConnectionsSettings={onOpenConnectionsSettings}
+            {...(onRetryUnitySetup ? { onRetryUnitySetup } : {})}
           />
         )}
       </div>
