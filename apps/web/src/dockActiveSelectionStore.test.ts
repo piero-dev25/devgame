@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { selectActivePanelForKey, useDockActiveSelectionStore } from "./dockActiveSelectionStore";
+import {
+  recordActivePanelForKey,
+  selectActivePanelForKey,
+  useDockActiveSelectionStore,
+} from "./dockActiveSelectionStore";
 
 beforeEach(() => {
   useDockActiveSelectionStore.setState({ byActivationKey: {} });
@@ -49,6 +53,48 @@ describe("dockActiveSelectionStore — setActivePanel", () => {
   it("clears the entry entirely when panelId is null", () => {
     useDockActiveSelectionStore.getState().setActivePanel("thread-A", "browser");
     useDockActiveSelectionStore.getState().setActivePanel("thread-A", null);
+
+    expect("thread-A" in useDockActiveSelectionStore.getState().byActivationKey).toBe(false);
+  });
+});
+
+// Task #108, QA round 3 reopen: `recordActivePanelForKey` is the WRITE-side
+// counterpart `DockviewLayout.tsx`'s mount effect now calls from BOTH the
+// top-level `onDidActivePanelChange` subscription AND (new this round) each
+// group's own `onDidActivePanelChange` — see that effect's own comment for
+// why the second one exists (a tab flip inside a group that isn't dockview's
+// currently-active group is invisible to the top-level event alone). These
+// tests cover the pure decision (is there a thread to record against, and
+// under which key string) as far as a function that writes into a real
+// Zustand store CAN be unit-tested — NOT the dockview-core subscription
+// wiring itself, which has no jsdom to drive; see this round's report for
+// what only live QA proves.
+describe("recordActivePanelForKey", () => {
+  it("activationKey: undefined is a silent no-op — never touches the store", () => {
+    recordActivePanelForKey(undefined, "browser");
+
+    expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+  });
+
+  it("records panelId under String(activationKey), readable back via selectActivePanelForKey", () => {
+    recordActivePanelForKey("thread-A", "browser");
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+    ).toBe("browser");
+  });
+
+  it("a numeric activationKey is converted via String(), the same conversion restoreActivePanelForThread's caller applies", () => {
+    recordActivePanelForKey(42, "diff");
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "42"),
+    ).toBe("diff");
+  });
+
+  it("panelId: null clears the key's entry — the shape DockviewLayout.tsx's `panel?.id ?? null` produces when nothing is active", () => {
+    recordActivePanelForKey("thread-A", "browser");
+    recordActivePanelForKey("thread-A", null);
 
     expect("thread-A" in useDockActiveSelectionStore.getState().byActivationKey).toBe(false);
   });

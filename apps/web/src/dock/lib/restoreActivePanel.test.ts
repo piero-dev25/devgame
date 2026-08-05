@@ -1,13 +1,29 @@
-import type { DockviewApi, IDockviewPanel } from "dockview";
+import type { DockviewApi, DockviewGroupPanel, IDockviewPanel } from "dockview";
 import { describe, expect, it } from "vite-plus/test";
 
 import { restoreActivePanelForKey, restoreActivePanelForThread } from "./restoreActivePanel";
 
-function fakePanel(id: string, onSetActive?: () => void): IDockviewPanel {
+function fakePanel(
+  id: string,
+  onSetActive?: () => void,
+  group?: DockviewGroupPanel,
+): IDockviewPanel {
   return {
     id,
+    group,
     api: { setActive: () => onSetActive?.() },
   } as unknown as IDockviewPanel;
+}
+
+// Task #108, QA round 3 reopen: models dockview-core's real
+// `panel.group.api.setActive()` -> `panel.api.setActive()` distinction (see
+// `restoreActivePanel.ts`'s own doc comment for the traced root cause) —
+// unlike `fakePanel` above, which has no group by default and stays that way
+// on purpose for the pre-existing tests below (they must keep passing
+// unmodified: a stub with no group at all is a real case this function has
+// to tolerate, not just the new one it now also has to get right).
+function fakeGroup(onSetActive: () => void): DockviewGroupPanel {
+  return { api: { setActive: onSetActive } } as unknown as DockviewGroupPanel;
 }
 
 function fakeApi(overrides: {
@@ -38,6 +54,52 @@ describe("restoreActivePanelForKey — a remembered panel is open in the live la
 
     expect(browserActivated).toBe(true);
     expect(chatActivated).toBe(false);
+  });
+});
+
+// Task #108, QA round 3 reopen ("per-thread tab selection leaks when two
+// panels share ONE dock group"): the ordering assertion here is the red case
+// for THIS round — it fails against a panel-only restore (the pre-fix
+// implementation calls only `panel.api.setActive()`, so `calls` would be
+// `["panel"]`, never reaching the group at all) and passes once the group is
+// activated first. See `restoreActivePanel.ts`'s own doc comment for why
+// that ordering, not the panel alone, is what actually closes the leak.
+describe("restoreActivePanelForKey — the panel's group is activated first (task #108 round 3)", () => {
+  it("activates the panel's GROUP before the panel itself", () => {
+    const calls: string[] = [];
+    const group = fakeGroup(() => calls.push("group"));
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "diff" ? fakePanel("diff", () => calls.push("panel"), group) : undefined,
+    });
+
+    restoreActivePanelForKey(api, { rememberedPanelId: "diff" });
+
+    expect(calls).toEqual(["group", "panel"]);
+  });
+
+  it("also orders the FALLBACK panel's group before the panel — the fallback path shares the same helper", () => {
+    const calls: string[] = [];
+    const group = fakeGroup(() => calls.push("group"));
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "chat" ? fakePanel("chat", () => calls.push("panel"), group) : undefined,
+    });
+
+    restoreActivePanelForKey(api, { rememberedPanelId: null, fallbackPanelId: "chat" });
+
+    expect(calls).toEqual(["group", "panel"]);
+  });
+
+  it("a panel with no group (stub/edge context) still activates — the group half is a safe no-op, not a throw", () => {
+    let panelActivated = false;
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "diff" ? fakePanel("diff", () => (panelActivated = true)) : undefined,
+    });
+
+    expect(() => restoreActivePanelForKey(api, { rememberedPanelId: "diff" })).not.toThrow();
+    expect(panelActivated).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-import type { DockviewApi } from "dockview";
+import type { DockviewApi, IDockviewPanel } from "dockview";
 
 import { selectActivePanelForKey } from "~/dockActiveSelectionStore";
 
@@ -26,6 +26,33 @@ import { selectActivePanelForKey } from "~/dockActiveSelectionStore";
  * stale leftover panel") true for a thread with no remembered selection yet
  * — a brand-new thread falls straight through to the same behaviour that
  * existed before this fix.
+ *
+ * Task #108, QA round 3 reopen ("per-thread tab selection leaks when two
+ * panels share ONE dock group"): activates the panel's GROUP
+ * (`panel.group.api.setActive()`) BEFORE the panel itself
+ * (`panel.api.setActive()`), not the panel alone. Root cause this closes —
+ * traced against the installed dockview-core@7.0.4 source, not assumed:
+ * dockview's top-level `onDidActivePanelChange` only re-broadcasts a group's
+ * internal tab flip when that flip's group is ALREADY dockview's own active
+ * group (`dockviewComponent.js`'s guard: `if (event.panel !==
+ * this.activePanel) return`, where `activePanel` reads as
+ * `activeGroup?.activePanel`). Calling `panel.api.setActive()` alone, on a
+ * panel whose group isn't yet the active one, sets that group's internal
+ * active tab correctly but leaves dockview's OWN active-group pointer
+ * unchanged — so the guard above still doesn't see this group as
+ * `activeGroup`, and a later, unrelated action that finally does activate
+ * the group can re-surface whichever tab was ALSO left active there by the
+ * OTHER thread's own visit, silently overwriting the restore this function
+ * just performed. `panel.group.api.setActive()` is wired straight through to
+ * `accessor.doSetGroupActive(this)` (`gridview/gridviewPanel.js`'s
+ * `GridviewPanel` constructor, inherited by every `DockviewGroupPanel`) —
+ * activating the group first makes it dockview's `activeGroup` BEFORE the
+ * panel-level `setActive()` below runs, so the guard's `activePanel` check
+ * already points at the right group by the time it matters.
+ * `panel.group` is guarded with `?.` rather than assumed present — a fake
+ * panel in a test stub (see `restoreActivePanel.test.ts`'s `fakePanel`) may
+ * not model a group at all, and that must stay a safe no-op for the group
+ * half, not a throw.
  */
 export function restoreActivePanelForKey(
   api: DockviewApi,
@@ -37,13 +64,20 @@ export function restoreActivePanelForKey(
   if (rememberedPanelId !== null) {
     const panel = api.getPanel(rememberedPanelId);
     if (panel) {
-      panel.api.setActive();
+      activatePanelInItsGroup(panel);
       return;
     }
   }
   if (fallbackPanelId !== undefined) {
-    api.getPanel(fallbackPanelId)?.api.setActive();
+    const panel = api.getPanel(fallbackPanelId);
+    if (panel) activatePanelInItsGroup(panel);
   }
+}
+
+/** See `restoreActivePanelForKey`'s own doc comment for why group-before-panel ordering matters. */
+function activatePanelInItsGroup(panel: IDockviewPanel): void {
+  panel.group?.api.setActive();
+  panel.api.setActive();
 }
 
 /**

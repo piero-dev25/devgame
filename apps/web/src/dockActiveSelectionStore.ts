@@ -74,3 +74,37 @@ export function selectActivePanelForKey(
   if (activationKey === undefined) return null;
   return byActivationKey[activationKey] ?? null;
 }
+
+/**
+ * The WRITE-side counterpart to `selectActivePanelForKey` above — records
+ * which panel is now active under a given activation key, silently no-oping
+ * when there's no thread yet (`activationKey === undefined`), the same guard
+ * `restoreActivePanelForThread` (`lib/restoreActivePanel.ts`) already applies
+ * on the read side.
+ *
+ * Task #108, QA round 3 reopen ("per-thread tab selection leaks when two
+ * panels share ONE dock group"): `DockviewLayout.tsx`'s mount effect calls
+ * this from TWO places now, not one — the top-level `DockviewApi`'s own
+ * `onDidActivePanelChange` (unchanged since the original fix), AND, per
+ * group, that group's own `DockviewGroupPanelApi.onDidActivePanelChange`.
+ * The second one exists because dockview-core's top-level event only
+ * re-broadcasts a group's internal tab flip when that group is ALREADY
+ * dockview's own active group (`dockviewComponent.js`'s re-broadcast guard:
+ * `if (event.panel !== this.activePanel) return`, where `activePanel` is
+ * `activeGroup?.activePanel`) — so two panels sharing one group (Files+Diff)
+ * flipping which of them is THAT group's active tab, while some other group
+ * is dockview's active one, was invisible to the top-level event alone. Both
+ * routes converge here rather than duplicating the "is there a thread to
+ * record against, and under which key string" decision inline at each call
+ * site — same extraction reasoning `selectActivePanelForKey` already
+ * applies, and this function is idempotent by construction (`setActivePanel`
+ * no-ops when the value hasn't changed), so both subscriptions firing for
+ * the SAME literal tab click is harmless, not a double-write bug.
+ */
+export function recordActivePanelForKey(
+  activationKey: string | number | undefined,
+  panelId: string | null,
+): void {
+  if (activationKey === undefined) return;
+  useDockActiveSelectionStore.getState().setActivePanel(String(activationKey), panelId);
+}

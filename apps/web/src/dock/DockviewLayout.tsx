@@ -23,7 +23,12 @@
 // set `allowImportingTsExtensions`), and `cn` comes from `~/lib/utils`
 // instead of the source's `lib/cn.ts` (identical `(...inputs) =>
 // twMerge(...)` signature, so every call site below is unchanged).
-import { createDockview, type DockviewApi, type DockviewTheme } from "dockview";
+import {
+  createDockview,
+  type DockviewApi,
+  type DockviewGroupPanel,
+  type DockviewTheme,
+} from "dockview";
 import "dockview/dist/styles/dockview.css";
 import { Minimize2, RotateCcw } from "lucide-react";
 import {
@@ -39,7 +44,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "~/components/ui/button";
-import { useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
+import { recordActivePanelForKey, useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
 import { cn } from "~/lib/utils";
 
 import {
@@ -611,6 +616,47 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // the loaded/default tree is still being applied" reason as the two
       // subscriptions above.
       let activePanelChangeSub: ReturnType<DockviewApi["onDidActivePanelChange"]> | undefined;
+      // Task #108, QA round 3 reopen ("per-thread tab selection leaks when
+      // two panels share ONE dock group"): `activePanelChangeSub` above only
+      // hears a tab flip once dockview-core's own top-level re-broadcast
+      // guard lets it through (`dockviewComponent.js`: `if (event.panel !==
+      // this.activePanel) return`, where `activePanel` reads as
+      // `activeGroup?.activePanel` — confirmed directly in the installed
+      // dockview-core@7.0.4 source, not assumed) — true ONLY for whichever
+      // group is CURRENTLY dockview's own active group. Two panels sharing
+      // one group (Files+Diff) can flip which of THEM is that group's own
+      // active tab while some OTHER group is dockview's active one; that
+      // flip is invisible to the guard, so the store never heard it and had
+      // nothing correct to restore on the next thread switch (see
+      // `restoreActivePanel.ts`'s doc comment for the restore-side half of
+      // this same fix). Each group's OWN `DockviewGroupPanelApi`
+      // `onDidActivePanelChange` has no such guard —
+      // `dockview/dockviewGroupPanel.js` wires it straight off the group's
+      // own model unconditionally (`this.model.onDidActivePanelChange(event
+      // => this.api._onDidActivePanelChange.fire(event))`) — so subscribing
+      // to EVERY group's own event, not just the top-level one, is what
+      // finally hears it. Kept alongside `activePanelChangeSub`, not instead
+      // of it: that subscription is still the only one that fires when
+      // dockview's ACTIVE GROUP itself changes with no tab flip inside it
+      // (switching focus to a different group whose own active tab was
+      // already correct) — `doSetGroupActive` fires the top-level event for
+      // exactly that case, and no group-scoped event does. Both routes
+      // converge on `recordActivePanelForKey`
+      // (`dockActiveSelectionStore.ts`), which is idempotent, so the same
+      // literal tab click firing both subscriptions is harmless, not a
+      // double-write bug.
+      //
+      // Keyed by group id (not held as a flat array/Set of disposables) so a
+      // group that's removed (its tabs all closed, or the split collapsed)
+      // can have its OWN subscription torn down individually via
+      // `onDidRemoveGroup` below, rather than leaking a disposable for a
+      // group that no longer exists until this whole effect unmounts.
+      const groupActivePanelChangeSubs = new Map<
+        string,
+        ReturnType<DockviewGroupPanel["api"]["onDidActivePanelChange"]>
+      >();
+      let addGroupSub: ReturnType<DockviewApi["onDidAddGroup"]> | undefined;
+      let removeGroupSub: ReturnType<DockviewApi["onDidRemoveGroup"]> | undefined;
       // Task #109: drives both the visible Restore button and the
       // hidden-from-assistive-tech attributes on every non-maximized group.
       let maximizedGroupSub: ReturnType<DockviewApi["onDidMaximizedGroupChange"]> | undefined;
@@ -849,10 +895,27 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // recreated on a thread switch — see the activationKey-change effect
         // above, the one place that ref is kept current.
         activePanelChangeSub = api.onDidActivePanelChange(({ panel }) => {
-          if (activationKeyRef.current === undefined) return;
-          useDockActiveSelectionStore
-            .getState()
-            .setActivePanel(String(activationKeyRef.current), panel?.id ?? null);
+          recordActivePanelForKey(activationKeyRef.current, panel?.id ?? null);
+        });
+        // Task #108, QA round 3 reopen: the per-GROUP half of the write
+        // side — see `groupActivePanelChangeSubs`'s own declaration above
+        // for why this is needed IN ADDITION TO `activePanelChangeSub`.
+        // Subscribes every group that exists right now, then keeps that set
+        // current as groups come and go (a split adds one; closing the last
+        // tab in a group removes it) via `onDidAddGroup`/`onDidRemoveGroup`.
+        const subscribeGroupActivePanelChange = (group: DockviewGroupPanel) => {
+          groupActivePanelChangeSubs.set(
+            group.id,
+            group.api.onDidActivePanelChange(({ panel }) => {
+              recordActivePanelForKey(activationKeyRef.current, panel.id);
+            }),
+          );
+        };
+        for (const group of api.groups) subscribeGroupActivePanelChange(group);
+        addGroupSub = api.onDidAddGroup(subscribeGroupActivePanelChange);
+        removeGroupSub = api.onDidRemoveGroup((group) => {
+          groupActivePanelChangeSubs.get(group.id)?.dispose();
+          groupActivePanelChangeSubs.delete(group.id);
         });
         // Task #109: both the visible "Restore" button's state AND the
         // hidden-from-assistive-tech attributes on every OTHER group are
@@ -906,6 +969,10 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
         activePanelChangeSub?.dispose();
+        for (const sub of groupActivePanelChangeSubs.values()) sub.dispose();
+        groupActivePanelChangeSubs.clear();
+        addGroupSub?.dispose();
+        removeGroupSub?.dispose();
         maximizedGroupSub?.dispose();
         api.dispose();
         apiRef.current = null;
