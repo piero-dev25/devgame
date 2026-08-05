@@ -47,14 +47,18 @@
  * attempted — a false "nothing's running" risks a second Editor instance,
  * which is worse than a refused launch the user can retry.
  *
- * SPAWNING IS NOT THE SAME AS "UNITY IS OPEN": `launchIssued` claims only
- * that the `unity open` invocation succeeded — see
- * `UnityPipelineClient.ts`'s `open`/`UnityPipelineOpenResult` doc comments
- * for why this route makes no stronger promise. A client that wants to
- * know when Unity has actually finished opening polls
- * `POST /unity/command` with `action: "status"` afterward, the same way
- * Play/Stop/Pause's own `dispatchAndConfirm` already reads status back
- * rather than trusting a command's bare accepted-or-not reply.
+ * SPAWNING IS NOT THE SAME AS "UNITY IS OPEN": `launchIssued`'s `launched:
+ * true` claims only that the `unity open` invocation succeeded — see
+ * `UnityPipelineClient.ts`'s `open`/`UnityPipelineOpenResult` doc comments.
+ * `open` DOES follow the play/stop/pause `dispatchAndConfirm` precedent —
+ * it polls `status` afterward with its own bounded budget
+ * (`COLD_START_CONFIRM_RETRY_ATTEMPTS`) and this route forwards whatever it
+ * found as `launchIssued.value.confirmedStatus` — but that budget is sized
+ * to catch the fast/warm-reopen case, not a full cold boot (license check,
+ * first import, asset database rebuild can run well past it). `null` is
+ * the ORDINARY outcome for a genuinely cold launch, never an error. A
+ * client that still wants a fresher answer after `confirmedStatus: null`
+ * polls `POST /unity/command` with `action: "status"` itself.
  */
 import {
   AuthPresenceCommandScope,
@@ -145,7 +149,13 @@ export const dispatchUnityColdStartLaunch = (
     if (openResult._tag === "ok") {
       return {
         _tag: "ok",
-        value: { _tag: "launchIssued", value: { launched: true } },
+        value: {
+          _tag: "launchIssued",
+          value: {
+            launched: true,
+            confirmedStatus: openResult.value.confirmedStatus,
+          },
+        },
       } as const;
     }
     if (openResult._tag === "cliUnavailable") {

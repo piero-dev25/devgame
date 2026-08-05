@@ -15,20 +15,31 @@
 // has.
 import * as Schema from "effect/Schema";
 
+import { UnityEditorStatus } from "./unity.ts";
+
 /** Deliberately EMPTY — same reasoning as `UnityPipelineInstallInput`. */
 export const UnityColdStartLaunchInput = Schema.Struct({});
 export type UnityColdStartLaunchInput = typeof UnityColdStartLaunchInput.Type;
 
 /** `unity open --json`'s successful outcome, restated minimally — see
  * `UnityPipelineClient.ts`'s `UnityPipelineOpenResult`/`open` doc comments
- * for why this carries no fields parsed from the CLI's own `data`: no
- * live-captured sample exists yet for `unity open --json`'s success
+ * for why `launched` carries no fields parsed from the CLI's own `data`:
+ * no live-captured sample exists yet for `unity open --json`'s success
  * payload (this round's task explicitly forbids launching a real Editor to
  * get one). `launched: true` is the honest boundary of what this contract
- * can promise — the invocation was accepted, not that Unity has finished
- * opening, or even that it will. */
+ * can promise on its own — the invocation was accepted, not that Unity has
+ * finished opening, or even that it will.
+ *
+ * `confirmedStatus` is the separate, later-arriving fact from `open`'s own
+ * bounded post-launch poll — `null` is the ORDINARY outcome for a
+ * genuinely cold launch (the poll's budget is sized to catch the fast/
+ * warm-reopen case, not a full cold boot; see
+ * `COLD_START_CONFIRM_RETRY_ATTEMPTS`'s own doc comment), never treated as
+ * an error. A non-null value is the same `UnityEditorStatus` shape
+ * `UnityCommandResult`'s `ok` already carries for Play/Stop/Pause. */
 export const UnityColdStartLaunchOutcome = Schema.Struct({
   launched: Schema.Literal(true),
+  confirmedStatus: Schema.NullOr(UnityEditorStatus),
 });
 export type UnityColdStartLaunchOutcome = typeof UnityColdStartLaunchOutcome.Type;
 

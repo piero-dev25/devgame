@@ -809,12 +809,28 @@ function unityOpenEnvelope(
 }
 
 describe("open (task #92's cold-start wiring — UnityColdStart.ts had zero callers before this)", () => {
-  it.effect("a successful envelope maps to { _tag: 'ok', value: { launched: true } }", () =>
-    Effect.gen(function* () {
-      const runner = callCountingRunner([unityOpenEnvelope()]);
-      const result = yield* withClient(runner.run, (client) => client.open(PROJECT));
-      expect(result).toEqual({ _tag: "ok", value: { launched: true } });
-    }),
+  it.effect(
+    "a successful launch envelope, followed by a status read that confirms immediately, maps to { _tag: 'ok', value: { launched: true, confirmedStatus } }",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([unityOpenEnvelope(), statusEnvelope("stopped")]);
+        const result = yield* withClient(runner.run, (client) => client.open(PROJECT));
+        expect(result).toEqual({
+          _tag: "ok",
+          value: {
+            launched: true,
+            confirmedStatus: {
+              status: "ready",
+              compiling: false,
+              domainReloadInProgress: false,
+              playMode: "stopped",
+              unityVersion: "6000.3.14f1",
+            },
+          },
+        });
+        // launch + exactly one confirming status read — no wasted retry budget.
+        expect(runner.callCount()).toBe(2);
+      }),
   );
 
   it.effect(
@@ -824,10 +840,14 @@ describe("open (task #92's cold-start wiring — UnityColdStart.ts had zero call
         const seen: Array<ProcessRunner.ProcessRunInput> = [];
         const runner = (input: ProcessRunner.ProcessRunInput) => {
           seen.push(input);
-          return okOutput(unityOpenEnvelope());
+          // First call is the launch itself; every call after that is the
+          // confirm-poll's own status read — answer it immediately so this
+          // test (which only cares about the FIRST call's argv) never
+          // needs TestClock.
+          return okOutput(seen.length === 1 ? unityOpenEnvelope() : statusEnvelope("stopped"));
         };
         yield* withClient(runner, (client) => client.open(PROJECT));
-        expect(seen).toHaveLength(1);
+        expect(seen).toHaveLength(2);
         const input = seen[0]!;
         expect(input.command).toBe("unity");
         expect(input.args).toEqual(["open", PROJECT, "--json"]);
@@ -838,6 +858,52 @@ describe("open (task #92's cold-start wiring — UnityColdStart.ts had zero call
         // returns, unlike every other method in this file.
         expect(input.detached).toBe(true);
       }),
+  );
+
+  it.effect(
+    "retries THROUGH a slow-to-appear status — launch ok, status errors twice, then confirms",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          unityOpenEnvelope(),
+          NO_PIPELINE_INSTANCE,
+          NO_PIPELINE_INSTANCE,
+          statusEnvelope("stopped"),
+        ]);
+        const fiber = yield* Effect.forkChild(
+          withClient(runner.run, (client) => client.open(PROJECT)),
+        );
+        // Two 2s retry delays to burn through before the third status read
+        // (which succeeds) — matches COLD_START_CONFIRM_RETRY_DELAY_MS.
+        yield* TestClock.adjust(Duration.seconds(2));
+        yield* TestClock.adjust(Duration.seconds(2));
+        const result = yield* Fiber.join(fiber);
+        expect(result._tag).toBe("ok");
+        if (result._tag !== "ok") return;
+        expect(result.value.launched).toBe(true);
+        expect(result.value.confirmedStatus?.playMode).toBe("stopped");
+        expect(runner.callCount()).toBe(4);
+      }).pipe(Effect.provide(TestClock.layer())),
+  );
+
+  it.effect(
+    "exhausting the confirm-poll's budget resolves confirmedStatus: null — the ORDINARY outcome for a real cold boot, not a failure",
+    () =>
+      Effect.gen(function* () {
+        // Launch succeeds, but EVERY status re-read fails — matches a real
+        // cold boot outlasting COLD_START_CONFIRM_RETRY_ATTEMPTS.
+        const runner = callCountingRunner([unityOpenEnvelope(), NO_PIPELINE_INSTANCE]);
+        const fiber = yield* Effect.forkChild(
+          withClient(runner.run, (client) => client.open(PROJECT)),
+        );
+        // 10 attempts at 2s each — advance well past all of them.
+        yield* TestClock.adjust(Duration.seconds(25));
+        const result = yield* Fiber.join(fiber);
+        expect(result).toEqual({
+          _tag: "ok",
+          value: { launched: true, confirmedStatus: null },
+        });
+      }).pipe(Effect.provide(TestClock.layer())),
   );
 
   it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>

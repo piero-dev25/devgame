@@ -146,17 +146,24 @@ describe("dispatchUnityColdStartLaunch", () => {
   );
 
   it.effect(
-    "no matching instance in `pipeline list` — calls UnityPipelineClient.open with ServerConfig.cwd, and reports launchIssued",
+    "no matching instance in `pipeline list` — calls UnityPipelineClient.open with ServerConfig.cwd, and reports launchIssued (confirmedStatus forwarded verbatim from UnityPipelineClient.open)",
     () =>
       Effect.gen(function* () {
+        const confirmedStatus: UnityPipelineClient.UnityEditorStatus = {
+          status: "ready",
+          compiling: false,
+          domainReloadInProgress: false,
+          playMode: "stopped",
+          unityVersion: "6000.3.14f1",
+        };
         const spy = makeUnityPipelineClientSpy({
           list: listOk([]),
-          open: { _tag: "ok", value: { launched: true } },
+          open: { _tag: "ok", value: { launched: true, confirmedStatus } },
         });
         const outcome = yield* runDispatchTest(spy, COMMAND_SESSION);
         expect(outcome).toEqual({
           _tag: "ok",
-          value: { _tag: "launchIssued", value: { launched: true } },
+          value: { _tag: "launchIssued", value: { launched: true, confirmedStatus } },
         });
         expect(spy.calls).toEqual([
           { method: "list", workspaceRoot: PROJECT },
@@ -182,12 +189,12 @@ describe("dispatchUnityColdStartLaunch", () => {
       Effect.gen(function* () {
         const spy = makeUnityPipelineClientSpy({
           list: listOk([runningInstance({ isRunning: false })]),
-          open: { _tag: "ok", value: { launched: true } },
+          open: { _tag: "ok", value: { launched: true, confirmedStatus: null } },
         });
         const outcome = yield* runDispatchTest(spy, COMMAND_SESSION);
         expect(outcome).toEqual({
           _tag: "ok",
-          value: { _tag: "launchIssued", value: { launched: true } },
+          value: { _tag: "launchIssued", value: { launched: true, confirmedStatus: null } },
         });
         expect(spy.calls).toEqual([
           { method: "list", workspaceRoot: PROJECT },
@@ -200,12 +207,12 @@ describe("dispatchUnityColdStartLaunch", () => {
     Effect.gen(function* () {
       const spy = makeUnityPipelineClientSpy({
         list: listOk([runningInstance({ projectPath: "/Users/piero/Projects/OtherGame" })]),
-        open: { _tag: "ok", value: { launched: true } },
+        open: { _tag: "ok", value: { launched: true, confirmedStatus: null } },
       });
       const outcome = yield* runDispatchTest(spy, COMMAND_SESSION);
       expect(outcome).toEqual({
         _tag: "ok",
-        value: { _tag: "launchIssued", value: { launched: true } },
+        value: { _tag: "launchIssued", value: { launched: true, confirmedStatus: null } },
       });
       expect(spy.calls).toEqual([
         { method: "list", workspaceRoot: PROJECT },

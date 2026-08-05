@@ -80,6 +80,23 @@ const POST_ACTION_STATUS_RETRY_DELAY_MS = 1000;
  * measurement demanded it — tighten once one exists. */
 const COLD_START_TIMEOUT_SEC = "90 seconds";
 
+/** Bounds the post-launch status poll `open` uses to confirm the Editor
+ * actually became reachable — the SAME "assert the effect, don't trust the
+ * command's own return code" principle `POST_ACTION_STATUS_RETRY_ATTEMPTS`
+ * exists for, deliberately NOT the same numbers. A full Unity cold boot
+ * (license check, first project import, asset database rebuild) can
+ * plausibly take anywhere from several seconds to multiple minutes — far
+ * longer than the few-second domain-reload gap `play`/`stop`/`pause` poll
+ * through, and there is no live measurement for it either (same
+ * constraint as `COLD_START_TIMEOUT_SEC`). Blocking an HTTP response for
+ * minutes on every genuinely cold launch would be worse than being honest
+ * that this budget only catches the FAST case — a warm OS cache, a small
+ * project, no license prompt. `confirmedStatus: null` on exhaustion is the
+ * ordinary, EXPECTED outcome for a real cold boot, not a failure signal;
+ * see `UnityPipelineOpenResult`'s own doc comment. */
+const COLD_START_CONFIRM_RETRY_ATTEMPTS = 10;
+const COLD_START_CONFIRM_RETRY_DELAY_MS = 2000;
+
 /** What the toolbar (#52) may offer for a Unity project reached via this
  * CLI path — deliberately NOT `"step"`: Pipeline has no scriptable
  * frame-step command (confirmed against the live `unity command --json`
@@ -278,15 +295,29 @@ export interface UnityPipelineInstallResult {
 }
 
 /** `unity open <workspaceRoot> --json`'s successful outcome — see `open`'s
- * own doc comment for why this carries NO fields read from the CLI's own
- * `data`, unlike every other result type in this file: no live-captured
- * `unity open --json` success sample exists yet to build a real parser
- * against (this round's task explicitly forbids launching a real Editor to
- * get one). `launched: true` asserts only what the envelope's own
- * `success` flag honestly supports — that the invocation was accepted, NOT
- * that Unity has finished opening, or even that it will. */
+ * own doc comment for why `launched` carries NO fields read from the CLI's
+ * own `data`, unlike every other result type in this file: no
+ * live-captured `unity open --json` success sample exists yet to build a
+ * real parser against (this round's task explicitly forbids launching a
+ * real Editor to get one). `launched: true` asserts only what the
+ * envelope's own `success` flag honestly supports — that the invocation
+ * was accepted, NOT that Unity has finished opening, or even that it
+ * will.
+ *
+ * `confirmedStatus` is the SEPARATE, later-arriving fact: `open` polls
+ * `status` afterward with its own bounded budget
+ * (`COLD_START_CONFIRM_RETRY_ATTEMPTS`) to catch the fast/warm-reopen
+ * case, mirroring the "assert the effect" principle
+ * `play`/`stop`/`pause`'s own status re-read already uses — but see that
+ * constant's doc comment for why a real cold boot can easily outlast the
+ * budget. `null` means "the launch was accepted, but the poll never saw
+ * the Editor become reachable within that window" — the ORDINARY outcome
+ * for a genuinely cold launch, not an error. A non-null value means the
+ * poll actually observed the Editor come up, and callers get the same
+ * `UnityEditorStatus` `play`/`stop`/`pause`/`status` already return. */
 export interface UnityPipelineOpenResult {
   readonly launched: true;
+  readonly confirmedStatus: UnityEditorStatus | null;
 }
 
 function isNullOr<A>(value: unknown, check: (value: unknown) => value is A): value is A | null {
@@ -627,6 +658,33 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  /** `open`'s own confirm-poll — same SHAPE as `confirmWithStatus` (bounded
+   * retry while `status` reads `notReady`), but a DIFFERENT budget
+   * (`COLD_START_CONFIRM_RETRY_ATTEMPTS`/`_DELAY_MS` — see their own doc
+   * comment) and a DIFFERENT return type: `UnityEditorStatus | null`
+   * rather than a full `UnityPipelineResult`, because unlike
+   * `dispatchAndConfirm` (where the action itself already succeeded and a
+   * failed confirm IS the caller's answer), a launch that was already
+   * accepted should never be reported as a FAILURE just because this
+   * opportunistic poll didn't catch the Editor coming up in time — `null`
+   * on ANY non-`ok` outcome (exhausted retries, a transient `error`, or
+   * even `cliUnavailable` — the CLI vanishing between the launch and the
+   * first status read shouldn't retroactively fail the launch either) is
+   * the honest "not confirmed yet," never propagated as an error. */
+  const confirmColdStartStatus = (
+    workspaceRoot: string,
+    attemptsRemaining: number,
+  ): Effect.Effect<UnityEditorStatus | null> =>
+    status(workspaceRoot).pipe(
+      Effect.flatMap((result) => {
+        if (result._tag === "ok") return Effect.succeed(result.value);
+        if (attemptsRemaining <= 1) return Effect.succeed(null);
+        return Effect.sleep(`${COLD_START_CONFIRM_RETRY_DELAY_MS} millis`).pipe(
+          Effect.flatMap(() => confirmColdStartStatus(workspaceRoot, attemptsRemaining - 1)),
+        );
+      }),
+    );
+
   /** `unity pipeline list --json` — no `--project-path` (plan §1's F14:
    * the flag doesn't exist for this subcommand), so this is a bare
    * `runUnityCommand` call, not `runEditorCommand` (which always appends
@@ -750,16 +808,31 @@ export const make = Effect.gen(function* () {
         detached: true,
       })
       .pipe(
-        Effect.map((output): UnityPipelineResult<UnityPipelineOpenResult> => {
+        Effect.flatMap((output): Effect.Effect<UnityPipelineResult<UnityPipelineOpenResult>> => {
           const envelope = parseUnityCliEnvelope(output.stdout);
           if (envelope === null) {
-            return { _tag: "error", message: "unparseable response from 'unity open'" };
+            return Effect.succeed({
+              _tag: "error",
+              message: "unparseable response from 'unity open'",
+            });
           }
           if (!envelope.success) {
             const message = envelope.errors[0]?.message ?? "unknown Pipeline error";
-            return { _tag: "error", message };
+            return Effect.succeed({ _tag: "error", message });
           }
-          return { _tag: "ok", value: { launched: true } };
+          // The launch itself is already a confirmed success at this point
+          // (the CLI's own envelope said so) — this poll only ADDS the
+          // opportunistic confirmedStatus fact on top, never turns a real
+          // launch into a reported failure. See COLD_START_CONFIRM_RETRY_
+          // ATTEMPTS/confirmColdStartStatus's own doc comments.
+          return confirmColdStartStatus(workspaceRoot, COLD_START_CONFIRM_RETRY_ATTEMPTS).pipe(
+            Effect.map(
+              (confirmedStatus): UnityPipelineResult<UnityPipelineOpenResult> => ({
+                _tag: "ok",
+                value: { launched: true, confirmedStatus },
+              }),
+            ),
+          );
         }),
         Effect.catch(processRunErrorToResult<UnityPipelineOpenResult>),
       );
