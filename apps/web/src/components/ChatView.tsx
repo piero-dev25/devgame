@@ -223,7 +223,6 @@ import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
-import { useEngineSelectorStore, selectProjectEngineType } from "../engineSelectorStore";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
@@ -1517,13 +1516,15 @@ function ChatViewContent(props: ChatViewProps) {
   // to be callable from anywhere (plain React hook, no singleton guard), so
   // a second subscriber is correct today, just not the cheapest shape.
   const engineToolbarEditorPresence = useEditorPresence(environmentId);
-  const engineSelectorOverrides = useEngineSelectorStore((state) => state.overrideByProjectKey);
-  const detectedEngineType: EngineType | null = activeProject?.engineType ?? null;
-  const resolvedEngineType = selectProjectEngineType(
-    engineSelectorOverrides,
-    activeProjectRef,
-    detectedEngineType,
-  );
+  // Owner ruling: "it's not a 'pick your project', it's just detection of
+  // project type, so we should not have it selectable." Was
+  // `selectProjectEngineType(overrideByProjectKey, ref, detectedEngineType)`
+  // — a client-local localStorage override (`engineSelectorStore.ts`,
+  // deleted with this change) that always won over detection. Now
+  // `resolvedEngineType` IS `activeProject.engineType`, full stop — no
+  // client-side value can ever disagree with the server's own detection
+  // again.
+  const resolvedEngineType: EngineType | null = activeProject?.engineType ?? null;
   const connectedProjectEditor = resolveConnectedEditorForProject(
     engineToolbarEditorPresence.editors,
     activeProject,
@@ -1588,13 +1589,6 @@ function ChatViewContent(props: ChatViewProps) {
     : !threeJsPlayScript
       ? 'No script has "Open preview automatically" configured for this project.'
       : null;
-  const handleSelectEngine = useCallback(
-    (engine: EngineType) => {
-      if (!activeProjectRef) return;
-      useEngineSelectorStore.getState().selectEngine(activeProjectRef, engine);
-    },
-    [activeProjectRef],
-  );
   const handleOpenConnectionsSettings = useCallback(() => {
     void navigate({ to: "/settings/connections" });
   }, [navigate]);
@@ -5813,7 +5807,6 @@ function ChatViewContent(props: ChatViewProps) {
             onDeleteProjectScript={deleteProjectScript}
             resolvedEngineType={resolvedEngineType}
             engineToolbarView={engineToolbarView}
-            onSelectEngine={handleSelectEngine}
             onEngineAction={handleEngineAction}
             {...(threeJsUnavailableReason
               ? { threeJsUnavailableReason }

@@ -56,7 +56,6 @@ interface ChatHeaderProps {
    */
   resolvedEngineType: EngineType | null;
   engineToolbarView: EngineToolbarView;
-  onSelectEngine: (engine: EngineType) => void;
   onEngineAction: (action: EngineToolbarAction) => void;
   onPlayThreeJs?: () => void;
   threeJsUnavailableReason?: string;
@@ -99,7 +98,6 @@ export const ChatHeader = memo(function ChatHeader({
   onDeleteProjectScript,
   resolvedEngineType,
   engineToolbarView,
-  onSelectEngine,
   onEngineAction,
   onPlayThreeJs,
   threeJsUnavailableReason,
@@ -202,7 +200,6 @@ export const ChatHeader = memo(function ChatHeader({
           <EngineToolbar
             resolvedEngineType={resolvedEngineType}
             view={engineToolbarView}
-            onSelectEngine={onSelectEngine}
             onAction={onEngineAction}
             {...(onPlayThreeJs ? { onPlayThreeJs } : {})}
             {...(threeJsUnavailableReason ? { threeJsUnavailableReason } : {})}

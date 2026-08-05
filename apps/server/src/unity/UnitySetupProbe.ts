@@ -171,8 +171,10 @@ export const make = Effect.gen(function* () {
       // input — it exists so increment 3's settings panel can tell "not
       // set up" apart from "not a Unity project" without the client
       // reconstructing engine identity from a second, unrelated concept
-      // (`EngineType`, tracked per-thread in `engineSelectorStore.ts`, not
-      // available where this panel lives). Computed unconditionally,
+      // (`EngineType`, the project's server-DETECTED engine —
+      // `activeProject.engineType` in `ChatView.tsx` — not available where
+      // this panel lives; no client-side override exists anymore, per the
+      // owner's "detection, not a picker" ruling). Computed unconditionally,
       // before the CLI-availability branch, so BOTH outcomes below report
       // it — a project with no Unity CLI installed is not thereby
       // "unknown" as to whether it's a Unity project at all; that's a

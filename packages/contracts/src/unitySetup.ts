@@ -142,8 +142,10 @@ export const UnitySetupFacts = Schema.Struct({
    * line for anything else — team-lead's ruling (2026-08-04): the signal
    * belongs here, on the probe's own facts (server-side, where the
    * project already lives), not reconstructed client-side from a second,
-   * unrelated concept (`EngineType`, tracked per-thread in
-   * `engineSelectorStore.ts`, not available where this panel lives). */
+   * unrelated concept (`EngineType`, the project's server-DETECTED engine
+   * — `activeProject.engineType` in `ChatView.tsx` — not available where
+   * this panel lives; there is no client-side override anymore, per the
+   * owner's "detection, not a picker" ruling). */
   isUnityProject: Schema.Boolean,
   cliAvailable: Schema.Boolean,
   /** Populated only when `cliAvailable` is `false` and a candidate binary

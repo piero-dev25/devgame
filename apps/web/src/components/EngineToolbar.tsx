@@ -26,11 +26,12 @@ import {
   type EngineToolbarAction,
   type EngineToolbarView,
 } from "./EngineToolbar.logic";
-import { Menu, MenuGroup, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
+import { MenuGroup, MenuItem } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { Group, GroupSeparator } from "./ui/group";
 import { Button } from "./ui/button";
+import { Badge } from "./ui/badge";
 
 const ENGINE_LABELS: Readonly<Record<EngineType, string>> = {
   unity: "Unity",
@@ -38,8 +39,6 @@ const ENGINE_LABELS: Readonly<Record<EngineType, string>> = {
   godot: "Godot",
   threejs: "three.js",
 };
-
-const ENGINE_OPTIONS: ReadonlyArray<EngineType> = ["godot", "unity", "unreal", "threejs"];
 
 const ACTION_ICON: Readonly<Record<EngineToolbarAction, typeof PlayIcon>> = {
   play: PlayIcon,
@@ -56,12 +55,15 @@ const ACTION_LABEL: Readonly<Record<EngineToolbarAction, string>> = {
 };
 
 export interface EngineToolbarProps {
-  /** `null` when the project has no detected or overridden engine yet — the
-   * selector still renders (so a user can set one), the control cluster
-   * does not. */
+  /**
+   * The DETECTED engine — never a user choice (owner ruling: "it's not a
+   * 'pick your project', it's just detection of project type, so we should
+   * not have it selectable"). `null` when nothing's been detected for this
+   * project yet — the label still renders (as "No engine"), the control
+   * cluster does not.
+   */
   readonly resolvedEngineType: EngineType | null;
   readonly view: EngineToolbarView;
-  readonly onSelectEngine: (engine: EngineType) => void;
   /** One callback for every control button — the caller switches on the
    * action rather than this component exposing four separate props. */
   readonly onAction: (action: EngineToolbarAction) => void;
@@ -106,21 +108,19 @@ export function EngineToolbar(props: EngineToolbarProps) {
 
   return (
     <div className="flex shrink-0 items-center gap-2" data-engine-toolbar="true">
-      <Menu>
-        <MenuTrigger render={<Button size="xs" variant="outline" aria-label="Select engine" />}>
-          <span className="max-w-24 truncate">{engineLabel}</span>
-          <ChevronDownIcon aria-hidden="true" className="size-3.5" />
-        </MenuTrigger>
-        <MenuPopup align="end">
-          <MenuGroup>
-            {ENGINE_OPTIONS.map((engine) => (
-              <MenuItem key={engine} onClick={() => props.onSelectEngine(engine)}>
-                {ENGINE_LABELS[engine]}
-              </MenuItem>
-            ))}
-          </MenuGroup>
-        </MenuPopup>
-      </Menu>
+      {/*
+        Owner ruling: "it's not a 'pick your project', it's just detection
+        of project type, so we should not have it selectable." A plain
+        `Badge` (renders as a `<span>` by default — no button semantics, no
+        click handler, nothing implying it opens anything) replaces the
+        Menu/MenuTrigger dropdown that used to live here. `size="lg"` is the
+        closest `Badge` size to the removed button's height (`Button`'s
+        `xs`), so this control's neighbours in the header row don't visibly
+        reflow.
+      */}
+      <Badge variant="outline" size="lg" className="max-w-24 truncate px-2 font-medium">
+        {engineLabel}
+      </Badge>
 
       {view.backend === "threejs-script" ? (
         <ThreeJsPlayButton

@@ -152,11 +152,11 @@ function unityDisabledReason(
 }
 
 export interface EngineToolbarView {
-  /** The engine this toolbar targets — override or detected, resolved by
-   * the caller via `selectProjectEngineType` before this function runs.
+  /** The engine this toolbar targets — the project's server-DETECTED engine
+   * type (`activeProject.engineType` in `ChatView.tsx`), never a user
+   * choice — owner ruling: engine identity is detection, not a picker.
    * `null` means no engine is known for the project at all: the toolbar
-   * still renders (so the engine selector remains reachable), but with no
-   * control cluster. */
+   * still renders (as "No engine"), but with no control cluster. */
   readonly engineType: EngineType | null;
   /** `null` exactly when `engineType` is `null` — see `resolveEngineDispatchBackend`. */
   readonly backend: EngineDispatchBackend | null;
