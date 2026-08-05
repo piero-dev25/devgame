@@ -7,6 +7,7 @@ import {
   isUnityPlayReady,
   resolveEngineDispatchBackend,
   resolveEngineToolbarView,
+  shouldOfferUnityPipelineInstall,
 } from "./EngineToolbar.logic";
 
 function editor(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntry {
@@ -411,6 +412,59 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     });
     expect(view.playState).toBe("playing");
   });
+
+  describe("unityInstallOffered — the Setup CTA's own gate, wired end-to-end through resolveEngineToolbarView (not just shouldOfferUnityPipelineInstall in isolation)", () => {
+    it("true when the resolved view is not-ready for exactly the package-missing reason", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(
+          readyFacts({
+            pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          }),
+          { state: "S4", message: "placeholder" },
+        ),
+      });
+      expect(view.availableActions).toEqual([]);
+      expect(view.unityInstallOffered).toBe(true);
+    });
+
+    it("false while still loading — no probe result yet is never a default-to-offered guess, same posture unitySetupCheckFailed's own suite proves for the retry control", () => {
+      const view = resolveEngineToolbarView({ engineType: "unity", connectedEditor: null });
+      expect(view.unityInstallOffered).toBe(false);
+    });
+
+    it("false once ready — mutually exclusive with a working control cluster; nothing left to install and nothing to offer installing", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts(), S11),
+      });
+      expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+      expect(view.unityInstallOffered).toBe(false);
+    });
+
+    it("false for a not-ready reason an install can't fix (Unity not open, S5) — even though the underlying reason is STILL package-missing", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(
+          readyFacts({
+            pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+            pipelineList: {
+              _tag: "ran",
+              matched: null,
+              latestVersion: null,
+              unparseableInstanceCount: 0,
+            },
+          }),
+          { state: "S5", message: "placeholder" },
+        ),
+      });
+      expect(view.availableActions).toEqual([]);
+      expect(view.unityInstallOffered).toBe(false);
+    });
+  });
 });
 
 describe("isUnityPlayReady — mutation-proof per fact, one explicit object per case", () => {
@@ -529,6 +583,129 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
         readyFacts({ cliDiscoveredPath: "/opt/homebrew/bin/unity", lockfilePresent: false }),
       ),
     ).toBe(true);
+  });
+});
+
+// Task: the "Setup Unity Integrations" CTA performs the install directly
+// (owner ruling, mid-build revision) — this is what gates whether it's even
+// offered. One full explicit `UnitySetupFacts` object per case, same
+// discipline `isUnityPlayReady`'s own suite above uses — `readyFacts()` is
+// ALREADY "package installed, CLI available, Unity open+reachable"; each
+// case below overrides exactly the ONE thing that state is supposed to
+// change, so a case that silently stops testing what its name says would
+// show up as an unrelated field drifting instead of disappearing quietly.
+describe("shouldOfferUnityPipelineInstall — offered (S4: package missing, Unity open and reachable)", () => {
+  it("offers the install when the ONLY problem is a missing Pipeline package", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("shouldOfferUnityPipelineInstall — withheld", () => {
+  it("withholds when the package is already installed — nothing to add", () => {
+    expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(false);
+  });
+
+  it("withholds when the CLI isn't available — install can't run at all", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          cliAvailable: false,
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when the package is already declared in the manifest (S13: added, Unity hasn't resolved it yet) — re-installing has nothing left to do", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: true },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when Unity isn't open for this project (S5) — owner's literal instruction: an install wouldn't fix THIS blocker, even though the write itself would still succeed", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          pipelineList: {
+            _tag: "ran",
+            matched: null,
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when the matched instance isn't actually running (a stale lock, F13's exact scenario) — same as no instance at all", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          pipelineList: {
+            _tag: "ran",
+            matched: {
+              projectPath: "/repo",
+              pid: null,
+              isRunning: false,
+              hasPipelinePackage: false,
+              isReachable: false,
+              pipelineVersion: null,
+              updateAvailable: null,
+              safeMode: null,
+            },
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds in Safe Mode — Unity is running but not reachable", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          pipelineList: {
+            _tag: "ran",
+            matched: {
+              projectPath: "/repo",
+              pid: 111,
+              isRunning: true,
+              hasPipelinePackage: false,
+              isReachable: false,
+              pipelineVersion: null,
+              updateAvailable: null,
+              safeMode: true,
+            },
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when pipeline list hasn't run this cycle (S4' liveness-uncertain window) — unknown treated as not-offered, never a default-to-offered guess", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        factsWithNoListRun({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

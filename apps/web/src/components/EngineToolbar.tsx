@@ -294,18 +294,26 @@ function ControlCluster(props: {
 
     // The owner's mock: not-ready Unity gets a loud CTA (the header saying
     // what to do next) beside the same disabled Play a sighted user would
-    // otherwise stare at with no obvious next step. `variant="default"` is
-    // the SAME filled/`--primary` vocabulary `ComposerPrimaryActions.tsx`'s
-    // own "Implement" button and the plan-sidebar submit button already use
-    // elsewhere in this codebase — reusing that existing variant rather than
-    // hand-rolling bespoke classes matching the composer send button's exact
-    // (differently-directioned) hover state, so this doesn't become a THIRD
-    // subtly-different "filled button" convention. This is the first
-    // `variant="default"` control in this header row — every neighbour
-    // (`Add action`, `Open`, `Commit`, and every other control in THIS
-    // toolbar) is `variant="outline"`; deliberate, per the mock, not an
-    // oversight.
-    if (isUnity && props.onSetupUnityIntegrations) {
+    // otherwise stare at with no obvious next step — but ONLY when
+    // `view.unityInstallOffered` says an install would actually fix THIS
+    // project's specific not-ready reason (see that field's own doc comment
+    // in EngineToolbar.logic.ts for the exact facts it's gated on). Every
+    // OTHER not-ready reason (no CLI, Unity not open, Safe Mode, already
+    // declared) falls through to the plain disabledPlayButton below —
+    // showing an "install" CTA next to a problem installing can't fix would
+    // be a control that looks like it helps but doesn't.
+    //
+    // `variant="default"` is the SAME filled/`--primary` vocabulary
+    // `ComposerPrimaryActions.tsx`'s own "Implement" button and the
+    // plan-sidebar submit button already use elsewhere in this codebase —
+    // reusing that existing variant rather than hand-rolling bespoke classes
+    // matching the composer send button's exact (differently-directioned)
+    // hover state, so this doesn't become a THIRD subtly-different "filled
+    // button" convention. This is the first `variant="default"` control in
+    // this header row — every neighbour (`Add action`, `Open`, `Commit`,
+    // and every other control in THIS toolbar) is `variant="outline"`;
+    // deliberate, per the mock, not an oversight.
+    if (view.unityInstallOffered && props.onSetupUnityIntegrations) {
       const onSetupUnityIntegrations = props.onSetupUnityIntegrations;
       return (
         <div className="flex shrink-0 items-center gap-1">

@@ -120,6 +120,56 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
   );
 }
 
+/**
+ * Whether the header's `Setup Unity Integrations` CTA (`EngineToolbar.tsx`)
+ * should offer to run `postUnityPipelineInstall` at all — owner ruling: the
+ * CTA performs the install directly (no agent, no confirmation dialog), so
+ * it must never appear for a not-ready reason installing the Pipeline
+ * package can't fix. Same "read the EXPLICIT facts, never
+ * `UnitySetupPrimaryState.state`'s position in the taxonomy" posture
+ * `isUnityPlayReady` above already established, for the identical reason:
+ * depending on which literal state string the classifier currently emits
+ * for "package missing, Editor open" would make this gate an accident of
+ * `UnitySetupClassifier.ts`'s check order, silently wrong the day that
+ * ordering changes, with no failing test to catch it (this file's `isUnity
+ * PlayReady` doc comment has the fuller version of this same argument).
+ *
+ * Walking `UnitySetupClassifier.ts`'s own S1-S13 table (per team-lead's
+ * ruling): a button ONLY fixes "the Pipeline package is genuinely missing
+ * from this project" — every OTHER not-ready reason (no CLI, Unity not
+ * open, Safe Mode, an unresolved `pipeline list` call, a package that's
+ * already declared and just awaiting Unity's own resolver) either resolves
+ * itself or genuinely requires the human, and offering an install for one
+ * of those would be a control that LOOKS like it helps but doesn't — worse
+ * than the honest "here's what's actually wrong" message this gate falls
+ * back to when it returns `false`.
+ *
+ * Requires Unity to be OPEN AND REACHABLE, not just CLI-available — even
+ * though `postUnityPipelineInstall`'s own route works with no Editor
+ * running at all (confirmed live, `postPipelineInstall.ts`'s doc comment).
+ * This is a DELIBERATELY narrower gate than "would the write succeed":
+ * team-lead's own literal instruction named "Unity isn't open" as one of
+ * the three blocking conditions (alongside CLI-missing and Safe Mode)
+ * verbatim, citing the S5 sentence itself as the example of what to show
+ * instead — so a project whose ONLY problem is "package missing, Unity
+ * closed" (S5) does NOT get the CTA here, even though the install call
+ * itself would still write the manifest line successfully. Flagged as a
+ * real, deliberate reading of an instruction that could plausibly have
+ * gone the other way (see this task's own report for the alternative this
+ * function does NOT implement).
+ */
+export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean {
+  return (
+    facts.cliAvailable &&
+    !facts.pipelinePackage.installed &&
+    !facts.pipelinePackage.declaredInManifest &&
+    facts.pipelineList?._tag === "ran" &&
+    facts.pipelineList.matched !== null &&
+    facts.pipelineList.matched.isRunning &&
+    facts.pipelineList.matched.isReachable
+  );
+}
+
 /** The message to show when Unity's controls are disabled — `primary`'s own
  * classified sentence, verbatim (S12 included: the CLI's raw message,
  * unedited, per plan §1's "never map an unrecognized CLI string onto a
@@ -213,6 +263,19 @@ export interface EngineToolbarView {
    * distinguishes.
    */
   readonly unitySetupCheckFailed: boolean;
+  /**
+   * Whether the not-ready state's `Setup Unity Integrations` CTA should
+   * render — see `shouldOfferUnityPipelineInstall`'s own doc comment for the
+   * exact facts this is gated on. Only ever `true` for the `"unity-cli"`
+   * backend, and only while `availableActions.length === 0` (i.e. mutually
+   * exclusive with being ready) — `false` for every other backend, and
+   * `false` for `"unity-cli"` whenever the not-ready reason is something an
+   * install can't fix, INCLUDING while `setup` is still `null` (no probe
+   * result yet — never offer an action before knowing whether it would
+   * help, same "unknown treated as not-ready" default `isUnityPlayReady`'s
+   * own resolution already uses).
+   */
+  readonly unityInstallOffered: boolean;
 }
 
 function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): ReadonlySet<string> {
@@ -265,6 +328,7 @@ export function resolveEngineToolbarView(input: {
       playState: null,
       disabledReason: null,
       unitySetupCheckFailed: false,
+      unityInstallOffered: false,
     };
   }
 
@@ -280,6 +344,7 @@ export function resolveEngineToolbarView(input: {
       playState: null,
       disabledReason: null,
       unitySetupCheckFailed: false,
+      unityInstallOffered: false,
     };
   }
 
@@ -301,6 +366,11 @@ export function resolveEngineToolbarView(input: {
       // real `UnitySetupProbeResult` has arrived, `disabledReason` (if any)
       // is always a classified S1-S13 sentence, never a failure.
       unitySetupCheckFailed: !playReady && setup === null && unitySetupError !== null,
+      // `setup !== null` guards the same "unknown treated as not-ready" way
+      // `playReady` itself does — no probe result yet means no CTA, not a
+      // default-to-offered guess.
+      unityInstallOffered:
+        !playReady && setup !== null && shouldOfferUnityPipelineInstall(setup.facts),
     };
   }
 
@@ -315,6 +385,7 @@ export function resolveEngineToolbarView(input: {
       playState: null,
       disabledReason: null,
       unitySetupCheckFailed: false,
+      unityInstallOffered: false,
     };
   }
   const actionSet = toActionSet(connectedEditor.capabilities);
@@ -327,6 +398,7 @@ export function resolveEngineToolbarView(input: {
     playState: connectedEditor.playState,
     disabledReason: null,
     unitySetupCheckFailed: false,
+    unityInstallOffered: false,
   };
 }
 

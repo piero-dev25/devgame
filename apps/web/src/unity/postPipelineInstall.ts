@@ -63,14 +63,19 @@ function postEffect(input: {
 /**
  * Fires the consented `unity pipeline install` for THIS server process's
  * own project (`ServerConfig.cwd` server-side — see
- * `UnityPipelineInstallInput`'s own doc comment). The caller
- * (`ConnectionsSettings.tsx`) is responsible for only ever calling this
- * from inside an explicit consent-dialog confirm handler — there is no
- * server-side "did the user consent" flag for this function to check; the
- * click IS the consent. Rejects (a plain thrown value) on a transport-level
- * failure or a `presence:command`-scope refusal (HTTP 403) only — a
- * resolved value always has a real `UnityPipelineInstallResult` to render,
- * same posture `fetchUnitySetupProbe` documents for its own 403 case.
+ * `UnityPipelineInstallInput`'s own doc comment). There is no server-side
+ * "did the user consent" flag for this function to check — every caller is
+ * responsible for treating its own click as the consent, by construction.
+ * Two callers today, two different but equally valid consent shapes:
+ * `ConnectionsSettings.tsx`'s `UnityPipelineInstallButton` gates this behind
+ * an explicit confirm-dialog click; `EngineToolbar.tsx`'s `Setup Unity
+ * Integrations` CTA (owner ruling: the click IS the consent, no dialog) goes
+ * straight from a single header click to this call, via
+ * `ChatView.tsx`'s `handleSetupUnityIntegrations`. Rejects (a plain thrown
+ * value) on a transport-level failure or a `presence:command`-scope refusal
+ * (HTTP 403) only — a resolved value always has a real
+ * `UnityPipelineInstallResult` to render, same posture `fetchUnitySetupProbe`
+ * documents for its own 403 case.
  */
 export function postUnityPipelineInstall(input: {
   readonly httpBaseUrl: string;

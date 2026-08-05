@@ -19,6 +19,8 @@ const THREEJS_VIEW: EngineToolbarView = {
   availableActions: [],
   playState: null,
   disabledReason: null,
+  unitySetupCheckFailed: false,
+  unityInstallOffered: false,
 };
 
 function renderToolbar(overrides: Partial<EngineToolbarProps> = {}) {
@@ -33,11 +35,21 @@ function renderToolbar(overrides: Partial<EngineToolbarProps> = {}) {
   );
 }
 
-// Plain substring match on the literal attribute — none of these labels
-// contain a double quote, so React's static attribute encoding never
-// mangles them, and this sidesteps regex-escaping the reason string.
+// React's static renderer HTML-entity-encodes attribute values — verified
+// directly against `react-dom/server` (an apostrophe in an aria-label
+// becomes `&#x27;` in the rendered attribute). The classifier's own real S4/
+// S5 sentences below have apostrophes ("doesn't"), so a plain substring
+// match against the raw label would silently fail even when the feature is
+// correct — found running this suite against a genuinely-passing
+// implementation and getting two false failures. Only the characters that
+// actually appear in this file's own fixtures need escaping; extend if a
+// future fixture needs more.
+function htmlEncodeAttributeValue(value: string): string {
+  return value.replaceAll("'", "&#x27;").replaceAll('"', "&quot;");
+}
+
 function hasAriaLabel(html: string, label: string): boolean {
-  return html.includes(`aria-label="${label}"`);
+  return html.includes(`aria-label="${htmlEncodeAttributeValue(label)}"`);
 }
 
 // Whether `text` appears as descendant content of ANY `<button>...</button>`
@@ -122,17 +134,44 @@ describe("EngineToolbar engine label is a static badge, not a picker", () => {
 // header itself is asking you to click; set up -> a quiet pair. Both states
 // are driven off `resolveEngineToolbarView`'s existing unity-cli branch
 // (already covered by EngineToolbar.test.ts's own suite for READY vs
-// NOT-READY) — what's new and provable HERE is the RENDERED markup for
-// each, which that pure-logic suite can't see.
-const UNITY_NOT_READY_VIEW: EngineToolbarView = {
+// NOT-READY, and by that file's own `shouldOfferUnityPipelineInstall`
+// suite) — what's new and provable HERE is the RENDERED markup for each,
+// which that pure-logic suite can't see.
+//
+// Owner ruling (mid-build revision): the CTA performs the install directly,
+// so it must be gated on `unityInstallOffered` — TRUE only when the
+// classifier's own facts say Pipeline is genuinely missing AND Unity is
+// open and reachable (see EngineToolbar.logic.ts's own doc comment on that
+// field). Two distinct not-ready fixtures below, matching the two distinct
+// not-ready behaviours this build has to prove: one where the CTA is the
+// right thing to show, one where it would be a lie.
+const UNITY_NOT_READY_INSTALL_OFFERED_VIEW: EngineToolbarView = {
   engineType: "unity",
   backend: "unity-cli",
   requiresPresenceCommandScope: true,
   hasConnectedEditor: false,
   availableActions: [],
   playState: null,
-  disabledReason: "Pipeline package missing from Packages/packages-lock.json.",
+  disabledReason:
+    "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.",
   unitySetupCheckFailed: false,
+  unityInstallOffered: true,
+};
+
+// The literal S5 sentence team-lead cited live as what to show INSTEAD of
+// the CTA — Unity isn't open, so an install (which only writes the
+// manifest) wouldn't fix the actual blocker here.
+const UNITY_NOT_READY_NO_INSTALL_VIEW: EngineToolbarView = {
+  engineType: "unity",
+  backend: "unity-cli",
+  requiresPresenceCommandScope: true,
+  hasConnectedEditor: false,
+  availableActions: [],
+  playState: null,
+  disabledReason:
+    "This project doesn't have Unity's Pipeline package, and Unity isn't open. Add the package, then open the project in Unity.",
+  unitySetupCheckFailed: false,
+  unityInstallOffered: false,
 };
 
 const UNITY_READY_VIEW: EngineToolbarView = {
@@ -144,6 +183,7 @@ const UNITY_READY_VIEW: EngineToolbarView = {
   playState: null,
   disabledReason: null,
   unitySetupCheckFailed: false,
+  unityInstallOffered: false,
 };
 
 function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineToolbarProps> = {}) {
@@ -158,9 +198,9 @@ function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineTo
   );
 }
 
-describe("EngineToolbar — Unity not-ready state renders the Setup CTA", () => {
+describe("EngineToolbar — Unity not-ready state renders the Setup CTA when an install would help", () => {
   it("renders the filled CTA and a disabled Play beside it", () => {
-    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW, {
+    const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW, {
       onSetupUnityIntegrations: () => {},
     });
 
@@ -179,7 +219,7 @@ describe("EngineToolbar — Unity not-ready state renders the Setup CTA", () => 
     // Mirrors every other optional-callback gate in this file
     // (onOpenConnectionsSettings, onRetryUnitySetup): a control whose click
     // handler is absent must not render as if it were wired.
-    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW);
+    const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW);
 
     expect(html).not.toContain("Setup Unity Integrations");
   });
@@ -188,6 +228,27 @@ describe("EngineToolbar — Unity not-ready state renders the Setup CTA", () => 
     const html = renderUnityToolbar(UNITY_READY_VIEW, { onSetupUnityIntegrations: () => {} });
 
     expect(html).not.toContain("Setup Unity Integrations");
+  });
+});
+
+// Owner ruling: "when the probe says Unity isn't open, or the CLI is
+// missing, or Safe Mode — the CTA should not offer an install that won't
+// help. Show the classifier's own sentence instead." Proves the OTHER half
+// of the gate: a handler being present is not enough on its own — the CTA
+// must stay absent when `view.unityInstallOffered` says installing wouldn't
+// fix this project's actual blocker, even though nothing here is different
+// from the offered case except that one field.
+describe("EngineToolbar — Unity not-ready state withholds the CTA when an install would NOT help", () => {
+  it("renders no CTA even with a handler provided, and shows the classifier's own sentence instead", () => {
+    const html = renderUnityToolbar(UNITY_NOT_READY_NO_INSTALL_VIEW, {
+      onSetupUnityIntegrations: () => {},
+    });
+
+    expect(html).not.toContain("Setup Unity Integrations");
+    // "Show the classifier's own sentence instead" — the disabled Play's
+    // accessible name (already fixed for #107 below) is where that
+    // sentence lands; still present and unchanged by the CTA's absence.
+    expect(hasAriaLabel(html, UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? "")).toBe(true);
   });
 });
 
@@ -228,6 +289,7 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
     playState: null,
     disabledReason: null,
     unitySetupCheckFailed: false,
+    unityInstallOffered: false,
   };
 
   it("still renders the full Play/Pause/Stop cluster and play-target chevron for Godot", () => {
@@ -256,10 +318,12 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
 // classified reason (Unity's, or editor-presence's) was available.
 describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
   it("uses Unity's specific classified reason as the accessible name, not the generic literal", () => {
-    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW);
+    const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW);
 
     expect(hasAriaLabel(html, "No editor connected")).toBe(false);
-    expect(hasAriaLabel(html, UNITY_NOT_READY_VIEW.disabledReason ?? "")).toBe(true);
+    expect(hasAriaLabel(html, UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? "")).toBe(
+      true,
+    );
   });
 
   it("still falls back to a stated generic reason for editor-presence with nothing connected (never the old literal)", () => {
@@ -272,6 +336,7 @@ describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
       playState: null,
       disabledReason: null,
       unitySetupCheckFailed: false,
+      unityInstallOffered: false,
     };
     const html = renderToStaticMarkup(
       <EngineToolbar

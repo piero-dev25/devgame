@@ -223,7 +223,8 @@ import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
-import { buildUnitySetupIntegrationPrompt } from "../unity/unitySetupPrompt";
+import { postUnityPipelineInstall } from "../unity/postPipelineInstall";
+import { describeUnityPipelineInstallOutcome } from "../unity/unityPipelineInstallReport";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
@@ -5384,23 +5385,65 @@ function ChatViewContent(props: ChatViewProps) {
   );
 
   // The `Setup Unity Integrations` CTA (EngineToolbar.tsx's not-ready Unity
-  // state): "same shape, new trigger" — reuses `onSubmitPlanFollowUp`
-  // directly rather than duplicating its ~150 lines of send plumbing
-  // (optimistic message, `persistThreadSettingsForNextTurn`, `startThreadTurn`,
-  // failure handling). Its ONE plan-specific behaviour —
-  // `sourceProposedPlan` — only activates when `activeProposedPlan` is set,
-  // which it never is on this path, so this is a plain "send this exact
-  // text as a new turn" call in practice. Deliberately does NOT go through
-  // `resolvePlanFollowUpSubmission` (which prefers the composer's current
-  // draft text over the built prompt) — clicking this CTA should always
-  // send the fixed nudge, not whatever unrelated text happens to be sitting
-  // in the composer.
+  // state). REVISED mid-build: originally seeded a chat turn asking the
+  // agent to diagnose and fix setup; owner ruling changed this to perform
+  // the install DIRECTLY instead — "just an install button, works even if
+  // Unity isn't running" (the Bezi reference), and this codebase already
+  // has exactly that (`postUnityPipelineInstall`, live-proven at 1d28ec11a
+  // via `ConnectionsSettings.tsx`'s own `UnityPipelineInstallButton`). No
+  // agent turn, no confirmation dialog — the click IS the consent (ruled
+  // twice) — but the dialog's OWN explanation of what changes
+  // (manifest.json now, packages-lock.json/Assets churn later, once Unity
+  // resolves it) doesn't just disappear: `describeUnityPipelineInstallOutcome`
+  // (unity/unityPipelineInstallReport.ts) carries that same information into
+  // a REPORT shown after the fact, not a question asked before it.
+  //
+  // `EngineToolbarView.unityInstallOffered` (EngineToolbar.logic.ts) is what
+  // gates whether this CTA even renders — only when the classifier's own
+  // facts say the ONE thing this action can fix (Pipeline package missing)
+  // is the actual blocker AND Unity is open and reachable; every other
+  // not-ready reason (CLI missing, Unity closed, Safe Mode, already
+  // declared) shows the classifier's own sentence instead, since an install
+  // wouldn't change anything about those.
   const handleSetupUnityIntegrations = useCallback(() => {
-    void onSubmitPlanFollowUp({
-      text: buildUnitySetupIntegrationPrompt(),
-      interactionMode: "default",
-    });
-  }, [onSubmitPlanFollowUp]);
+    const prepared = readPreparedConnection(environmentId);
+    if (!prepared) return;
+    void postUnityPipelineInstall({
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((result) => {
+        const report = describeUnityPipelineInstallOutcome(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: report.type,
+            title: report.title,
+            description: report.description,
+          }),
+        );
+        if (report.type === "success") {
+          // The toolbar's own probe is the source of truth for what renders
+          // next (ready pair vs. CTA vs. message) — refresh it rather than
+          // assuming this specific outcome flips `unityInstallOffered` off,
+          // same "let the real check decide, don't guess" posture #106's
+          // fix already established for this exact query.
+          void unitySetupQuery.refresh();
+        }
+      })
+      .catch((error) => {
+        // Transport failure only — same "well-formed failure vs. genuinely
+        // broke" distinction `handleEngineAction`'s own Unity branch already
+        // draws for the identical reason.
+        console.error("Failed to install Unity's Pipeline package:", error);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not install Pipeline package",
+            description: error instanceof Error ? error.message : "A network error occurred.",
+          }),
+        );
+      });
+  }, [environmentId, unitySetupQuery]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
