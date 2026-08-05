@@ -27,6 +27,7 @@ import {
 import type { AuthEnvironmentScope } from "@t3tools/contracts";
 import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as NodeUtil from "node:util";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
@@ -156,7 +157,22 @@ export function failEnvironmentInternal(reason: EnvironmentInternalErrorReason, 
       yield* Effect.logError("environment api operation failed", {
         reason,
         traceId,
-        cause: error,
+        // Serialized to a string at unlimited depth, not passed through as
+        // the raw `error` object. `Logger.consolePretty()` (serverLogger.ts)
+        // formats structured metadata with Node's default `util.inspect`
+        // object-depth cap, which silently prints `[Object]` past two
+        // levels of nesting — exactly what a chain like `error` -> tagged
+        // auth error -> `BootstrapCredentialConsumeAvailableError` -> the
+        // actual SQL/decode failure routinely is. A STRING value is never
+        // depth-truncated, only nested plain objects are, so serializing
+        // here (rather than reconfiguring the logger globally, which would
+        // change every other log call's verbosity too) is the narrow fix.
+        // Found live (2026-08-05, #113): three real `browser_session_issuance_failed`
+        // failures on a long-lived instance each logged nothing past
+        // `BootstrapCredentialConsumeAvailableError`'s own tag — the
+        // underlying cause was already lost by the time it reached disk,
+        // not just by a later `grep`/console view of it.
+        cause: NodeUtil.inspect(error, { depth: null }),
       });
     }
     return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
