@@ -99,6 +99,15 @@ export function resolveEngineDispatchBackend(engineType: EngineType): EngineDisp
  * becomes queryable, this constant is what a live value should replace. */
 const UNITY_CLI_ACTIONS: ReadonlyArray<EngineToolbarAction> = ["play", "pause", "stop"];
 
+function hasLiveUnityEditorMatch(facts: UnitySetupFacts): boolean {
+  return (
+    facts.pipelineList?._tag === "ran" &&
+    facts.pipelineList.matched !== null &&
+    facts.pipelineList.matched.isRunning &&
+    facts.pipelineList.matched.isReachable
+  );
+}
+
 /**
  * Whether Unity's Play/Pause/Stop controls may be clicked at all, per #92's
  * `UnitySetupProbe` — gated on the EXPLICIT facts (Pipeline package
@@ -126,10 +135,7 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
     facts.isUnityProject &&
     facts.cliAvailable &&
     facts.pipelinePackage.installed &&
-    facts.pipelineList?._tag === "ran" &&
-    facts.pipelineList.matched !== null &&
-    facts.pipelineList.matched.isRunning &&
-    facts.pipelineList.matched.isReachable
+    hasLiveUnityEditorMatch(facts)
   );
 }
 
@@ -148,27 +154,27 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * `isUnityPlayReady` doc comment has the fuller version of this same
  * argument).
  *
- * Deliberately does NOT look at `pipelineList`/Unity's live state AT ALL —
- * team-lead's clarified ruling (correcting this function's own first
- * revision, which required Unity to be open+reachable): the install itself
- * needs nothing but a working CLI, and requiring liveness anyway would
- * withhold the CTA for S5 ("package missing, Unity not open") even though
- * clicking it would still write the manifest line successfully — a real
- * "the button can fix this" case blocked by a check the underlying
- * operation never needed. `postPipelineInstall.ts`'s own doc comment is the
- * proof: "the command succeeds with no Editor running at all." So this
- * covers S4 (Unity open, package missing) and S5 (Unity closed, package
- * missing) identically — the classifier's own S4-vs-S5 split is entirely
- * about `liveMatch`, which this function has no reason to consult.
+ * Package installation deliberately does not require Unity's live state:
+ * S4 (Unity open, package missing) and S5 (Unity closed, package missing)
+ * are both fixable because `postPipelineInstall.ts` succeeds without an
+ * Editor. Pairing recovery is intentionally narrower. With Unity closed,
+ * "publisher not registered" cannot distinguish never-paired from
+ * paired-but-closed, so offering S10 forever would violate "quiet once it
+ * works." Only that term requires the same running+reachable `pipelineList`
+ * match the classifier uses. The server mint path is deliberately
+ * asymmetric: a setup request that reaches it while Unity is closed still
+ * writes the 24-hour handoff for the next Editor launch.
  *
- * Five facts matter, all independent of Unity's live state:
+ * The package facts remain independent of Unity's live state; the pairing
+ * recovery fact is trusted only with a live match:
  *  - `isUnityProject` — S0 is never an installation opportunity.
  *  - `cliAvailable` — no working `unity` binary, no install to run (S1/S2).
  *  - `!pipelinePackage.installed` — nothing missing means nothing to add.
  *  - `!pipelinePackage.declaredInManifest` — already added, just awaiting
  *    Unity's own resolver (S13); re-running install has nothing left to do.
  *  - an installed selection package without a registered publisher — S10's
- *    recovery is a re-click, which mints and hands off a fresh credential.
+ *    recovery is a re-click, but only while a live Editor proves the absent
+ *    publisher means unpaired rather than merely closed.
  *
  * S8 (package installed, but an update is available) is a genuinely
  * DIFFERENT case this function does not attempt to cover: `isUnityPlayReady`
@@ -192,7 +198,10 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
   // waiting for Unity's resolver), so the CTA disappears right after a
   // successful click rather than lingering until Unity re-resolves.
   const selectionMissing = !facts.selectionPackage.installed;
-  const pairingMissing = facts.selectionPackage.installed && !facts.selectionPublisherRegistered;
+  const pairingMissing =
+    facts.selectionPackage.installed &&
+    !facts.selectionPublisherRegistered &&
+    hasLiveUnityEditorMatch(facts);
   return pipelineMissing || selectionMissing || pairingMissing;
 }
 

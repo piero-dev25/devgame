@@ -38,10 +38,16 @@ in the current environment.** These claims remain unverified:
   `RedeemPairingCredential` callback on the Editor main thread, stores only
   the returned bearer in EditorPrefs, deletes `pairing.json` after success,
   and leaves it in place after failure.
-- The automatic overload's requested scope is exactly
-  `orchestration:operate`, matching the server-minted grant and the
-  Connections "Operate tasks" option, while the manual Preferences flow
-  retains its existing standard-scope request.
+- Both the automatic handoff and manual Preferences flow request exactly
+  `orchestration:operate`, matching the publisher's only job and allowing a
+  Connections "Operate tasks" credential to redeem without wider scopes.
+- Automatic handoffs reject non-HTTP(S) schemes and every non-loopback host,
+  accept only `localhost`, `127.0.0.1`, or `::1`, leave rejected files in
+  place, and surface the failure through the existing Preferences status.
+- A stored bearer short-circuits only a handoff for the same `ServerUrl`; a
+  different-server handoff may redeem and replace it. The handoff URL is not
+  persisted to EditorPrefs unless redemption succeeds, so invalid, stale,
+  or failed handoffs cannot overwrite a hand-typed server URL.
 - A failed handoff is attempted only once per file contents during a domain
   lifetime; replacing the file with a fresh install-click credential causes
   one new attempt and the existing Preferences status box displays the
@@ -69,6 +75,10 @@ in the current environment.** These claims remain unverified:
   previously re-measured, to hold for Unity's `ClientWebSocket` too. This
   determines WHERE the credential-rejection handling lives (the post-connect
   receive loop, not a `ConnectAsync` exception handler).
+- A 4400/4401 credential rejection clears the stored bearer before setting
+  the retry halt, returning the machine to an unpaired state that an existing
+  or newly written Library handoff can recover; this includes task #113's
+  long-lived-backend session-expiry scenario.
 
 ## `SessionState` persistence across domain reload (`EditorPresenceConnection.cs`'s `SessionId`, `EditorPresenceSelectionWatcher.cs`'s `_sequence`)
 
@@ -103,11 +113,10 @@ in the current environment.** These claims remain unverified:
 
 ## Pairing / token exchange (`EditorPresenceSettings.cs`, `EditorPresenceSettingsProvider.cs`)
 
-- The literal `scope` string sent on redeem
-  (`"orchestration:read orchestration:operate terminal:operate review:write relay:read"`)
-  is taken from `docs/workbench/engine-credential-flow.md`, which states it
-  matches `AuthStandardClientScopes` in `packages/contracts/src/auth.ts` —
-  not independently re-derived from the TypeScript source in this pass.
+- The literal `scope` string sent by both redemption entry points is exactly
+  `"orchestration:operate"`; this revision could not exercise either path
+  against a live server to confirm the granted bearer carries only that
+  scope.
 - `UnityWebRequestAsyncOperation.completed` firing on the main thread
   regardless of Play/Edit mode, with no coroutine host required, is
   documented Unity behavior; this pass's verification exercises a real

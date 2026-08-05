@@ -43,10 +43,8 @@ namespace Ironmind.EditorPresence
         private const string DefaultServerUrl = "http://127.0.0.1:3777";
         private const string PairingHandoffDirectory = "com.ironmind.editor-presence";
         private const string PairingHandoffFile = "pairing.json";
-        private const string AutomaticPairingScope = "orchestration:operate";
+        private const string PublisherPairingScope = "orchestration:operate";
         private const double AutomaticPairingCheckIntervalSeconds = 1.0;
-        private const string StandardPairingScopes =
-            "orchestration:read orchestration:operate terminal:operate review:write relay:read";
 
         private static string _lastAutomaticPairingContents = "";
         private static bool _automaticPairingInFlight;
@@ -102,6 +100,39 @@ namespace Ironmind.EditorPresence
             return match.Success ? Uri.UnescapeDataString(match.Groups[1].Value) : trimmed;
         }
 
+        private static bool TryValidateHandoffServerUrl(string value, out string serverUrl)
+        {
+            serverUrl = "";
+            Uri uri;
+            if (string.IsNullOrEmpty(value)
+                || !Uri.TryCreate(value.Trim(), UriKind.Absolute, out uri)
+                || (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+            {
+                return false;
+            }
+
+            var host = uri.Host.Trim('[', ']');
+            if (!string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(host, "127.0.0.1", StringComparison.Ordinal)
+                && !string.Equals(host, "::1", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            serverUrl = value.Trim();
+            return true;
+        }
+
+        private static bool HasBearerForServer(string serverUrl)
+        {
+            return HasBearerToken
+                && string.Equals(
+                    ServerUrl.TrimEnd('/'),
+                    serverUrl.TrimEnd('/'),
+                    StringComparison.OrdinalIgnoreCase);
+        }
+
         /// Checks the current project's Library handoff and redeems it
         /// through RedeemPairingCredential, the same path the Preferences
         /// pane uses. Called from EditorPresenceConnection's existing
@@ -109,7 +140,7 @@ namespace Ironmind.EditorPresence
         /// noticed even when the package was already loaded.
         internal static void TryRedeemPairingHandoff()
         {
-            if (HasBearerToken || _automaticPairingInFlight) return;
+            if (_automaticPairingInFlight) return;
             if (EditorApplication.timeSinceStartup < _nextAutomaticPairingCheckAt) return;
             _nextAutomaticPairingCheckAt =
                 EditorApplication.timeSinceStartup + AutomaticPairingCheckIntervalSeconds;
@@ -136,11 +167,7 @@ namespace Ironmind.EditorPresence
                 return;
             }
 
-            // A failed credential stays on disk for diagnosis/recovery, but
-            // must not be retried every Editor update. The next setup click
-            // writes different contents and is therefore attempted once.
             if (contents == _lastAutomaticPairingContents) return;
-            _lastAutomaticPairingContents = contents;
 
             PairingHandoffDto handoff;
             try
@@ -149,6 +176,7 @@ namespace Ironmind.EditorPresence
             }
             catch (Exception e)
             {
+                _lastAutomaticPairingContents = contents;
                 EditorPresenceSettingsProvider.ReportPairingResult(
                     false,
                     $"Could not parse the automatic pairing handoff: {e.Message}");
@@ -158,36 +186,65 @@ namespace Ironmind.EditorPresence
                 || string.IsNullOrEmpty(handoff.serverUrl)
                 || string.IsNullOrEmpty(handoff.pairingCredential))
             {
+                _lastAutomaticPairingContents = contents;
                 EditorPresenceSettingsProvider.ReportPairingResult(
                     false,
                     "The automatic pairing handoff is missing its server URL or pairing credential.");
                 return;
             }
 
-            ServerUrl = handoff.serverUrl;
+            string handoffServerUrl;
+            if (!TryValidateHandoffServerUrl(handoff.serverUrl, out handoffServerUrl))
+            {
+                _lastAutomaticPairingContents = contents;
+                EditorPresenceSettingsProvider.ReportPairingResult(
+                    false,
+                    "The automatic pairing handoff server URL must use http or https on localhost, 127.0.0.1, or ::1.");
+                return;
+            }
+
+            // A bearer is usable for this handoff only when it belongs to
+            // the same stored server. A different-server handoff may replace
+            // it; the same-server case stays quiet and leaves the file for a
+            // later stale-bearer rejection to clear and recover from.
+            if (HasBearerForServer(handoffServerUrl)) return;
+
+            // A failed credential stays on disk for diagnosis/recovery, but
+            // must not be retried every Editor update. The next setup click
+            // writes different contents and is therefore attempted once.
+            _lastAutomaticPairingContents = contents;
+
             _automaticPairingInFlight = true;
             EditorPresenceSettingsProvider.ReportPairingStarted();
-            RedeemPairingCredential(handoff.pairingCredential, AutomaticPairingScope, (success, error) =>
-            {
-                _automaticPairingInFlight = false;
-                if (!success)
+            RedeemPairingCredential(
+                handoff.pairingCredential,
+                PublisherPairingScope,
+                handoffServerUrl,
+                (success, error) =>
                 {
-                    EditorPresenceSettingsProvider.ReportPairingResult(false, error);
-                    return;
-                }
+                    _automaticPairingInFlight = false;
+                    if (!success)
+                    {
+                        EditorPresenceSettingsProvider.ReportPairingResult(false, error);
+                        return;
+                    }
 
-                try
-                {
-                    File.Delete(pairingPath);
-                    EditorPresenceSettingsProvider.ReportPairingResult(true, null);
-                }
-                catch (Exception e)
-                {
-                    EditorPresenceSettingsProvider.ReportPairingResult(
-                        false,
-                        $"Paired, but could not delete the automatic pairing handoff: {e.Message}");
-                }
-            });
+                    // Do not let an invalid or stale handoff clobber the user's
+                    // configured server every update. Persist the new server only
+                    // after its credential has actually redeemed successfully.
+                    ServerUrl = handoffServerUrl;
+                    try
+                    {
+                        File.Delete(pairingPath);
+                        EditorPresenceSettingsProvider.ReportPairingResult(true, null);
+                    }
+                    catch (Exception e)
+                    {
+                        EditorPresenceSettingsProvider.ReportPairingResult(
+                            false,
+                            $"Paired, but could not delete the automatic pairing handoff: {e.Message}");
+                    }
+                });
         }
 
         /// Redeems a pasted pairing credential for a long-lived bearer
@@ -197,12 +254,16 @@ namespace Ironmind.EditorPresence
         /// host (e.g. an EditorWindow) is required.
         public static void RedeemPairingCredential(string pastedInput, Action<bool, string> onComplete)
         {
-            RedeemPairingCredential(pastedInput, StandardPairingScopes, onComplete);
+            // The pane pairs only the selection publisher, so request the
+            // exact scope it needs. Requesting every standard client scope
+            // made an "Operate tasks"-only credential impossible to redeem.
+            RedeemPairingCredential(pastedInput, PublisherPairingScope, ServerUrl, onComplete);
         }
 
         private static void RedeemPairingCredential(
             string pastedInput,
             string requestedScopes,
+            string serverUrl,
             Action<bool, string> onComplete)
         {
             var credential = ExtractCredential(pastedInput);
@@ -219,18 +280,16 @@ namespace Ironmind.EditorPresence
             form.AddField("requested_token_type", "urn:ietf:params:oauth:token-type:access_token");
             // docs/workbench/engine-credential-flow.md — "the body must
             // also carry scope and client_label; the real client sends
-            // both." The manual caller passes the existing
-            // AuthStandardClientScopes set; the automatic handoff passes
-            // only the `orchestration:operate` scope its one-time grant
-            // carries. `scope` is optional
-            // server-side (an omitted scope silently falls back to the
+            // both." Both the manual pane and automatic handoff request only
+            // the `orchestration:operate` scope the publisher needs.
+            // `scope` is optional server-side (an omitted scope falls back to the
             // pairing credential's own granted scopes), so this was not a
             // hard failure — but it leaves the actually-granted scope set
             // implicit rather than a stated fact of this specific request.
             form.AddField("scope", requestedScopes);
             form.AddField("client_label", "Unity Editor");
 
-            var url = ServerUrl.TrimEnd('/') + "/oauth/token";
+            var url = serverUrl.TrimEnd('/') + "/oauth/token";
             var request = UnityWebRequest.Post(url, form);
             var operation = request.SendWebRequest();
             operation.completed += _ =>

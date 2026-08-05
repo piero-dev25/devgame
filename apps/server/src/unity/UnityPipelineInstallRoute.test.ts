@@ -17,6 +17,7 @@
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -55,10 +56,10 @@ const decodeInstallResult = Schema.decodeUnknownEffect(UnityPipelineInstallResul
 const PROJECT_ID = ProjectId.make("project-unity");
 const PROJECT_ROOT = "/Users/piero/Projects/Deepmind";
 
-function makeProject(workspaceRoot: string) {
+function makeProject(workspaceRoot: string, title = "Deepmind") {
   return decodeProjectShell({
     id: PROJECT_ID,
-    title: "Deepmind",
+    title,
     workspaceRoot,
     defaultModelSelection: null,
     scripts: [],
@@ -167,6 +168,7 @@ function makeUnityPairingHandoffSpy(
   const issued: Array<{
     readonly label?: string;
     readonly scopes?: ReadonlyArray<string>;
+    readonly ttl?: Duration.Duration;
   }> = [];
   const layer = Layer.effect(
     UnityPairingHandoff.UnityPairingHandoff,
@@ -290,6 +292,7 @@ describe("dispatchUnityPipelineInstall", () => {
           {
             label: "Unity selection — Deepmind",
             scopes: [AuthOrchestrationOperateScope],
+            ttl: Duration.hours(24),
           },
         ]);
         expect(
@@ -305,6 +308,70 @@ describe("dispatchUnityPipelineInstall", () => {
           pairingCredential: "PAIRING1234",
         });
       }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("caps the project-title portion of the minted credential label", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pairing-label-",
+      });
+      const longTitle = "A".repeat(80);
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot, longTitle));
+      const pairing = makeUnityPairingHandoffSpy();
+
+      yield* runDispatchTest(spy, makeSession([AuthPresenceCommandScope]), projection, pairing);
+
+      expect(pairing.issued[0]?.label).toBe(`Unity selection — ${"A".repeat(63)}…`);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("restricts the handoff directory and file to the local user", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const { fileSystem, workspaceRoot } = yield* runTempProjectDispatch();
+      const pairingDirectory = path.join(workspaceRoot, "Library/com.ironmind.editor-presence");
+
+      expect((yield* fileSystem.stat(pairingDirectory)).mode & 0o777).toBe(0o700);
+      expect(
+        (yield* fileSystem.stat(path.join(pairingDirectory, "pairing.json"))).mode & 0o777,
+      ).toBe(0o600);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("publishes the completed handoff with a temp-file rename", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pairing-atomic-",
+      });
+      const renameCalls: Array<{ readonly from: string; readonly to: string }> = [];
+      const recordingFileSystem: FileSystem.FileSystem = {
+        ...fileSystem,
+        rename: (from, to) =>
+          Effect.sync(() => renameCalls.push({ from, to })).pipe(
+            Effect.andThen(fileSystem.rename(from, to)),
+          ),
+      };
+      const handoff = yield* UnityPairingHandoff.make({
+        serverUrl: "http://127.0.0.1:3773",
+        isAlreadyPaired: () => Effect.succeed(false),
+        issuePairingCredential: () => Effect.succeed({ credential: "PAIRING1234" }),
+      }).pipe(Effect.provideService(FileSystem.FileSystem, recordingFileSystem));
+      const outcome = yield* handoff.prepare({ workspaceRoot, projectTitle: "Deepmind" });
+      const pairingPath = path.join(
+        workspaceRoot,
+        "Library/com.ironmind.editor-presence/pairing.json",
+      );
+
+      expect(outcome).toEqual({ _tag: "minted" });
+      expect(renameCalls).toHaveLength(1);
+      expect(renameCalls[0]?.to).toBe(pairingPath);
+      expect(renameCalls[0]?.from).not.toBe(pairingPath);
+      expect(yield* fileSystem.readDirectory(path.dirname(pairingPath))).toEqual(["pairing.json"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("same selection-package version is a no-op success", () =>

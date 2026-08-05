@@ -339,11 +339,15 @@ namespace Ironmind.EditorPresence
                 // 4400/4401 only — the server told us our credential
                 // specifically is the problem. Surface it VERBATIM, and
                 // stop auto-retrying with the same rejected token (see
-                // HandleEditorUpdate's _credentialRejected check). Retrying
-                // sends the identical token again; it cannot succeed.
+                // HandleEditorUpdate's _credentialRejected check). Review
+                // found that long-lived backend session expiry (task #113)
+                // otherwise left a dead bearer permanently blocking the
+                // automatic pairing handoff, so return to the unpaired state
+                // before halting retries.
                 LastErrorMessage = string.IsNullOrEmpty(closeDescription)
                     ? $"rejected (close code {closeCode})"
                     : closeDescription;
+                EditorPresenceSettings.ForgetToken();
                 _credentialRejected = true;
                 Debug.LogWarning(
                     $"[T3 Editor Presence] credential rejected (close code {closeCode}): {LastErrorMessage}. " +

@@ -1,10 +1,10 @@
 import type {
-  AuthCreatePairingCredentialInput,
   UnityEditorPresencePairingFile as UnityEditorPresencePairingFileType,
   UnityPipelinePairingOutcome,
 } from "@t3tools/contracts";
 import { AuthOrchestrationOperateScope, UnityEditorPresencePairingFile } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -19,6 +19,8 @@ import { resolveHeadlessConnectionString, resolveListeningPort } from "../startu
 
 const PAIRING_HANDOFF_DIRECTORY = ["Library", "com.ironmind.editor-presence"] as const;
 const PAIRING_HANDOFF_FILE = "pairing.json";
+const PAIRING_HANDOFF_TTL = Duration.hours(24);
+const MAX_PAIRING_PROJECT_TITLE_LENGTH = 64;
 const encodePairingFile = Schema.encodeUnknownSync(
   Schema.fromJsonString(UnityEditorPresencePairingFile),
 );
@@ -29,7 +31,7 @@ export interface UnityPairingHandoffDependencies {
     workspaceRoot: string,
   ) => Effect.Effect<boolean, UnityPairingHandoffDependencyError>;
   readonly issuePairingCredential: (
-    input: AuthCreatePairingCredentialInput,
+    input: EnvironmentAuth.IssuePairingCredentialInput,
   ) => Effect.Effect<{ readonly credential: string }, UnityPairingHandoffDependencyError>;
 }
 
@@ -40,6 +42,12 @@ export class UnityPairingHandoffDependencyError extends Schema.TaggedErrorClass<
     cause: Schema.Defect(),
   },
 ) {}
+
+function truncateProjectTitle(projectTitle: string): string {
+  return projectTitle.length <= MAX_PAIRING_PROJECT_TITLE_LENGTH
+    ? projectTitle
+    : `${projectTitle.slice(0, MAX_PAIRING_PROJECT_TITLE_LENGTH - 1)}…`;
+}
 
 export class UnityPairingHandoff extends Context.Service<
   UnityPairingHandoff,
@@ -61,6 +69,10 @@ export const make = Effect.fn("UnityPairingHandoff.make")(function* (
   const prepare: UnityPairingHandoff["Service"]["prepare"] = Effect.fn(
     "UnityPairingHandoff.prepare",
   )(function* (input) {
+    // Deliberately no Editor-liveness gate here. The web CTA uses liveness
+    // only to decide whether a missing publisher is trustworthy; the server
+    // mint path must still let a setup request made with Unity closed leave a
+    // handoff that works the next time the user opens the Editor.
     const registration = yield* dependencies.isAlreadyPaired(input.workspaceRoot).pipe(
       Effect.tapError((cause) =>
         Effect.logError("unity pairing handoff: publisher lookup failed", {
@@ -85,8 +97,12 @@ export const make = Effect.fn("UnityPairingHandoff.make")(function* (
 
     const issued = yield* dependencies
       .issuePairingCredential({
-        label: `Unity selection — ${input.projectTitle}`,
+        label: `Unity selection — ${truncateProjectTitle(input.projectTitle)}`,
         scopes: [AuthOrchestrationOperateScope],
+        // This feature promises to work the next time Unity opens. Five
+        // minutes broke that promise, so the handoff grant explicitly lasts
+        // 24 hours; it remains single-use and revocable.
+        ttl: PAIRING_HANDOFF_TTL,
       })
       .pipe(
         Effect.tapError((cause) =>
@@ -113,13 +129,30 @@ export const make = Effect.fn("UnityPairingHandoff.make")(function* (
     } satisfies UnityEditorPresencePairingFileType;
     const pairingDirectory = path.join(input.workspaceRoot, ...PAIRING_HANDOFF_DIRECTORY);
     const pairingPath = path.join(pairingDirectory, PAIRING_HANDOFF_FILE);
-    const writeSucceeded = yield* Effect.gen(function* () {
-      yield* fileSystem.makeDirectory(pairingDirectory, { recursive: true });
-      // `writeFileString` replaces a stale, unredeemed handoff in place.
-      // Only the one-time credential is serialized here; redemption's
-      // bearer token is produced and stored solely inside the Unity Editor.
-      yield* fileSystem.writeFileString(pairingPath, `${encodePairingFile(pairingFile)}\n`);
-    }).pipe(
+    const writeSucceeded = yield* Effect.scoped(
+      Effect.gen(function* () {
+        yield* fileSystem.makeDirectory(pairingDirectory, { recursive: true, mode: 0o700 });
+        // Local readers were the one real exposure identified by review F5.
+        // Locking the directory to 0700 and the file to 0600 is what makes
+        // the feature's longer 24-hour handoff safe.
+        yield* fileSystem.chmod(pairingDirectory, 0o700);
+        const tempPath = yield* fileSystem.makeTempFileScoped({
+          directory: pairingDirectory,
+          prefix: ".pairing-",
+          suffix: ".tmp",
+        });
+        // A pre-existing symlink in this Library directory remains the
+        // accepted F12 residual; no wire input chooses this path.
+        // Only the one-time credential is serialized here; redemption's
+        // bearer token is produced and stored solely inside the Unity Editor.
+        yield* fileSystem.writeFileString(tempPath, `${encodePairingFile(pairingFile)}\n`, {
+          mode: 0o600,
+        });
+        yield* fileSystem.chmod(tempPath, 0o600);
+        yield* fileSystem.rename(tempPath, pairingPath);
+        yield* fileSystem.chmod(pairingPath, 0o600);
+      }),
+    ).pipe(
       Effect.tapError((cause) =>
         Effect.logError("unity pairing handoff: file write failed", {
           cause,

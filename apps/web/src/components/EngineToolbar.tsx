@@ -471,8 +471,8 @@ function ControlCluster(props: {
             `unityInstallOffered` says a click would fix something. Gated on
             the same facts predicate; disappears as soon as the embedded
             copy lands (the probe reads the embedded package.json without
-            waiting for Unity's resolver). Pairing (S10) never offers this
-            — that step is a human's. */}
+            waiting for Unity's resolver). Pairing recovery (S10) offers it
+            only while a live Editor makes the missing publisher trustworthy. */}
         {view.unityInstallOffered && props.onSetupUnityIntegrations ? (
           <Button size="xs" variant="default" onClick={() => props.onSetupUnityIntegrations?.()}>
             Setup Unity Integrations

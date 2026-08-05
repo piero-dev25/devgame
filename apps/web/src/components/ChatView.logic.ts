@@ -28,6 +28,12 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+export function tryBeginUnitySetupInstall(inFlightRef: { current: boolean }): boolean {
+  if (inFlightRef.current) return false;
+  inFlightRef.current = true;
+  return true;
+}
+
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,
   handleNewThread: (projectRef: ScopedProjectRef) => Promise<void>,

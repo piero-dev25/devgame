@@ -58,6 +58,10 @@ export interface IssuedBearerSession {
   readonly expiresAt: DateTime.Utc;
 }
 
+export type IssuePairingCredentialInput = AuthCreatePairingCredentialInput & {
+  readonly ttl?: Duration.Duration;
+};
+
 export interface AuthenticatedSession {
   readonly sessionId: AuthSessionId;
   readonly subject: string;
@@ -441,7 +445,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly purpose?: "startup";
     }) => Effect.Effect<IssuedPairingLink, ServerAuthInternalError>;
     readonly issuePairingCredential: (
-      input?: AuthCreatePairingCredentialInput,
+      input?: IssuePairingCredentialInput,
     ) => Effect.Effect<AuthPairingCredentialResult, ServerAuthInternalError>;
     readonly issueStartupPairingCredential: () => Effect.Effect<
       AuthPairingCredentialResult,
@@ -746,12 +750,14 @@ export const make = Effect.gen(function* () {
   const issuePairingCredentialForSubject = (input: {
     readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
     readonly subject: string;
+    readonly ttl?: Duration.Duration;
     readonly label?: string;
     readonly purpose?: "startup";
   }) =>
     createPairingLink({
       scopes: input.scopes,
       subject: input.subject,
+      ...(input.ttl ? { ttl: input.ttl } : {}),
       ...(input.label ? { label: input.label } : {}),
       ...(input.purpose ? { purpose: input.purpose } : {}),
     }).pipe(
@@ -868,6 +874,7 @@ export const make = Effect.gen(function* () {
     issuePairingCredentialForSubject({
       scopes: input?.scopes ?? AuthStandardClientScopes,
       subject: "one-time-token",
+      ...(input?.ttl ? { ttl: input.ttl } : {}),
       ...(input?.label ? { label: input.label } : {}),
     }).pipe(Effect.withSpan("EnvironmentAuth.issuePairingCredential"));
 

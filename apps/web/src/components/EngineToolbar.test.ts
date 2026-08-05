@@ -713,7 +713,7 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
 // has NO bearing on whether this gate should be `true`. Every case below
 // that varies `pipelineList` while holding `pipelinePackage.installed:
 // false` is here to prove exactly that: the answer doesn't move.
-describe("shouldOfferUnityPipelineInstall — offered (package missing is the only condition that matters; Unity's live state is irrelevant)", () => {
+describe("shouldOfferUnityPipelineInstall — offered for missing packages without liveness, or live pairing recovery", () => {
   it("offers the install when the ONLY problem is a missing Pipeline package (S4: Unity open and reachable)", () => {
     expect(
       shouldOfferUnityPipelineInstall(
@@ -822,7 +822,28 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
     expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(true);
   });
 
-  it("offers at S10 because a re-click mints and hands off a fresh pairing credential", () => {
+  it("withholds at S10 when both packages are installed, Unity is closed, and pairing status is unknowable", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
+          selectionPublisherRegistered: false,
+          pipelineList: {
+            _tag: "ran",
+            matched: null,
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("offers at S10 when both packages are installed and the live Editor is genuinely unpaired", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({

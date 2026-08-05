@@ -308,6 +308,7 @@ import {
   revokeUserMessagePreviewUrls,
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
+  tryBeginUnitySetupInstall,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
@@ -1206,6 +1207,7 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const unitySetupInstallInFlightRef = useRef(false);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -5408,12 +5410,11 @@ function ChatViewContent(props: ChatViewProps) {
   // a REPORT shown after the fact, not a question asked before it.
   //
   // `EngineToolbarView.unityInstallOffered` (EngineToolbar.logic.ts) is what
-  // gates whether this CTA even renders — only when the classifier's own
-  // facts say the ONE thing this action can fix (Pipeline package missing)
-  // is the actual blocker; CLI missing or the package already declared
-  // shows the classifier's own sentence instead, since an install wouldn't
-  // change anything about those. Deliberately NOT gated on whether Unity is
-  // open — the install itself doesn't need that either (see
+  // gates whether this CTA even renders — when either package is missing,
+  // or when a live Editor proves its installed selection publisher is
+  // genuinely unpaired. Missing-package installs remain independent of
+  // whether Unity is open; only pairing recovery requires liveness because
+  // a closed Editor is otherwise indistinguishable from a paired one (see
   // `shouldOfferUnityPipelineInstall`'s own doc comment).
   const handleSetupUnityIntegrations = useCallback(() => {
     if (!activeProjectRef) {
@@ -5461,6 +5462,7 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
+    if (!tryBeginUnitySetupInstall(unitySetupInstallInFlightRef)) return;
     void postUnityPipelineInstall({
       projectId: activeProjectRef.projectId,
       httpBaseUrl: prepared.httpBaseUrl,
@@ -5504,6 +5506,9 @@ function ChatViewContent(props: ChatViewProps) {
             description: error instanceof Error ? error.message : "A network error occurred.",
           }),
         );
+      })
+      .finally(() => {
+        unitySetupInstallInFlightRef.current = false;
       });
     // F10 (merge-gate review, non-blocking): depend on `unitySetupQuery.refresh`,
     // NOT the whole `unitySetupQuery` object — `useEnvironmentQuery`
