@@ -7,6 +7,7 @@ import {
   isUnityPlayReady,
   resolveEngineDispatchBackend,
   resolveEngineToolbarView,
+  resolveUnityPlayToggleAction,
   shouldOfferUnityPipelineInstall,
 } from "./EngineToolbar.logic";
 
@@ -444,7 +445,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
       expect(view.unityInstallOffered).toBe(false);
     });
 
-    it("false for a not-ready reason an install can't fix (Unity not open, S5) — even though the underlying reason is STILL package-missing", () => {
+    it("true for S5 (Unity not open, package missing) — corrected from this suite's own earlier version: install needs no live Editor, so S5 is offered identically to S4", () => {
       const view = resolveEngineToolbarView({
         engineType: "unity",
         connectedEditor: null,
@@ -462,7 +463,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
         ),
       });
       expect(view.availableActions).toEqual([]);
-      expect(view.unityInstallOffered).toBe(false);
+      expect(view.unityInstallOffered).toBe(true);
     });
   });
 });
@@ -594,8 +595,16 @@ describe("isUnityPlayReady — mutation-proof per fact, one explicit object per 
 // case below overrides exactly the ONE thing that state is supposed to
 // change, so a case that silently stops testing what its name says would
 // show up as an unrelated field drifting instead of disappearing quietly.
-describe("shouldOfferUnityPipelineInstall — offered (S4: package missing, Unity open and reachable)", () => {
-  it("offers the install when the ONLY problem is a missing Pipeline package", () => {
+// Corrected from this suite's own earlier version, which required Unity to
+// be open+reachable (i.e. read `pipelineList`) before offering the install.
+// Team-lead's ruling: the install itself needs nothing but a working CLI —
+// it writes the manifest line and succeeds with no Editor running at all
+// (`postPipelineInstall.ts`'s own doc comment is the proof) — so liveness
+// has NO bearing on whether this gate should be `true`. Every case below
+// that varies `pipelineList` while holding `pipelinePackage.installed:
+// false` is here to prove exactly that: the answer doesn't move.
+describe("shouldOfferUnityPipelineInstall — offered (package missing is the only condition that matters; Unity's live state is irrelevant)", () => {
+  it("offers the install when the ONLY problem is a missing Pipeline package (S4: Unity open and reachable)", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -604,35 +613,8 @@ describe("shouldOfferUnityPipelineInstall — offered (S4: package missing, Unit
       ),
     ).toBe(true);
   });
-});
 
-describe("shouldOfferUnityPipelineInstall — withheld", () => {
-  it("withholds when the package is already installed — nothing to add", () => {
-    expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(false);
-  });
-
-  it("withholds when the CLI isn't available — install can't run at all", () => {
-    expect(
-      shouldOfferUnityPipelineInstall(
-        readyFacts({
-          cliAvailable: false,
-          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
-        }),
-      ),
-    ).toBe(false);
-  });
-
-  it("withholds when the package is already declared in the manifest (S13: added, Unity hasn't resolved it yet) — re-installing has nothing left to do", () => {
-    expect(
-      shouldOfferUnityPipelineInstall(
-        readyFacts({
-          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: true },
-        }),
-      ),
-    ).toBe(false);
-  });
-
-  it("withholds when Unity isn't open for this project (S5) — owner's literal instruction: an install wouldn't fix THIS blocker, even though the write itself would still succeed", () => {
+  it("offers even when Unity isn't open for this project (S5) — install works with no Editor running; S4 and S5 are identical to this function", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -645,10 +627,10 @@ describe("shouldOfferUnityPipelineInstall — withheld", () => {
           },
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("withholds when the matched instance isn't actually running (a stale lock, F13's exact scenario) — same as no instance at all", () => {
+  it("offers even when the matched instance isn't actually running (a stale lock, F13's exact scenario) — liveness of a matched instance is not part of this gate", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -670,10 +652,10 @@ describe("shouldOfferUnityPipelineInstall — withheld", () => {
           },
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("withholds in Safe Mode — Unity is running but not reachable", () => {
+  it("offers even in Safe Mode — Unity running but not reachable, same reasoning: reachability was never part of the install's own requirements", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -695,14 +677,41 @@ describe("shouldOfferUnityPipelineInstall — withheld", () => {
           },
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it("withholds when pipeline list hasn't run this cycle (S4' liveness-uncertain window) — unknown treated as not-offered, never a default-to-offered guess", () => {
+  it("offers even when pipeline list hasn't run this cycle (S4' liveness-uncertain window) — the function never reads pipelineList at all, so an absent one changes nothing", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         factsWithNoListRun({
           pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an install genuinely can't fix)", () => {
+  it("withholds when the package is already installed — nothing to add", () => {
+    expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(false);
+  });
+
+  it("withholds when the CLI isn't available — install can't run at all", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          cliAvailable: false,
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when the package is already declared in the manifest (S13: added, Unity hasn't resolved it yet) — re-installing has nothing left to do", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: true },
         }),
       ),
     ).toBe(false);
@@ -762,6 +771,29 @@ describe("resolveEngineToolbarView — editor-presence backend (Godot today)", (
       connectedEditor: editor({ capabilities: ["play"], playState: "playing" }),
     });
     expect(view.playState).toBe("playing");
+  });
+});
+
+// Task: Unity's ready-state Play/Pause toggle collapses into ONE button —
+// owner ruling, 2026-08-05. Every `EditorPresencePlayState` value gets its
+// own case, same one-explicit-case-per-value discipline the rest of this
+// file uses, so a state that silently stops mapping correctly shows up as
+// a specific failing case rather than an unrelated one drifting quietly.
+describe("resolveUnityPlayToggleAction", () => {
+  it('returns "pause" while playing — clicking the toggle should pause a running session', () => {
+    expect(resolveUnityPlayToggleAction("playing")).toBe("pause");
+  });
+
+  it('returns "play" while stopped — clicking the toggle should start a stopped session', () => {
+    expect(resolveUnityPlayToggleAction("stopped")).toBe("play");
+  });
+
+  it('returns "play" while paused — resuming from paused is the SAME wire action as starting from stopped (no separate "resume" verb), so paused shares stopped\'s face rather than getting its own', () => {
+    expect(resolveUnityPlayToggleAction("paused")).toBe("play");
+  });
+
+  it('returns "play" when playState is null (no status read yet) — unknown must never claim a playing session exists', () => {
+    expect(resolveUnityPlayToggleAction(null)).toBe("play");
   });
 });
 

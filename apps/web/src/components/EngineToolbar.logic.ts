@@ -11,15 +11,27 @@ import type {
 } from "../editorPresence/protocol";
 
 /**
- * One button the toolbar can render, 1:1 with a wire `command.action` — see
- * spec-editor-presence-commands.md's wire shape. Deliberately NOT a merged
- * "Play doubles as Stop when already playing" toggle: the wire protocol
- * keeps `play`/`stop` as two distinct actions, and collapsing them into one
- * button risks sending the wrong one for an engine whose `playState` this
- * client hasn't caught up with yet. `play` alone gets a highlighted/active
- * treatment when `playState === "playing"` (or `"paused"`) — driven by
- * presence, never by "I clicked this recently" — see spec-unity-play-stop.md's
- * ruling.
+ * One value the toolbar can pass to `onAction`, 1:1 with a wire
+ * `command.action` — see spec-editor-presence-commands.md's wire shape.
+ * This type itself stays UNMERGED — `play`/`pause`/`stop` remain three
+ * distinct values sent over the wire, never collapsed into one.
+ *
+ * What DID change (owner ruling, 2026-08-05, verbatim: "play and stop are
+ * the main ones for now, same area (toggle essentially) when unity is on
+ * play, shows pause there, and vice verse etc."): Unity's PRESENTATION only
+ * now shows a single button in the slot that used to be Play-only, and
+ * picks which of these values to send by reading the current `playState` —
+ * never by counting clicks or flipping local UI state, which is exactly the
+ * risk an earlier version of this comment warned against ("collapsing them
+ * into one button risks sending the wrong one for an engine whose
+ * `playState` this client hasn't caught up with yet"). This one preserves
+ * that guarantee rather than dropping it: `resolveUnityPlayToggleAction`
+ * derives its answer from `playState`, the same presence/re-read
+ * `UnityEditorStatus` source `isPlayEngaged` already reads — never "I
+ * clicked this recently." See `EngineToolbar.tsx`'s Unity ready-state doc
+ * comment for the toggle's exact behaviour and where Stop lives. Godot/
+ * Unreal's `editor-presence` backend is UNCHANGED by this — still four
+ * separate buttons, still exactly this type's four literals, one each.
  */
 export type EngineToolbarAction = "play" | "pause" | "stop" | "step";
 
@@ -129,44 +141,44 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * `UnitySetupPrimaryState.state`'s position in the taxonomy" posture
  * `isUnityPlayReady` above already established, for the identical reason:
  * depending on which literal state string the classifier currently emits
- * for "package missing, Editor open" would make this gate an accident of
+ * for "package missing" would make this gate an accident of
  * `UnitySetupClassifier.ts`'s check order, silently wrong the day that
- * ordering changes, with no failing test to catch it (this file's `isUnity
- * PlayReady` doc comment has the fuller version of this same argument).
+ * ordering changes, with no failing test to catch it (this file's
+ * `isUnityPlayReady` doc comment has the fuller version of this same
+ * argument).
  *
- * Walking `UnitySetupClassifier.ts`'s own S1-S13 table (per team-lead's
- * ruling): a button ONLY fixes "the Pipeline package is genuinely missing
- * from this project" — every OTHER not-ready reason (no CLI, Unity not
- * open, Safe Mode, an unresolved `pipeline list` call, a package that's
- * already declared and just awaiting Unity's own resolver) either resolves
- * itself or genuinely requires the human, and offering an install for one
- * of those would be a control that LOOKS like it helps but doesn't — worse
- * than the honest "here's what's actually wrong" message this gate falls
- * back to when it returns `false`.
+ * Deliberately does NOT look at `pipelineList`/Unity's live state AT ALL —
+ * team-lead's clarified ruling (correcting this function's own first
+ * revision, which required Unity to be open+reachable): the install itself
+ * needs nothing but a working CLI, and requiring liveness anyway would
+ * withhold the CTA for S5 ("package missing, Unity not open") even though
+ * clicking it would still write the manifest line successfully — a real
+ * "the button can fix this" case blocked by a check the underlying
+ * operation never needed. `postPipelineInstall.ts`'s own doc comment is the
+ * proof: "the command succeeds with no Editor running at all." So this
+ * covers S4 (Unity open, package missing) and S5 (Unity closed, package
+ * missing) identically — the classifier's own S4-vs-S5 split is entirely
+ * about `liveMatch`, which this function has no reason to consult.
  *
- * Requires Unity to be OPEN AND REACHABLE, not just CLI-available — even
- * though `postUnityPipelineInstall`'s own route works with no Editor
- * running at all (confirmed live, `postPipelineInstall.ts`'s doc comment).
- * This is a DELIBERATELY narrower gate than "would the write succeed":
- * team-lead's own literal instruction named "Unity isn't open" as one of
- * the three blocking conditions (alongside CLI-missing and Safe Mode)
- * verbatim, citing the S5 sentence itself as the example of what to show
- * instead — so a project whose ONLY problem is "package missing, Unity
- * closed" (S5) does NOT get the CTA here, even though the install call
- * itself would still write the manifest line successfully. Flagged as a
- * real, deliberate reading of an instruction that could plausibly have
- * gone the other way (see this task's own report for the alternative this
- * function does NOT implement).
+ * Only three facts matter, all independent of Unity's live state:
+ *  - `cliAvailable` — no working `unity` binary, no install to run (S1/S2).
+ *  - `!pipelinePackage.installed` — nothing missing means nothing to add.
+ *  - `!pipelinePackage.declaredInManifest` — already added, just awaiting
+ *    Unity's own resolver (S13); re-running install has nothing left to do.
+ *
+ * S8 (package installed, but an update is available) is a genuinely
+ * DIFFERENT case this function does not attempt to cover: `isUnityPlayReady`
+ * is already `true` there (Play works fine on the older version), so
+ * `EngineToolbar.tsx`'s not-ready CTA branch — the only place this function
+ * is consulted — never even runs for S8. Whether an "update available"
+ * affordance belongs somewhere in the READY state's own two-button pair is
+ * a real, separate design question this change does not answer.
  */
 export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean {
   return (
     facts.cliAvailable &&
     !facts.pipelinePackage.installed &&
-    !facts.pipelinePackage.declaredInManifest &&
-    facts.pipelineList?._tag === "ran" &&
-    facts.pipelineList.matched !== null &&
-    facts.pipelineList.matched.isRunning &&
-    facts.pipelineList.matched.isReachable
+    !facts.pipelinePackage.declaredInManifest
   );
 }
 
@@ -409,4 +421,39 @@ export function resolveEngineToolbarView(input: {
  * counts as engaged (the session is still "in play mode", just halted). */
 export function isPlayEngaged(playState: EditorPresencePlayState | null): boolean {
   return playState === "playing" || playState === "paused";
+}
+
+/**
+ * What the Unity ready-state's Play/Pause toggle (`EngineToolbar.tsx`, one
+ * button in the slot that used to be Play-only) should send on its next
+ * click — owner ruling, 2026-08-05, verbatim: "play and stop are the main
+ * ones for now, same area (toggle essentially) when unity is on play, shows
+ * pause there, and vice verse etc."
+ *
+ * Only two of the three `EditorPresencePlayState` values get their own
+ * face here — `"playing"` ⇒ `"pause"`, everything else ⇒ `"play"` — which
+ * means `"stopped"` AND `"paused"` share the `"play"` face. That's a
+ * deliberate reading of "vice verse etc.," not an oversight: `"play"` is
+ * literally the correct wire action to RESUME a paused session (there is
+ * no separate "resume" verb — `UnityPipelineClient.ts`'s `editor_play` is
+ * the one command that both starts from stopped and resumes from paused),
+ * so collapsing stopped+paused onto the same face is the toggle correctly
+ * tracking what its click DOES, not merely mirroring the three raw states
+ * 1:1. `null` (no status read yet — there is no live status feed for
+ * Unity, only a caller-supplied last-known value; see
+ * `resolveEngineToolbarView`'s `unityPlayState` param doc comment) falls
+ * into the same `"play"` face — showing Pause would claim knowledge of a
+ * playing session this client has no evidence for.
+ *
+ * Stop is DELIBERATELY not a value this function can return — see
+ * `EngineToolbar.tsx`'s Unity ready-state doc comment for where Stop lives
+ * instead (its own always-visible button, not folded into this toggle) and
+ * why: the owner's "play and stop are the main ones" names Stop as a real,
+ * present control in its own right, not a state this one button cycles
+ * through.
+ */
+export function resolveUnityPlayToggleAction(
+  playState: EditorPresencePlayState | null,
+): "play" | "pause" {
+  return playState === "playing" ? "pause" : "play";
 }

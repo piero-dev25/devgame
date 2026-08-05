@@ -225,6 +225,7 @@ import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
 import { postUnityPipelineInstall } from "../unity/postPipelineInstall";
 import { describeUnityPipelineInstallOutcome } from "../unity/unityPipelineInstallReport";
+import { invalidateUnitySetupProbeCache } from "../unity/setupProbeCache";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
@@ -5401,10 +5402,11 @@ function ChatViewContent(props: ChatViewProps) {
   // `EngineToolbarView.unityInstallOffered` (EngineToolbar.logic.ts) is what
   // gates whether this CTA even renders — only when the classifier's own
   // facts say the ONE thing this action can fix (Pipeline package missing)
-  // is the actual blocker AND Unity is open and reachable; every other
-  // not-ready reason (CLI missing, Unity closed, Safe Mode, already
-  // declared) shows the classifier's own sentence instead, since an install
-  // wouldn't change anything about those.
+  // is the actual blocker; CLI missing or the package already declared
+  // shows the classifier's own sentence instead, since an install wouldn't
+  // change anything about those. Deliberately NOT gated on whether Unity is
+  // open — the install itself doesn't need that either (see
+  // `shouldOfferUnityPipelineInstall`'s own doc comment).
   const handleSetupUnityIntegrations = useCallback(() => {
     const prepared = readPreparedConnection(environmentId);
     if (!prepared) return;
@@ -5422,11 +5424,16 @@ function ChatViewContent(props: ChatViewProps) {
           }),
         );
         if (report.type === "success") {
-          // The toolbar's own probe is the source of truth for what renders
-          // next (ready pair vs. CTA vs. message) — refresh it rather than
-          // assuming this specific outcome flips `unityInstallOffered` off,
-          // same "let the real check decide, don't guess" posture #106's
-          // fix already established for this exact query.
+          // `unitySetupQuery.refresh()` alone is NOT enough:
+          // `unitySetupProbeAtom` fetches through `fetchUnitySetupProbeCached`
+          // (setupProbeCache.ts), a 5s-TTL cache keyed by `environmentId` — a
+          // refresh inside that window would just re-read the STALE
+          // pre-install entry. `invalidateUnitySetupProbeCache` first is the
+          // same fix `UnitySetupClassifier.ts`'s S13 doc comment (193abfb89)
+          // already describes for the identical defect class (a just-installed
+          // package reported as still missing) and the exact precedent
+          // `ConnectionsSettings.tsx`'s own `onInstalled` handler follows.
+          invalidateUnitySetupProbeCache(environmentId);
           void unitySetupQuery.refresh();
         }
       })

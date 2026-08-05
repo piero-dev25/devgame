@@ -252,30 +252,82 @@ describe("EngineToolbar — Unity not-ready state withholds the CTA when an inst
   });
 });
 
-describe("EngineToolbar — Unity ready state renders the quiet Unity/Play pair", () => {
-  it("renders both 'Unity' and 'Play', with Unity disabled (bring-to-front not wired up yet)", () => {
-    const html = renderUnityToolbar(UNITY_READY_VIEW);
+describe("EngineToolbar — Unity ready state renders 'Unity' + the Play/Pause toggle + Stop", () => {
+  it("renders 'Unity' (disabled, bring-to-front not wired up yet) and the toggle reading 'Play' when playState is unknown (null)", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW); // playState: null
 
     expect(html).toContain(">Unity<");
     const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
     const unityButton = buttons.find((block) => block.includes(">Unity<"));
     expect(unityButton).toBeDefined();
     expect(isDisabled(unityButton ?? "")).toBe(true);
+
     const playButton = buttons.find((block) => block.includes(">Play<"));
     expect(playButton).toBeDefined();
     // Unlike the not-ready state's Play, THIS Play must be clickable.
     expect(isDisabled(playButton ?? "")).toBe(false);
+    expect(hasAriaLabel(html, "Pause")).toBe(false);
   });
 
-  it("does NOT render the old multi-action cluster (Pause/Stop buttons, play-target chevron) for Unity", () => {
-    // The mock shows two buttons, not the generic editor-presence Group —
-    // Pause/Stop are deliberately omitted per this build's own scope notes,
-    // not accidentally dropped.
+  it("does NOT render the old multi-action Group's play-target chevron for Unity — that stays editor-presence-only", () => {
+    // The mock's pair collapses to a trio with this change (toggle + Stop),
+    // still not the generic editor-presence Group with its trailing
+    // play-target menu — that control has no Unity equivalent.
     const html = renderUnityToolbar(UNITY_READY_VIEW);
 
-    expect(hasAriaLabel(html, "Pause")).toBe(false);
-    expect(hasAriaLabel(html, "Stop")).toBe(false);
     expect(hasAriaLabel(html, "Play target options")).toBe(false);
+  });
+
+  // Task: Play/Stop toggle in one slot (owner ruling, 2026-08-05) + Stop as
+  // its own always-visible, disabled-with-a-reason button — proves the
+  // RENDERED markup for all three `EditorPresencePlayState` values, the
+  // half `EngineToolbar.test.ts`'s `resolveUnityPlayToggleAction` suite
+  // can't see (that suite proves the pure derivation; this proves the
+  // component actually renders what it derives).
+  it("playing: toggle reads 'Pause' and is pressed/engaged; Stop is enabled with no 'nothing to stop' reason", () => {
+    const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "playing" });
+    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+
+    // No plain "Play" button while playing — the SAME slot now says Pause,
+    // not an ADDITIONAL button alongside it.
+    expect(hasAriaLabel(html, "Play")).toBe(false);
+    const pauseButton = buttons.find((block) => block.includes(">Pause<"));
+    expect(pauseButton).toBeDefined();
+    expect(isDisabled(pauseButton ?? "")).toBe(false);
+    expect((pauseButton ?? "").includes('aria-pressed="true"')).toBe(true);
+
+    const stopButton = buttons.find((block) => block.includes(">Stop<"));
+    expect(stopButton).toBeDefined();
+    expect(isDisabled(stopButton ?? "")).toBe(false);
+    expect(hasAriaLabel(html, "Nothing is playing to stop.")).toBe(false);
+  });
+
+  it("paused: toggle reads 'Play' again (resuming is the same wire action as starting) but stays pressed/engaged; Stop stays enabled", () => {
+    const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "paused" });
+    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+
+    expect(hasAriaLabel(html, "Pause")).toBe(false);
+    const playButton = buttons.find((block) => block.includes(">Play<"));
+    expect(playButton).toBeDefined();
+    expect(isDisabled(playButton ?? "")).toBe(false);
+    expect((playButton ?? "").includes('aria-pressed="true"')).toBe(true);
+
+    const stopButton = buttons.find((block) => block.includes(">Stop<"));
+    expect(stopButton).toBeDefined();
+    expect(isDisabled(stopButton ?? "")).toBe(false);
+  });
+
+  it("stopped explicitly (playState: \"stopped\"): Stop is present but disabled, with the stated 'nothing to stop' reason as its accessible name", () => {
+    const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "stopped" });
+    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+
+    const stopButton = buttons.find((block) => block.includes(">Stop<"));
+    expect(stopButton).toBeDefined();
+    expect(isDisabled(stopButton ?? "")).toBe(true);
+    // Same #107/#111 discipline: the disabled reason IS the accessible name,
+    // not a generic "Stop" a screen reader can't distinguish from working.
+    expect(hasAriaLabel(html, "Nothing is playing to stop.")).toBe(true);
+    expect((stopButton ?? "").includes('aria-label="Stop"')).toBe(false);
   });
 });
 

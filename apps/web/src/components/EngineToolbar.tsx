@@ -23,6 +23,7 @@ import {
 
 import {
   isPlayEngaged,
+  resolveUnityPlayToggleAction,
   type EngineToolbarAction,
   type EngineToolbarView,
 } from "./EngineToolbar.logic";
@@ -296,12 +297,16 @@ function ControlCluster(props: {
     // what to do next) beside the same disabled Play a sighted user would
     // otherwise stare at with no obvious next step — but ONLY when
     // `view.unityInstallOffered` says an install would actually fix THIS
-    // project's specific not-ready reason (see that field's own doc comment
-    // in EngineToolbar.logic.ts for the exact facts it's gated on). Every
-    // OTHER not-ready reason (no CLI, Unity not open, Safe Mode, already
-    // declared) falls through to the plain disabledPlayButton below —
-    // showing an "install" CTA next to a problem installing can't fix would
-    // be a control that looks like it helps but doesn't.
+    // project's specific not-ready reason (see
+    // `shouldOfferUnityPipelineInstall`'s own doc comment in
+    // EngineToolbar.logic.ts for the exact facts it's gated on — package
+    // missing and CLI available is all it needs; Unity's own live state is
+    // deliberately irrelevant, since the install works with Unity closed).
+    // Every OTHER not-ready reason (no CLI, package already declared and
+    // just awaiting Unity's resolver) falls through to the plain
+    // disabledPlayButton below — showing an "install" CTA next to a problem
+    // installing can't fix would be a control that looks like it helps but
+    // doesn't.
     //
     // `variant="default"` is the SAME filled/`--primary` vocabulary
     // `ComposerPrimaryActions.tsx`'s own "Implement" button and the
@@ -337,30 +342,56 @@ function ControlCluster(props: {
     );
   }
 
-  // Owner's mock, ready state: "collapses to two quiet outline buttons —
-  // Unity (bring the Editor to the front) and Play (bring to front AND
-  // play)." Deliberately Unity-only — every OTHER engine (Godot/Unreal
-  // today, both `"editor-presence"`) keeps the existing multi-action Group
-  // below untouched; that toolbar path isn't part of this change.
+  // Owner's mock, ready state, ORIGINALLY: "collapses to two quiet outline
+  // buttons — Unity (bring the Editor to the front) and Play (bring to
+  // front AND play)." Deliberately Unity-only — every OTHER engine (Godot/
+  // Unreal today, both `"editor-presence"`) keeps the existing multi-action
+  // Group below untouched; that toolbar path isn't part of this change
+  // (owner, separately: sharing this structure across engines is explicitly
+  // "later," not this change — see `resolveUnityPlayToggleAction`'s own
+  // comment about that Group staying at four separate buttons).
   //
-  // Two things this build deliberately does NOT attempt, per the owner not
-  // having ruled on them yet:
-  //  - Pause. Unity's real playState is stopped|playing|paused (three
-  //    states); the mock shows two buttons. Rather than invent a home for a
-  //    third affordance the mock doesn't show, Pause is simply omitted here
-  //    — `onAction("pause")` is still fully wired (`handleEngineAction` in
-  //    ChatView.tsx never changed), just not exposed as a button for Unity.
+  // The Play button is now a Play/Pause TOGGLE — owner ruling, 2026-08-05,
+  // verbatim: "play and stop are the main ones for now, same area (toggle
+  // essentially) when unity is on play, shows pause there, and vice verse
+  // etc." `resolveUnityPlayToggleAction` (EngineToolbar.logic.ts) is the
+  // pure derivation of what the toggle's next click sends; this component
+  // only renders its answer.
+  //
+  // Where Stop lives (this build's own design call, since the owner's
+  // instruction named the toggle's two faces but not Stop's placement):
+  // a THIRD, always-visible button next to the toggle, disabled with a
+  // stated reason while nothing is playing — not folded into the toggle
+  // (a play/pause/stop three-way cycle on one button is a worse click
+  // model than Unity's own editor toolbar, which the owner's mock is
+  // modeled on: Play and Stop are separate controls there too), and not a
+  // control that only APPEARS once something is playing (this file's own
+  // "disabled-with-a-reason, never hidden-or-silently-broken" principle —
+  // see `ThreeJsPlayButton`'s doc comment — applies here exactly as it does
+  // to every other control in this file; an appearing/disappearing button
+  // is a worse discoverability story than one that's honestly disabled,
+  // and the owner named Stop as one of "the main ones," not a conditional
+  // extra).
+  //
+  // Still deliberately NOT attempted, per the owner not having ruled on it:
   //  - Bring-to-front. `open -a "Unity"` via `ExternalLauncher` is a
   //    separate task. The `Unity` button below is PRESENT but DISABLED with
-  //    a stated reason, not omitted and not a silent no-op — this file's own
-  //    established "disabled-with-a-reason, never hidden-or-silently-broken"
-  //    principle (see `ThreeJsPlayButton`'s doc comment) applies exactly as
-  //    much to a deferred feature as to a missing one: a control that LOOKS
-  //    clickable but does nothing on click would be worse than one that's
-  //    honestly disabled, and omitting it entirely would leave the ready
-  //    state showing only one button, not the pair the mock specifies.
+  //    a stated reason, not omitted and not a silent no-op — same principle
+  //    as Stop's disabled state above: a control that LOOKS clickable but
+  //    does nothing on click would be worse than one that's honestly
+  //    disabled, and omitting it entirely would leave the ready state
+  //    showing only two buttons, not the trio this change now renders.
   if (isUnity) {
     const engaged = isPlayEngaged(view.playState);
+    const toggleAction = resolveUnityPlayToggleAction(view.playState);
+    const ToggleIcon = toggleAction === "pause" ? PauseIcon : PlayIcon;
+    const toggleLabel = toggleAction === "pause" ? "Pause" : "Play";
+    // Same single-expression-drives-both-aria-label-and-tooltip discipline
+    // #111 established (see `ThreeJsPlayButton`'s doc comment) — a disabled
+    // Stop that a screen reader announces as just "Stop," with no hint that
+    // clicking does nothing, is the same class of bug #107 fixed for the
+    // ready-state Play button.
+    const stopLabel = engaged ? "Stop" : "Nothing is playing to stop.";
     return (
       <div className="flex shrink-0 items-center gap-1">
         <Tooltip>
@@ -381,16 +412,33 @@ function ControlCluster(props: {
               <Button
                 size="xs"
                 variant={engaged ? "default" : "outline"}
-                aria-label="Play"
+                aria-label={toggleLabel}
                 aria-pressed={engaged}
-                onClick={() => props.onAction("play")}
+                onClick={() => props.onAction(toggleAction)}
               >
-                <PlayIcon className="size-3.5" aria-hidden />
-                <span className="ml-0.5">Play</span>
+                <ToggleIcon className="size-3.5" aria-hidden />
+                <span className="ml-0.5">{toggleLabel}</span>
               </Button>
             }
           />
-          <TooltipPopup side="bottom">Play</TooltipPopup>
+          <TooltipPopup side="bottom">{toggleLabel}</TooltipPopup>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={!engaged}
+                aria-label={stopLabel}
+                onClick={() => props.onAction("stop")}
+              >
+                <SquareIcon className="size-3.5" aria-hidden />
+                <span className="ml-0.5">Stop</span>
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">{stopLabel}</TooltipPopup>
         </Tooltip>
       </div>
     );
