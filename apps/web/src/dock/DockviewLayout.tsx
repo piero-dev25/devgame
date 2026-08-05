@@ -39,6 +39,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "~/components/ui/button";
+import { selectActivePanelForKey, useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
 import { cn } from "~/lib/utils";
 
 import {
@@ -51,6 +52,7 @@ import {
   migrateLoadedLayout,
   openPanelInDock,
   parseLayoutFile,
+  restoreActivePanelForKey,
   syncFloatingConstraints,
   togglePanelInDock,
   type LayoutPresetFactory,
@@ -152,6 +154,16 @@ export interface DockviewLayoutProps {
    * together: omit both to opt out of this entirely (a future second dock
    * with no equivalent "which thing is the user looking at" concept has no
    * reason to force anything active on its own).
+   *
+   * Task #108 EXTENSION: `activateOnChangeId` is now a FALLBACK, not the
+   * unconditional target — whenever `activationKey` also has its own
+   * remembered selection (`dockActiveSelectionStore.ts`, keyed by
+   * `String(activationKey)`) AND that panel is still open, THAT wins
+   * instead. `activateOnChangeId` still fires exactly as this comment
+   * originally described for any key with no remembered selection yet (a
+   * thread visited for the first time), so finding #5's guarantee is
+   * unchanged for that case. See `restoreActivePanelForKey`
+   * (`lib/restoreActivePanel.ts`) for the actual precedence logic.
    */
   activationKey?: string | number;
   activateOnChangeId?: string;
@@ -272,6 +284,13 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const apiRef = useRef<DockviewApi | null>(null);
+    // Task #108: lets the mount effect's `onDidActivePanelChange`
+    // subscription below (set up ONCE, never re-created on a thread switch —
+    // see that effect's own comment) always persist to the CURRENT thread's
+    // key, not whichever key was live when the dock first mounted. Kept in
+    // sync by the activationKey-change effect further down, the only other
+    // place `activationKey` is read.
+    const activationKeyRef = useRef(activationKey);
     const [notice, setNotice] = useState<string | null>(null);
     // When the saved layout was refused because it's a *newer* schema version
     // than this build understands, the automatic save must not overwrite it
@@ -320,20 +339,37 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [storage]);
 
-    // Fix round, finding #5: brings `activateOnChangeId`'s panel (Chat, from
-    // ChatDock.tsx) to the front of its group whenever `activationKey`
-    // (that route's thread identity) changes — including on this
-    // component's OWN first render, which naturally no-ops harmlessly if
-    // `apiRef.current` isn't populated yet (nothing has loaded to activate)
-    // or if the panel isn't open. Deliberately NOT part of the main mount
-    // effect below: that effect intentionally does NOT re-run on a thread
-    // switch (see ChatDock.tsx's own doc on why the dock must not remount
-    // when the route's thread changes) — this needs the opposite behaviour,
-    // firing on EVERY thread switch while touching nothing else about the
-    // live dockview instance.
+    // Fix round, finding #5, EXTENDED for task #108 ("dock tab selection
+    // leaks across chats"): whenever `activationKey` (that route's thread
+    // identity) changes — including on this component's OWN first render,
+    // which naturally no-ops harmlessly if `apiRef.current` isn't populated
+    // yet (nothing has loaded to activate) — this brings the RIGHT panel to
+    // the front of its group. "Right" now means: this thread's OWN
+    // remembered selection (`dockActiveSelectionStore.ts`, written by the
+    // mount effect's `onDidActivePanelChange` subscription below) if it has
+    // one and that panel is still open; otherwise `activateOnChangeId`'s
+    // panel (Chat), the original fix-round #5 behaviour, unchanged for a
+    // thread with no remembered selection yet (e.g. never visited before) —
+    // see `restoreActivePanelForKey`'s own doc comment for why that
+    // precedence, not a flag, is what keeps #5's original guarantee true.
+    //
+    // Deliberately NOT part of the main mount effect below: that effect
+    // intentionally does NOT re-run on a thread switch (see ChatDock.tsx's
+    // own doc on why the dock must not remount when the route's thread
+    // changes) — this needs the opposite behaviour, firing on EVERY thread
+    // switch while touching nothing else about the live dockview instance.
     useEffect(() => {
-      if (activateOnChangeId === undefined) return;
-      apiRef.current?.getPanel(activateOnChangeId)?.api.setActive();
+      activationKeyRef.current = activationKey;
+      const api = apiRef.current;
+      if (!api || activationKey === undefined) return;
+      const rememberedPanelId = selectActivePanelForKey(
+        useDockActiveSelectionStore.getState().byActivationKey,
+        String(activationKey),
+      );
+      restoreActivePanelForKey(api, {
+        rememberedPanelId,
+        ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
+      });
       // Deliberately `activateOnChangeId`-less deps — it's a caller-supplied
       // constant (ChatDock.tsx passes the same panel id every render); only
       // `activationKey`'s IDENTITY is meant to retrigger this.
@@ -480,6 +516,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // just loaded.
       let layoutChangeSub: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
       let mutateLayoutSub: ReturnType<DockviewApi["onDidMutateLayout"]> | undefined;
+      // Task #108: the WRITE half of per-thread selection memory — set up in
+      // the same place and for the same "don't capture phantom events while
+      // the loaded/default tree is still being applied" reason as the two
+      // subscriptions above.
+      let activePanelChangeSub: ReturnType<DockviewApi["onDidActivePanelChange"]> | undefined;
       let persistTimer: ReturnType<typeof setTimeout> | undefined;
       // Tracks whether a debounced save is currently outstanding — separate
       // from `persistTimer` itself, which still holds the last timer id even
@@ -684,6 +725,23 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // to follow it.
         layoutChangeSub = api.onDidLayoutChange(scheduleSave);
         mutateLayoutSub = api.onDidMutateLayout(scheduleSave);
+        // Task #108: records which panel is active RIGHT NOW under the
+        // CURRENT thread's key — fires for every activation, whatever
+        // triggered it (a genuine tab click, the initial load applying a
+        // saved/default tree, or this same file's own restore call above),
+        // which is exactly right: the store's only job is to reflect
+        // "whatever is showing now, for whichever thread is now active,"
+        // not to distinguish user-driven from programmatic. Reads
+        // `activationKeyRef` (NOT the `activationKey` closure captured when
+        // this effect first ran) because this subscription is never
+        // recreated on a thread switch — see the activationKey-change effect
+        // above, the one place that ref is kept current.
+        activePanelChangeSub = api.onDidActivePanelChange(({ panel }) => {
+          if (activationKeyRef.current === undefined) return;
+          useDockActiveSelectionStore
+            .getState()
+            .setActivePanel(String(activationKeyRef.current), panel?.id ?? null);
+        });
       }
 
       void loadInitialLayout();
@@ -714,6 +772,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         window.removeEventListener("keydown", handleEscape);
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
+        activePanelChangeSub?.dispose();
         api.dispose();
         apiRef.current = null;
       };

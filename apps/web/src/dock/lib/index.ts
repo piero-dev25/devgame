@@ -47,6 +47,10 @@ export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
 // extracted for the same "no jsdom to drive the ref" reason as
 // decideImportedLayoutAction.
 export { openPanelInDock, togglePanelInDock } from "./openPanel";
+// Task #108: the core decision behind restoring a thread's remembered
+// active-panel selection — same "no jsdom to drive the ref" extraction
+// reason as openPanelInDock/togglePanelInDock above.
+export { restoreActivePanelForKey } from "./restoreActivePanel";
 // Fix round after 7606dff45: migrates a saved layout forward when the
 // catalog has grown, instead of the workspaceId-bump-and-discard pattern
 // that used to be the only way this dock handled that case.

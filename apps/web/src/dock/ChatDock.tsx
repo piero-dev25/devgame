@@ -82,6 +82,23 @@ const CHAT_DOCK_PRESET_ID = "chat-dock-default";
  * — the same "workspace" DockviewLayoutProps already models, just with
  * exactly one workspace for now.
  *
+ * READ THIS BEFORE ASSUMING "shared" COVERS SELECTION TOO (task #108): the
+ * `SerializedDockview` this key stores bundles two genuinely different kinds
+ * of state, and "one shared layout, not one per thread" above is a claim
+ * about ONLY the first one:
+ *  - Layout STRUCTURE — panel positions, sizes, splits — correctly global.
+ *    Nobody wants their column widths resetting on every thread switch.
+ *  - dockview's own `activeGroup`/per-group `activeView` — which tab is
+ *    front-most — travels in this SAME blob, but should NOT be global: it
+ *    used to be, and that was the bug (#108's "outer tab selection leaks
+ *    across chats" — switch threads, whichever tab you last clicked stays
+ *    clicked, everywhere). `dockActiveSelectionStore.ts` (keyed by
+ *    `activationKey` below, via `DockviewLayout.tsx`'s
+ *    `restoreActivePanelForKey`) now gives selection its own per-thread
+ *    answer instead of inheriting this key's shared scope. If you're adding
+ *    new dockview-level state here, ask which of these two categories it
+ *    belongs to before assuming this comment's "shared" applies to it.
+ *
  * STABLE FROM HERE ON — fix round after 7606dff45, reversing the precedent
  * step 1/2 set. This key was bumped twice (`"chat-dock"` →
  * `"chat-dock-v2"` when the sidebar panel shipped, → `"chat-dock-v3"` when
