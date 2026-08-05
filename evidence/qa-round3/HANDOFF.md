@@ -12,7 +12,7 @@ two things round 2 could not prove.**
 ## Target
 
 - App: **DevGame (Alpha)**, at `/Applications/DevGame (Alpha).app`.
-- **Built from commit `<STAMP>`** — name it in your report.
+- **Built from commit `1f41acec2`** — name it in your report.
 - Do not rebuild it. If it is not running, launch the existing bundle.
 
 ## Item 0 — preflight (always first)
@@ -41,11 +41,11 @@ the end — that is now handled outside your process. Just capture freely.
 
 1. **Never open, list, or inspect `~/Projects/Deepmind`.** Not yours.
 2. **Do not type into the Terminal panel.** Open it, confirm a shell starts, stop.
-3. **Do not modify any file** in any project. Observation only.
-4. **Do not click "Setup Unity Integrations"** — it writes to the owner's real
-   Unity project. Screenshot it, quote it, move on.
-5. **Do not quit or relaunch the app** unless it hangs; if it hangs, say so and stop.
-6. **Any dialog that would write something → cancel it and report it.**
+3. **Do not modify project files by hand.** The ONE sanctioned write is Item 5's
+   "Setup Unity Integrations" click, which the owner has explicitly authorised
+   for the **Mafia Game** project. Everything else is observation only.
+4. **Do not quit or relaunch the app** unless it hangs; if it hangs, say so and stop.
+5. **Any OTHER dialog that would write something → cancel it and report it.**
 
 ---
 
@@ -141,13 +141,60 @@ same tab strip, where selecting one deselects the other). Then:
 If you cannot find two panels sharing a group, say so and describe the layout
 you actually have — that is a useful answer, not a failure.
 
+---
+
+## Item 5 — Setup Unity Integrations, END TO END (the headline of this round)
+
+**The owner has explicitly authorised this write on the Mafia Game project.**
+Previous rounds forbade it; that prohibition is lifted. This is the one
+sanctioned file-modifying action in this pass.
+
+This is the most valuable item in the round, because the failure it hunts is
+one nothing else can catch. A merge-gate review found that the CTA would
+**look broken after succeeding**: it refreshed its status through a 5-second
+cache and re-read the _pre-install_ answer, so a successful install still
+rendered "you need to install this". That was fixed by invalidating the cache
+before refreshing — **and that fix has never once been exercised live.**
+
+Do this in order, and screenshot at every numbered step:
+
+1. **Before.** On Mafia Game, record the header verbatim: the CTA's exact
+   label, and disabled Play's accessible name (which in round 2 read _"This
+   project doesn't have Unity's Pipeline package, and Unity isn't open."_).
+2. **Click "Setup Unity Integrations".**
+3. **Watch the button through the whole transition** and describe every state
+   you observe, in order — does it show a pending/spinner state, does it stay
+   filled, does anything flicker? If a toast appears, quote it **verbatim**,
+   including whether it is styled as success or failure.
+4. **After — this is the assertion that matters.** Within a few seconds and
+   _without_ you switching projects, reloading, or restarting anything, the
+   header must stop offering setup and settle into the quiet **Unity + Play**
+   pair.
+   - If the CTA is still showing "Setup Unity Integrations" after ~10 seconds,
+     **that is the cache bug surviving its fix — report it immediately and
+     prominently.** Note it may self-correct around the 5s mark; if it does,
+     say exactly how long it took, because a visible stale window is still a
+     defect.
+   - If Play became enabled, hover it and say what the tooltip reads now.
+5. **Re-check Play's accessible name.** It must no longer claim the Pipeline
+   package is missing. Quote the new value verbatim.
+6. **Then switch to another project and back.** Confirm the ready state
+   persists and wasn't just transient UI.
+
+Report plainly whether a person clicking that button once would believe it
+worked. That is the actual acceptance criterion.
+
+If the install **fails**, that is a completely legitimate and valuable result
+— quote the error verbatim and stop. Do not try to fix it, retry more than
+once, or work around it by editing files yourself.
+
 ## Also check
 
-5. **Files** — opens, lists files, clicking one shows content.
-6. **Diff** — changes or an honest empty state.
-7. **Terminal** — "New Terminal" starts a shell. **Type nothing.**
-8. **Browser** — open it, report exactly what it shows.
-9. **A project with no engine** — header reads "No engine", Play absent.
+6. **Files** — opens, lists files, clicking one shows content.
+7. **Diff** — changes or an honest empty state.
+8. **Terminal** — "New Terminal" starts a shell. **Type nothing.**
+9. **Browser** — open it, report exactly what it shows.
+10. **A project with no engine** — header reads "No engine", Play absent.
 
 ## Known-absent — do NOT report as defects
 
