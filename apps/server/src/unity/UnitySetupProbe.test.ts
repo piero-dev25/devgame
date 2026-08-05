@@ -63,6 +63,11 @@ function stubPipelineClient(
       // checked against the full service interface, same latent-gap
       // pattern this file's own `list` field closed for #92 increment 1.
       install: () => Effect.die("unexpected install call"),
+      // Same reason as `install` above — this suite never cold-launches an
+      // Editor. `open` became a required member when #92's cold-start route
+      // landed (0a1f6415d), and this object literal is checked against the
+      // full service interface.
+      open: () => Effect.die("unexpected open call"),
       ...overrides,
     }),
   );
