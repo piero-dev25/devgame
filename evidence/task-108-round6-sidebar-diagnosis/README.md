@@ -24,9 +24,10 @@ root cause — fixed in commit `07a031926`.
 - This README — the click-log-to-log-line mapping and the four "prize
   window" answers.
 
-## The click record (from round 5's computer-use driver, UTC; the log runs
+## The click record
 
-## ~7h behind — align 18:29:21.151Z UTC to 11:29:21.151 local)
+From round 5's computer-use driver, timestamps in UTC. The log runs ~7h
+behind — align `18:29:21.151Z` UTC to `11:29:21.151` local.
 
 1. 18:29:21.151Z — click WellnessCompanion > Greeting (thread **A**). Arrival: Diff.
 2. 18:29:38.338Z — click Files (in A). Tab: Files.
