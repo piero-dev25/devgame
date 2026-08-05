@@ -92,10 +92,12 @@ export interface EngineToolbarProps {
   readonly hasPresenceCommandScope: boolean;
   readonly onOpenConnectionsSettings?: () => void;
   /**
-   * Re-runs `unitySetupProbeAtom` for this environment (`useEnvironmentQuery`'s
-   * `refresh`, threaded down from `ChatView.tsx`) — the toolbar's escape
-   * hatch from a FAILED status check (see `EngineToolbarView.unitySetupCheckFailed`),
-   * closing the "unbounded spinner with no way out" half of #106.
+   * Re-runs `unitySetupProbeAtom` for this (environment, project) pair —
+   * probe identity gained the project half when the routes became
+   * project-scoped (`useEnvironmentQuery`'s `refresh`, threaded down from
+   * `ChatView.tsx`) — the toolbar's escape hatch from a FAILED status check
+   * (see `EngineToolbarView.unitySetupCheckFailed`), closing the "unbounded
+   * spinner with no way out" half of #106.
    * `ConnectionsSettings.tsx`'s Settings panel already has an equivalent
    * Retry button; this is the toolbar's.
    */

@@ -8,6 +8,7 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
@@ -22,6 +23,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { dispatchUnitySetupProbe } from "./UnitySetupProbeRoute.ts";
@@ -51,7 +53,7 @@ function makeSession(
   };
 }
 
-function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null): {
+function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null | "fail"): {
   readonly layer: Layer.Layer<ProjectionSnapshotQuery.ProjectionSnapshotQuery>;
   readonly requestedProjectIds: ReadonlyArray<string>;
 } {
@@ -67,9 +69,17 @@ function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null): {
     getActiveProjectByWorkspaceRoot: () =>
       Effect.die("unexpected getActiveProjectByWorkspaceRoot call"),
     getProjectShellById: (projectId) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         requestedProjectIds.push(projectId);
-        return project === null ? Option.none() : Option.some(project);
+        // "fail" simulates the projection lookup ITSELF failing (locked DB,
+        // row that no longer decodes) — a different branch from Option.none,
+        // and the one merge-gate F2 found uncovered and silently swallowed.
+        if (project === "fail") {
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "test: projection lookup failure" }),
+          );
+        }
+        return Effect.succeed(project === null ? Option.none() : Option.some(project));
       }),
     getFirstActiveThreadIdByProjectId: () =>
       Effect.die("unexpected getFirstActiveThreadIdByProjectId call"),
@@ -174,6 +184,47 @@ describe("dispatchUnitySetupProbe", () => {
       expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
       expect(spy.workspaceRoots).toEqual([]);
     }),
+  );
+
+  it.effect(
+    "a FAILED projection lookup collapses to its own typed error, distinct from Project not found",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeUnitySetupProbeSpy();
+        const projection = makeProjectionSnapshotQuerySpy("fail");
+        const session = makeSession([AuthPresenceReadScope]);
+        // Capture logs the way auth/http.test.ts's captureLoggedCause does:
+        // the tapErrorCause log is the only place the REAL failure survives
+        // (the client renders only the collapsed message), so an assertion
+        // on the result alone would pass even with the log deleted.
+        const messages: Array<unknown> = [];
+        const logger = Logger.make<unknown, void>((options) => {
+          if (Array.isArray(options.message)) {
+            messages.push(...options.message);
+          } else {
+            messages.push(options.message);
+          }
+        });
+        const outcome = yield* dispatchUnitySetupProbe(session, PROJECT_ID).pipe(
+          Effect.provide(Layer.mergeAll(spy.layer, projection.layer)),
+          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+        );
+
+        // Merge-gate F2: this branch existed with zero coverage — a locked
+        // DB or an undecodable row was indistinguishable from an unknown id
+        // AND silently unlogged. The distinct message is the triage seam.
+        expect(outcome).toEqual({
+          _tag: "ok",
+          value: { _tag: "error", message: "Could not resolve project." },
+        });
+        expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
+        expect(spy.workspaceRoots).toEqual([]);
+        expect(
+          messages.some(
+            (message) => typeof message === "string" && message.includes("project lookup failed"),
+          ),
+        ).toBe(true);
+      }),
   );
 
   it("the typed project-not-found error decodes through UnitySetupProbeResult", () => {

@@ -32,6 +32,7 @@ import {
 } from "@t3tools/contracts";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { dispatchUnityPipelineInstall } from "./UnityPipelineInstallRoute.ts";
@@ -61,7 +62,7 @@ function makeSession(
   };
 }
 
-function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null): {
+function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null | "fail"): {
   readonly layer: Layer.Layer<ProjectionSnapshotQuery.ProjectionSnapshotQuery>;
   readonly requestedProjectIds: ReadonlyArray<string>;
 } {
@@ -77,9 +78,17 @@ function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null): {
     getActiveProjectByWorkspaceRoot: () =>
       Effect.die("unexpected getActiveProjectByWorkspaceRoot call"),
     getProjectShellById: (projectId) =>
-      Effect.sync(() => {
+      Effect.suspend(() => {
         requestedProjectIds.push(projectId);
-        return project === null ? Option.none() : Option.some(project);
+        // "fail" simulates the projection lookup ITSELF failing (locked DB,
+        // row that no longer decodes) — a different branch from Option.none,
+        // and the one merge-gate F2 found uncovered and silently swallowed.
+        if (project === "fail") {
+          return Effect.fail(
+            new PersistenceSqlError({ operation: "test: projection lookup failure" }),
+          );
+        }
+        return Effect.succeed(project === null ? Option.none() : Option.some(project));
       }),
     getFirstActiveThreadIdByProjectId: () =>
       Effect.die("unexpected getFirstActiveThreadIdByProjectId call"),
@@ -212,6 +221,27 @@ describe("dispatchUnityPipelineInstall", () => {
         expect(decoded).toEqual({
           _tag: "error",
           message: "Project not found.",
+        });
+        expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
+        expect(spy.calls).toEqual([]);
+      }),
+  );
+
+  it.effect(
+    "a FAILED projection lookup collapses to its own typed error without installing anywhere",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeUnityPipelineClientSpy();
+        const projection = makeProjectionSnapshotQuerySpy("fail");
+        const session = makeSession([AuthPresenceCommandScope]);
+        const outcome = yield* runDispatchTest(spy, session, projection);
+
+        // Merge-gate F2: the WRITE route's lookup-failure branch had zero
+        // coverage. "Could not resolve project." (infrastructure failed) vs
+        // "Project not found." (id genuinely unknown) is the triage seam.
+        expect(outcome).toEqual({
+          _tag: "ok",
+          value: { _tag: "error", message: "Could not resolve project." },
         });
         expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
         expect(spy.calls).toEqual([]);

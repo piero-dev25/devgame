@@ -5426,7 +5426,15 @@ function ChatViewContent(props: ChatViewProps) {
       );
       return;
     }
-    const prepared = readPreparedConnection(environmentId);
+    // Merge-gate F3 (project-scoped routes review): source environmentId
+    // from activeProjectRef, the SAME object the probe atom key and
+    // handleRetryUnitySetup use — not the ChatView prop. The two are equal
+    // today by construction (activeThread.environmentId is always built
+    // from the prop), but a divergence would make THIS handler invalidate
+    // one cache key while the atom reads another — the exact
+    // stale-"still missing" defect class the invalidation exists to stop.
+    // One source, no drift.
+    const prepared = readPreparedConnection(activeProjectRef.environmentId);
     if (!prepared) {
       // Merge-gate review finding F2 on `e26534e1b`: this used to be a
       // silent `if (!prepared) return;` — the exact bail #106 already
@@ -5477,7 +5485,10 @@ function ChatViewContent(props: ChatViewProps) {
           // already describes for the identical defect class (a just-installed
           // package reported as still missing) and the exact precedent
           // `ConnectionsSettings.tsx`'s own `onInstalled` handler follows.
-          invalidateUnitySetupProbeCache(environmentId, activeProjectRef.projectId);
+          invalidateUnitySetupProbeCache(
+            activeProjectRef.environmentId,
+            activeProjectRef.projectId,
+          );
           void unitySetupQuery.refresh();
         }
       })
@@ -5504,7 +5515,7 @@ function ChatViewContent(props: ChatViewProps) {
     // part — the exact same fix `ConnectionsSettings.tsx`'s
     // `retryUnitySetupProbe` already applies to the identical shape
     // (`[primaryEnvironmentId, unitySetupQuery.refresh]`).
-  }, [activeProjectRef, environmentId, unitySetupQuery.refresh]);
+  }, [activeProjectRef, unitySetupQuery.refresh]);
 
   const handleRetryUnitySetup = useCallback(() => {
     if (!activeProjectRef) return;

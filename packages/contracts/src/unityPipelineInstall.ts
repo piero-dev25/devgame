@@ -18,6 +18,14 @@ import { ProjectId } from "./baseSchemas.ts";
  * The caller supplies only an opaque, server-issued project id. The server
  * resolves the canonical workspace root from its own projection store, so
  * this disk-writing route never accepts a filesystem path from the wire.
+ *
+ * Honest limit of that guarantee (merge-gate F10): the stored
+ * `workspace_root` was ITSELF caller-supplied once — at `project.create`/
+ * `project.meta.update`, under `orchestration:operate`, validated only as
+ * an existing directory. So the precise property is "the install target is
+ * a registered, non-deleted project some earlier AUTHORIZED caller bound",
+ * not "a path no caller ever chose". The two capabilities sit behind
+ * different scopes, which is what makes the indirection meaningful.
  */
 export const UnityPipelineInstallInput = Schema.Struct({ projectId: ProjectId });
 export type UnityPipelineInstallInput = typeof UnityPipelineInstallInput.Type;

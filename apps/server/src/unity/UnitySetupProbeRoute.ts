@@ -65,6 +65,13 @@ export const dispatchUnitySetupProbe = (
     const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const lookup = yield* snapshotQuery.getProjectShellById(projectId).pipe(
       Effect.map((project) => ({ _tag: "ok", project }) as const),
+      // Merge-gate F2: the swallowed cause made a SQL/decode failure
+      // indistinguishable from a genuine unknown id in triage — the client
+      // renders only the message, so the server log is the ONLY place the
+      // real error can survive. Log before collapsing to the typed result.
+      Effect.tapError((cause) =>
+        Effect.logError("unity setup probe: project lookup failed", { cause }),
+      ),
       Effect.orElseSucceed(
         () =>
           ({

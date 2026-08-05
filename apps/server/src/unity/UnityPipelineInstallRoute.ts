@@ -19,12 +19,14 @@
  * `UnityCommandRoute.ts`'s own doc comment gives for reusing this scope.
  *
  * CONSENT IS ENFORCED CLIENT-SIDE, NOT BY A SERVER-SIDE FLAG: this route has
- * no separate "did the user click confirm" input to check. The consent
- * dialog (`ConnectionsSettings.tsx`) is what stands between a page load and
- * this call ever firing — same posture `UnityCommandRoute.ts`'s Play/Stop/
- * Pause buttons already have (the click IS the consent; the server's own
- * enforcement is the scope check, not a second flag it would have no way to
- * verify was genuine anyway).
+ * no separate "did the user click confirm" input to check. The deliberate
+ * "Setup Unity Integrations" click in the chat header (`ChatView.tsx`'s
+ * `handleSetupUnityIntegrations`; the old `ConnectionsSettings.tsx` dialog
+ * was deleted with that panel, and the owner ruled the click itself IS the
+ * consent) is what stands between a page load and this call ever firing —
+ * same posture `UnityCommandRoute.ts`'s Play/Stop/Pause buttons already
+ * have (the server's own enforcement is the scope check, not a second flag
+ * it would have no way to verify was genuine anyway).
  */
 import {
   AuthPresenceCommandScope,
@@ -79,6 +81,12 @@ export const dispatchUnityPipelineInstall = (
     const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const lookup = yield* snapshotQuery.getProjectShellById(projectId).pipe(
       Effect.map((project) => ({ _tag: "ok", project }) as const),
+      // Merge-gate F2: same rationale as UnitySetupProbeRoute.ts's twin —
+      // without this log a locked DB or a row that fails to decode is
+      // indistinguishable from an unknown id, silently, on the WRITE route.
+      Effect.tapError((cause) =>
+        Effect.logError("unity pipeline install: project lookup failed", { cause }),
+      ),
       Effect.orElseSucceed(
         () =>
           ({
