@@ -200,9 +200,9 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
  * timeout, anything) left `setup` at `null` forever, and this function had
  * no way to tell that apart from "hasn't resolved yet" — "Checking Unity's
  * status…" stayed on screen permanently instead of ever becoming a stated
- * failure. Same non-negotiable as `UnitySetupSection`'s own fix
- * (ConnectionsSettings.tsx): resolve to success or a stated reason, never
- * an indefinite loading message. */
+ * failure. The chat header's setup probe follows the same non-negotiable:
+ * resolve to success or a stated reason, never an indefinite loading
+ * message. */
 function unityDisabledReason(
   setup: UnitySetupProbeResult | null,
   error: string | null,
