@@ -20,11 +20,24 @@ export function describeUnityPipelineInstallOutcome(
     const selection = `${result.selectionPackage.packageId}@${result.selectionPackage.version}`;
     const pipelineAlreadyInstalled = result.value.alreadyInstalled;
     const selectionAlreadyInstalled = result.selectionPackage.operation === "alreadyInstalled";
+    const pairingReport =
+      result.pairingOutcome._tag === "minted"
+        ? "A fresh pairing credential was handed off; pairing will finish automatically in Unity."
+        : result.pairingOutcome._tag === "alreadyPaired"
+          ? "Unity selection is already paired."
+          : result.pairingOutcome.reason;
     if (pipelineAlreadyInstalled && selectionAlreadyInstalled) {
+      if (result.pairingOutcome._tag === "skipped") {
+        return {
+          type: "error",
+          title: "Unity integrations installed, but pairing needs attention",
+          description: `${pipeline} and ${selection} are already in this project. ${pairingReport}`,
+        };
+      }
       return {
         type: "success",
         title: "Unity integrations already installed",
-        description: `${pipeline} and ${selection} are already in this project.`,
+        description: `${pipeline} and ${selection} are already in this project. ${pairingReport}`,
       };
     }
     const pipelineReport = pipelineAlreadyInstalled
@@ -36,11 +49,18 @@ export function describeUnityPipelineInstallOutcome(
         : result.selectionPackage.operation === "alreadyInstalled"
           ? `${selection} was already embedded under Packages/.`
           : `Embedded ${selection} under Packages/.`;
-    return {
-      type: "success",
-      title: "Unity integrations installed",
-      description: `${pipelineReport} ${selectionReport}`,
-    };
+    const packageReport = `${pipelineReport} ${selectionReport}`;
+    return result.pairingOutcome._tag === "skipped"
+      ? {
+          type: "error",
+          title: "Unity integrations installed, but pairing needs attention",
+          description: `${packageReport} ${pairingReport}`,
+        }
+      : {
+          type: "success",
+          title: "Unity integrations installed",
+          description: `${packageReport} ${pairingReport}`,
+        };
   }
   return {
     type: "error",

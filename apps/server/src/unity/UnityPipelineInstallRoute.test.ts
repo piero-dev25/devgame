@@ -32,6 +32,7 @@ import {
   OrchestrationProjectShell,
   ProjectId,
   UnityPipelineInstallResult,
+  UnityEditorPresencePairingFile,
 } from "@t3tools/contracts";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
@@ -43,13 +44,19 @@ import {
   unitySelectionPackageSourceCandidates,
 } from "./UnityPipelineInstallRoute.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
+import * as UnityPairingHandoff from "./UnityPairingHandoff.ts";
 
 const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeProjectShell = Schema.decodeUnknownSync(OrchestrationProjectShell);
+const decodePairingFile = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(UnityEditorPresencePairingFile),
+);
+const decodeInstallResult = Schema.decodeUnknownEffect(UnityPipelineInstallResult);
 const PROJECT_ID = ProjectId.make("project-unity");
 const PROJECT_ROOT = "/Users/piero/Projects/Deepmind";
 
 function makeProject(workspaceRoot: string) {
-  return Schema.decodeUnknownSync(OrchestrationProjectShell)({
+  return decodeProjectShell({
     id: PROJECT_ID,
     title: "Deepmind",
     workspaceRoot,
@@ -150,14 +157,48 @@ function makeUnityPipelineClientSpy(): {
   return { layer, calls };
 }
 
+function makeUnityPairingHandoffSpy(
+  options: {
+    readonly alreadyPaired?: boolean;
+    readonly issueFails?: boolean;
+  } = {},
+) {
+  const registeredRoots: Array<string> = [];
+  const issued: Array<{
+    readonly label?: string;
+    readonly scopes?: ReadonlyArray<string>;
+  }> = [];
+  const layer = Layer.effect(
+    UnityPairingHandoff.UnityPairingHandoff,
+    UnityPairingHandoff.make({
+      serverUrl: "http://127.0.0.1:3773",
+      isAlreadyPaired: (workspaceRoot) => {
+        registeredRoots.push(workspaceRoot);
+        return Effect.succeed(options.alreadyPaired ?? false);
+      },
+      issuePairingCredential: (input) => {
+        issued.push(input);
+        return options.issueFails
+          ? new UnityPairingHandoff.UnityPairingHandoffDependencyError({
+              operation: "credentialMint",
+              cause: "pairing mint failed",
+            })
+          : Effect.succeed({ credential: "PAIRING1234" });
+      },
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
+  return { issued, layer, registeredRoots };
+}
+
 /** Provides the CLI double and projection-store double around one dispatch. */
 const runDispatchTest = (
   spy: ReturnType<typeof makeUnityPipelineClientSpy>,
   session: EnvironmentAuth.AuthenticatedSession,
   projection: ReturnType<typeof makeProjectionSnapshotQuerySpy>,
+  pairing: ReturnType<typeof makeUnityPairingHandoffSpy> = makeUnityPairingHandoffSpy(),
 ) =>
   dispatchUnityPipelineInstall(session, PROJECT_ID).pipe(
-    Effect.provide(Layer.mergeAll(spy.layer, projection.layer, NodeServices.layer)),
+    Effect.provide(Layer.mergeAll(spy.layer, projection.layer, pairing.layer, NodeServices.layer)),
   );
 
 const runTempProjectDispatch = Effect.fn("runTempProjectDispatch")(function* () {
@@ -168,8 +209,9 @@ const runTempProjectDispatch = Effect.fn("runTempProjectDispatch")(function* () 
   const spy = makeUnityPipelineClientSpy();
   const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
   const session = makeSession([AuthPresenceCommandScope]);
-  const outcome = yield* runDispatchTest(spy, session, projection);
-  return { fileSystem, outcome, projection, spy, workspaceRoot };
+  const pairing = makeUnityPairingHandoffSpy();
+  const outcome = yield* runDispatchTest(spy, session, projection, pairing);
+  return { fileSystem, outcome, pairing, projection, spy, workspaceRoot };
 });
 
 describe("dispatchUnityPipelineInstall", () => {
@@ -223,7 +265,7 @@ describe("dispatchUnityPipelineInstall", () => {
     () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
-        const { fileSystem, outcome, projection, spy, workspaceRoot } =
+        const { fileSystem, outcome, pairing, projection, spy, workspaceRoot } =
           yield* runTempProjectDispatch();
         expect(outcome._tag).toBe("ok");
         if (outcome._tag !== "ok") return;
@@ -236,17 +278,32 @@ describe("dispatchUnityPipelineInstall", () => {
           },
           selectionPackage: {
             packageId: "com.ironmind.editor-presence",
-            version: "0.2.0",
+            version: "0.3.0",
             operation: "installed",
           },
+          pairingOutcome: { _tag: "minted" },
         });
         expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
         expect(spy.calls).toEqual([{ method: "install", workspaceRoot }]);
+        expect(pairing.registeredRoots).toEqual([workspaceRoot]);
+        expect(pairing.issued).toEqual([
+          {
+            label: "Unity selection — Deepmind",
+            scopes: [AuthOrchestrationOperateScope],
+          },
+        ]);
         expect(
           yield* fileSystem.exists(
             path.join(workspaceRoot, "Packages/com.ironmind.editor-presence/package.json.meta"),
           ),
         ).toBe(true);
+        const pairingFile = yield* fileSystem.readFileString(
+          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+        );
+        expect(yield* decodePairingFile(pairingFile)).toEqual({
+          serverUrl: "http://127.0.0.1:3773",
+          pairingCredential: "PAIRING1234",
+        });
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -261,7 +318,7 @@ describe("dispatchUnityPipelineInstall", () => {
       yield* fileSystem.makeDirectory(destination, { recursive: true });
       yield* fileSystem.writeFileString(
         path.join(destination, "package.json"),
-        encodeJson({ name: "com.ironmind.editor-presence", version: "0.2.0" }),
+        encodeJson({ name: "com.ironmind.editor-presence", version: "0.3.0" }),
       );
       yield* fileSystem.writeFileString(path.join(destination, "keep-on-no-op.txt"), "sentinel");
 
@@ -277,7 +334,7 @@ describe("dispatchUnityPipelineInstall", () => {
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
         packageId: "com.ironmind.editor-presence",
-        version: "0.2.0",
+        version: "0.3.0",
         operation: "alreadyInstalled",
       });
       expect(yield* fileSystem.exists(path.join(destination, "keep-on-no-op.txt"))).toBe(true);
@@ -311,11 +368,145 @@ describe("dispatchUnityPipelineInstall", () => {
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
         packageId: "com.ironmind.editor-presence",
-        version: "0.2.0",
+        version: "0.3.0",
         operation: "replaced",
       });
       expect(yield* fileSystem.exists(path.join(destination, "stale.txt"))).toBe(false);
       expect(yield* fileSystem.exists(path.join(destination, "package.json.meta"))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("an already-registered selection publisher skips minting entirely", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-paired-",
+      });
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const pairing = makeUnityPairingHandoffSpy({ alreadyPaired: true });
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+        pairing,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.pairingOutcome).toEqual({ _tag: "alreadyPaired" });
+      expect(pairing.registeredRoots).toEqual([workspaceRoot]);
+      expect(pairing.issued).toEqual([]);
+      expect(
+        yield* fileSystem.exists(
+          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+        ),
+      ).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("an unwritable Library path reports pairing as a typed partial failure", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-unwritable-",
+      });
+      yield* fileSystem.writeFileString(path.join(workspaceRoot, "Library"), "not a directory");
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const pairing = makeUnityPairingHandoffSpy();
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+        pairing,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.value.packageId).toBe("com.unity.pipeline");
+      expect(outcome.value.selectionPackage).toMatchObject({
+        packageId: "com.ironmind.editor-presence",
+        version: "0.3.0",
+      });
+      expect(outcome.value.pairingOutcome).toEqual({
+        _tag: "skipped",
+        reason: "Pairing credential was minted, but the Unity handoff file could not be written.",
+      });
+      expect(pairing.issued).toHaveLength(1);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a stale unredeemed pairing.json is replaced with a freshly minted credential", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-stale-pairing-",
+      });
+      const pairingPath = path.join(
+        workspaceRoot,
+        "Library/com.ironmind.editor-presence/pairing.json",
+      );
+      yield* fileSystem.makeDirectory(path.dirname(pairingPath), { recursive: true });
+      yield* fileSystem.writeFileString(
+        pairingPath,
+        encodeJson({
+          serverUrl: "http://stale.invalid",
+          pairingCredential: "EXPIRED00000",
+        }),
+      );
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const pairing = makeUnityPairingHandoffSpy();
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+        pairing,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.pairingOutcome).toEqual({ _tag: "minted" });
+      expect(yield* decodePairingFile(yield* fileSystem.readFileString(pairingPath))).toEqual({
+        serverUrl: "http://127.0.0.1:3773",
+        pairingCredential: "PAIRING1234",
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("a mint failure remains an honest package-install success with pairing skipped", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-mint-failure-",
+      });
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const pairing = makeUnityPairingHandoffSpy({ issueFails: true });
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+        pairing,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.pairingOutcome).toEqual({
+        _tag: "skipped",
+        reason: "Could not mint a Unity pairing credential.",
+      });
+      expect(outcome.value.selectionPackage.packageId).toBe("com.ironmind.editor-presence");
+      expect(
+        yield* fileSystem.exists(
+          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+        ),
+      ).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -333,9 +524,7 @@ describe("dispatchUnityPipelineInstall", () => {
           value: { _tag: "error", message: "Project not found." },
         });
         if (outcome._tag !== "ok") return;
-        const decoded = yield* Schema.decodeUnknownEffect(UnityPipelineInstallResult)(
-          outcome.value,
-        );
+        const decoded = yield* decodeInstallResult(outcome.value);
         expect(decoded).toEqual({
           _tag: "error",
           message: "Project not found.",

@@ -52,6 +52,7 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "../auth/htt
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
+import * as UnityPairingHandoff from "./UnityPairingHandoff.ts";
 import {
   installUnityEmbeddedSelectionPackage,
   unitySelectionPackageSourceCandidates,
@@ -84,6 +85,7 @@ export const dispatchUnityPipelineInstall = (
   | FileSystem.FileSystem
   | Path.Path
   | UnityPipelineClient.UnityPipelineClient
+  | UnityPairingHandoff.UnityPairingHandoff
   | ProjectionSnapshotQuery.ProjectionSnapshotQuery
 > =>
   Effect.gen(function* () {
@@ -141,9 +143,14 @@ export const dispatchUnityPipelineInstall = (
         value: { _tag: "error", message: "Could not install Unity selection package." },
       } as const;
     }
+    const pairingHandoff = yield* UnityPairingHandoff.UnityPairingHandoff;
+    const pairingOutcome = yield* pairingHandoff.prepare({
+      workspaceRoot: lookup.project.value.workspaceRoot,
+      projectTitle: lookup.project.value.title,
+    });
     return {
       _tag: "ok",
-      value: { ...pipeline, selectionPackage },
+      value: { ...pipeline, selectionPackage, pairingOutcome },
     } as const;
   });
 

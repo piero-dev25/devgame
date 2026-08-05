@@ -1,7 +1,7 @@
 {
   "name": "com.ironmind.editor-presence",
   "displayName": "DevGame Editor Presence",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Streams the current Unity Editor selection to a DevGame chat composer over the Editor Presence Protocol (EPP). Selection-only: everything else Unity needs (play/stop/pause, status, console, tests, screenshots) goes through Unity's own official com.unity.pipeline package, not this one. See docs/workbench/spec-editor-presence.md and unity/README.md in the DevGame repo. Editor-only; nothing in this package ships in a player build.",
   "keywords": [
     "devgame",

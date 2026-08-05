@@ -29,6 +29,7 @@ import { unityCommandRouteLayer } from "./unity/UnityCommandRoute.ts";
 import * as UnityPackageLock from "./unity/UnityPackageLock.ts";
 import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
 import { unityPipelineInstallRouteLayer } from "./unity/UnityPipelineInstallRoute.ts";
+import * as UnityPairingHandoff from "./unity/UnityPairingHandoff.ts";
 import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
 import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
 import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
@@ -341,8 +342,14 @@ const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
   Layer.provide(PlatformServicesLive),
 );
 
+const UnityPairingHandoffLayerLive = UnityPairingHandoff.layer.pipe(
+  Layer.provide(EditorPresenceRegistry.layer),
+  Layer.provide(PlatformServicesLive),
+);
+
 const UnityPipelineInstallDependenciesLive = Layer.mergeAll(
   UnityPipelineClientLayerLive,
+  UnityPairingHandoffLayerLive,
   PlatformServicesLive,
 );
 

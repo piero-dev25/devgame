@@ -23,6 +23,29 @@ namespace Ironmind.EditorPresence
         private static MessageType _statusMessageType = MessageType.None;
         private static bool _isPairing;
 
+        internal static void ReportPairingStarted()
+        {
+            _isPairing = true;
+            _statusMessage = "";
+            _statusMessageType = MessageType.None;
+        }
+
+        internal static void ReportPairingResult(bool success, string error)
+        {
+            _isPairing = false;
+            if (success)
+            {
+                _pastedInput = "";
+                _statusMessage = "Paired successfully.";
+                _statusMessageType = MessageType.Info;
+            }
+            else
+            {
+                _statusMessage = $"Pairing failed: {error}";
+                _statusMessageType = MessageType.Error;
+            }
+        }
+
         [SettingsProvider]
         public static SettingsProvider CreateSettingsProvider()
         {
@@ -75,22 +98,10 @@ namespace Ironmind.EditorPresence
                 {
                     if (GUILayout.Button(_isPairing ? "Pairing…" : "Pair", GUILayout.Width(140)))
                     {
-                        _isPairing = true;
-                        _statusMessage = "";
+                        ReportPairingStarted();
                         EditorPresenceSettings.RedeemPairingCredential(_pastedInput, (success, error) =>
                         {
-                            _isPairing = false;
-                            if (success)
-                            {
-                                _pastedInput = "";
-                                _statusMessage = "Paired successfully.";
-                                _statusMessageType = MessageType.Info;
-                            }
-                            else
-                            {
-                                _statusMessage = $"Pairing failed: {error}";
-                                _statusMessageType = MessageType.Error;
-                            }
+                            ReportPairingResult(success, error);
                         });
                     }
                 }

@@ -50,9 +50,10 @@ describe("postUnityPipelineInstall", () => {
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
       selectionPackage: {
         packageId: "com.ironmind.editor-presence",
-        version: "0.2.0",
+        version: "0.3.0",
         operation: "installed",
       },
+      pairingOutcome: { _tag: "minted" },
     } as const;
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(response)));
 

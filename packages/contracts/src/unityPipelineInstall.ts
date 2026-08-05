@@ -49,6 +49,21 @@ export const UnitySelectionPackageInstallOutcome = Schema.Struct({
 });
 export type UnitySelectionPackageInstallOutcome = typeof UnitySelectionPackageInstallOutcome.Type;
 
+/** Per-machine, one-time handoff consumed by the embedded Unity package.
+ * This file never contains the bearer token returned by redemption. */
+export const UnityEditorPresencePairingFile = Schema.Struct({
+  serverUrl: Schema.String,
+  pairingCredential: Schema.String,
+});
+export type UnityEditorPresencePairingFile = typeof UnityEditorPresencePairingFile.Type;
+
+export const UnityPipelinePairingOutcome = Schema.Union([
+  Schema.TaggedStruct("minted", {}),
+  Schema.TaggedStruct("alreadyPaired", {}),
+  Schema.TaggedStruct("skipped", { reason: Schema.String }),
+]);
+export type UnityPipelinePairingOutcome = typeof UnityPipelinePairingOutcome.Type;
+
 /**
  * Mirrors `UnityPipelineClient.ts`'s own `UnityPipelineResult<A>` exactly —
  * same shape `UnityCommandResult` uses for the identical reason: a client
@@ -63,6 +78,7 @@ export const UnityPipelineInstallResult = Schema.Union([
     _tag: Schema.Literal("ok"),
     value: UnityPipelineInstallOutcome,
     selectionPackage: UnitySelectionPackageInstallOutcome,
+    pairingOutcome: UnityPipelinePairingOutcome,
   }),
   Schema.Struct({ _tag: Schema.Literal("notReady") }),
   Schema.Struct({ _tag: Schema.Literal("cliUnavailable") }),

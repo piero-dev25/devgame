@@ -162,6 +162,7 @@ namespace Ironmind.EditorPresence
         {
             if (_connectInFlight) return;
             if (State != EditorPresenceConnectionState.Disconnected) return;
+            EditorPresenceSettings.TryRedeemPairingHandoff();
             if (_credentialRejected) return;
             if (!EditorPresenceSettings.HasBearerToken) return;
             if (EditorApplication.timeSinceStartup < _nextConnectAttemptAt) return;

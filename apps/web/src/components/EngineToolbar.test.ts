@@ -534,6 +534,7 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
               resolvedVersion: "0.1.0",
               declaredInManifest: false,
             },
+            selectionPublisherRegistered: true,
           }),
           S11,
         ),
@@ -801,7 +802,7 @@ describe("shouldOfferUnityPipelineInstall — offered (package missing is the on
 });
 
 describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an install genuinely can't fix)", () => {
-  it("withholds when BOTH packages are already installed — nothing to add", () => {
+  it("withholds at S11 when both packages are installed and selection is already paired", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -810,6 +811,7 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
             resolvedVersion: "0.1.0",
             declaredInManifest: false,
           },
+          selectionPublisherRegistered: true,
         }),
       ),
     ).toBe(false);
@@ -820,7 +822,7 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
     expect(shouldOfferUnityPipelineInstall(readyFacts())).toBe(true);
   });
 
-  it("withholds at S10 (selection installed but not paired) — pairing is a human's step, a click can't do it", () => {
+  it("offers at S10 because a re-click mints and hands off a fresh pairing credential", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -832,7 +834,7 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
           selectionPublisherRegistered: false,
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("withholds when the CLI isn't available — install can't run at all", () => {
@@ -856,6 +858,7 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
             resolvedVersion: "0.1.0",
             declaredInManifest: false,
           },
+          selectionPublisherRegistered: true,
         }),
       ),
     ).toBe(false);

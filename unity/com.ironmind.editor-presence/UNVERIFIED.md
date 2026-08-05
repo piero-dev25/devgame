@@ -18,6 +18,37 @@ rebuild.
 see the "Verified this pass" section at the bottom for what a real
 Unity 6000.3.14f1 Editor confirmed.**
 
+## Automatic Library pairing handoff (`EditorPresenceSettings.cs`, version 0.3.0)
+
+The 0.3.0 handoff is additive to the previously live-verified redemption
+path, but **this revision could not be compiled or run in a live Unity Editor
+in the current environment.** These claims remain unverified:
+
+- `EditorPresenceConnection.HandleEditorUpdate` observes a
+  `Library/com.ironmind.editor-presence/pairing.json` written after the
+  package has already loaded, including an S10 recovery re-click, without
+  interfering with the existing reconnect lifecycle.
+- `Directory.GetParent(Application.dataPath)` resolves the current Unity
+  project root on every supported Editor host, and `System.IO` can read and
+  delete the per-project Library handoff there.
+- `JsonUtility.FromJson<PairingHandoffDto>` decodes the server's exact
+  `{ "serverUrl": string, "pairingCredential": string }` payload in this
+  Editor runtime.
+- Automatic redemption reaches the existing
+  `RedeemPairingCredential` callback on the Editor main thread, stores only
+  the returned bearer in EditorPrefs, deletes `pairing.json` after success,
+  and leaves it in place after failure.
+- The automatic overload's requested scope is exactly
+  `orchestration:operate`, matching the server-minted grant and the
+  Connections "Operate tasks" option, while the manual Preferences flow
+  retains its existing standard-scope request.
+- A failed handoff is attempted only once per file contents during a domain
+  lifetime; replacing the file with a fresh install-click credential causes
+  one new attempt and the existing Preferences status box displays the
+  failure without a new UI surface.
+- Replacing an installed 0.2.0 embedded package with 0.3.0 causes Unity to
+  import/reload the updated Editor scripts as expected.
+
 ## `ClientWebSocket` inside the Unity Editor's Mono/CoreCLR runtime (`EditorPresenceConnection.cs`)
 
 - The async handshake/read/write shape (`async Task` methods kicked off
@@ -110,7 +141,7 @@ Unity 6000.3.14f1 Editor confirmed.**
   (`EditorPresenceProtocol.Capabilities`) — this plugin advertises nothing.
   Not a partial or reduced set: zero, because it implements zero commands.
 
-## Verified this pass (2026-08-04, real Unity 6000.3.14f1 Editor, disposable project)
+## Verified before 0.3.0 (2026-08-04, real Unity 6000.3.14f1 Editor, disposable project)
 
 All of the following were exercised against a real, running Unity
 6000.3.14f1 Editor on a disposable scratch project (never Deepmind), with a

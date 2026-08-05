@@ -161,12 +161,14 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * missing) identically — the classifier's own S4-vs-S5 split is entirely
  * about `liveMatch`, which this function has no reason to consult.
  *
- * Only four facts matter, all independent of Unity's live state:
+ * Five facts matter, all independent of Unity's live state:
  *  - `isUnityProject` — S0 is never an installation opportunity.
  *  - `cliAvailable` — no working `unity` binary, no install to run (S1/S2).
  *  - `!pipelinePackage.installed` — nothing missing means nothing to add.
  *  - `!pipelinePackage.declaredInManifest` — already added, just awaiting
  *    Unity's own resolver (S13); re-running install has nothing left to do.
+ *  - an installed selection package without a registered publisher — S10's
+ *    recovery is a re-click, which mints and hands off a fresh credential.
  *
  * S8 (package installed, but an update is available) is a genuinely
  * DIFFERENT case this function does not attempt to cover: `isUnityPlayReady`
@@ -189,10 +191,9 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
   // embedded copy lands (the probe reads the embedded package.json without
   // waiting for Unity's resolver), so the CTA disappears right after a
   // successful click rather than lingering until Unity re-resolves.
-  // Pairing (S10) is deliberately NOT offered: that step is a human's
-  // (mint a token, paste it in Unity) — a click can't do it.
   const selectionMissing = !facts.selectionPackage.installed;
-  return pipelineMissing || selectionMissing;
+  const pairingMissing = facts.selectionPackage.installed && !facts.selectionPublisherRegistered;
+  return pipelineMissing || selectionMissing || pairingMissing;
 }
 
 /** The message to show when Unity's controls are disabled — `primary`'s own

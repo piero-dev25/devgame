@@ -9,17 +9,19 @@ describe("describeUnityPipelineInstallOutcome — ok, freshly installed", () => 
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
       selectionPackage: {
         packageId: "com.ironmind.editor-presence",
-        version: "0.2.0",
+        version: "0.3.0",
         operation: "installed",
       },
+      pairingOutcome: { _tag: "minted" },
     });
 
     expect(report.type).toBe("success");
     expect(report.title).toContain("Unity integrations");
     expect(report.description).toContain("manifest.json");
     expect(report.description).toContain("com.unity.pipeline@1.2.3");
-    expect(report.description).toContain("com.ironmind.editor-presence@0.2.0");
+    expect(report.description).toContain("com.ironmind.editor-presence@0.3.0");
     expect(report.description).toContain("Packages/");
+    expect(report.description).toContain("pairing will finish automatically");
   });
 });
 
@@ -30,9 +32,10 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
       selectionPackage: {
         packageId: "com.ironmind.editor-presence",
-        version: "0.2.0",
+        version: "0.3.0",
         operation: "alreadyInstalled",
       },
+      pairingOutcome: { _tag: "alreadyPaired" },
     });
 
     expect(report.type).toBe("success");
@@ -43,7 +46,28 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
     // regardless of `alreadyInstalled`.
     expect(report.description).not.toContain("manifest.json");
     expect(report.description).toContain("com.unity.pipeline@1.2.3");
-    expect(report.description).toContain("com.ironmind.editor-presence@0.2.0");
+    expect(report.description).toContain("com.ironmind.editor-presence@0.3.0");
+    expect(report.description).toContain("already paired");
+  });
+
+  it("reports an honest partial failure when package install succeeds but pairing handoff is skipped", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
+      selectionPackage: {
+        packageId: "com.ironmind.editor-presence",
+        version: "0.3.0",
+        operation: "alreadyInstalled",
+      },
+      pairingOutcome: {
+        _tag: "skipped",
+        reason: "Could not write Unity pairing handoff.",
+      },
+    });
+
+    expect(report.type).toBe("error");
+    expect(report.title).toBe("Unity integrations installed, but pairing needs attention");
+    expect(report.description).toContain("Could not write Unity pairing handoff.");
   });
 });
 
