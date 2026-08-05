@@ -139,11 +139,16 @@ function ThreeJsPlayButton(props: {
   readonly onPlay?: () => void;
   readonly unavailableReason?: string;
 }) {
+  // Single source for the accessible name AND the tooltip body — see #111:
+  // a hand-written second `aria-label` literal is exactly how the "Run
+  // preview" bug (and #107's Unity twin) drifted from the real disabled
+  // reason. One expression, two consumers, divergence impossible.
+  const label = props.onPlay || !props.unavailableReason ? "Run preview" : props.unavailableReason;
   const button = (
     <Button
       size="xs"
       variant="outline"
-      aria-label="Run preview"
+      aria-label={label}
       disabled={!props.onPlay}
       onClick={() => props.onPlay?.()}
     >
@@ -155,7 +160,7 @@ function ThreeJsPlayButton(props: {
   return (
     <Tooltip>
       <TooltipTrigger render={button} />
-      <TooltipPopup side="bottom">{props.unavailableReason}</TooltipPopup>
+      <TooltipPopup side="bottom">{label}</TooltipPopup>
     </Tooltip>
   );
 }

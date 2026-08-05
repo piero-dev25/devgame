@@ -2585,6 +2585,12 @@ export default function SidebarV2() {
   const newThreadShortcutLabel =
     shortcutLabelForCommand(keybindings, "chat.newLocal") ??
     shortcutLabelForCommand(keybindings, "chat.new");
+  // Derived once, fed to both the accessible name and the tooltip body —
+  // see #111: a hand-written second `aria-label` literal is how these two
+  // drift from each other.
+  const newThreadLabel = newThreadShortcutLabel
+    ? `New thread (${newThreadShortcutLabel})`
+    : "New thread";
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
@@ -2649,7 +2655,7 @@ export default function SidebarV2() {
                         className="relative focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar"
                         onClick={handleNewThreadClick}
                         disabled={projects.length === 0}
-                        aria-label="New thread"
+                        aria-label={newThreadLabel}
                       />
                     }
                   >
@@ -2659,11 +2665,7 @@ export default function SidebarV2() {
                       aria-hidden="true"
                     />
                   </TooltipTrigger>
-                  <TooltipPopup side="right">
-                    {newThreadShortcutLabel
-                      ? `New thread (${newThreadShortcutLabel})`
-                      : "New thread"}
-                  </TooltipPopup>
+                  <TooltipPopup side="right">{newThreadLabel}</TooltipPopup>
                 </Tooltip>
               </div>
             </div>

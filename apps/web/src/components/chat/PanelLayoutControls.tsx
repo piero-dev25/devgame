@@ -4,7 +4,7 @@ import { memo } from "react";
 import { Toggle } from "../ui/toggle";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
-interface PanelLayoutControlsProps {
+export interface PanelLayoutControlsProps {
   terminalAvailable: boolean;
   terminalOpen: boolean;
   terminalShortcutLabel: string | null;
@@ -25,6 +25,15 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
   onToggleTerminal,
   onToggleRightPanel,
 }: PanelLayoutControlsProps) {
+  // Derived once, fed to both the accessible name and the tooltip body — see
+  // #111: a hand-written second `aria-label` literal is how these drift from
+  // the real (un)availability reason. One expression, two consumers.
+  const terminalLabel = terminalAvailable
+    ? `Toggle terminal drawer${terminalShortcutLabel ? ` (${terminalShortcutLabel})` : ""}`
+    : "Terminal drawer is unavailable";
+  const rightPanelLabel = rightPanelAvailable
+    ? `Toggle right panel${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}`
+    : "Right panel is unavailable";
   return (
     <div
       className="flex h-full shrink-0 items-center gap-1 [-webkit-app-region:no-drag]"
@@ -37,7 +46,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
               className="shrink-0 [-webkit-app-region:no-drag]"
               pressed={terminalOpen}
               onPressedChange={onToggleTerminal}
-              aria-label="Toggle terminal drawer"
+              aria-label={terminalLabel}
               variant="ghost"
               size="sm"
               disabled={!terminalAvailable}
@@ -46,11 +55,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
             </Toggle>
           }
         />
-        <TooltipPopup side="bottom">
-          {terminalAvailable
-            ? `Toggle terminal drawer${terminalShortcutLabel ? ` (${terminalShortcutLabel})` : ""}`
-            : "Terminal drawer is unavailable"}
-        </TooltipPopup>
+        <TooltipPopup side="bottom">{terminalLabel}</TooltipPopup>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger
@@ -59,7 +64,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
               className="shrink-0 [-webkit-app-region:no-drag]"
               pressed={rightPanelOpen}
               onPressedChange={onToggleRightPanel}
-              aria-label="Toggle right panel"
+              aria-label={rightPanelLabel}
               variant="ghost"
               size="sm"
               disabled={!rightPanelAvailable}
@@ -68,11 +73,7 @@ export const PanelLayoutControls = memo(function PanelLayoutControls({
             </Toggle>
           }
         />
-        <TooltipPopup side="bottom">
-          {rightPanelAvailable
-            ? `Toggle right panel${rightPanelShortcutLabel ? ` (${rightPanelShortcutLabel})` : ""}`
-            : "Right panel is unavailable"}
-        </TooltipPopup>
+        <TooltipPopup side="bottom">{rightPanelLabel}</TooltipPopup>
       </Tooltip>
     </div>
   );
