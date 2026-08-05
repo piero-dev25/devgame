@@ -102,6 +102,7 @@ describe("resolveFilesDockPanelView — server thread, ready", () => {
       projectName: "My Project",
       threadRef: { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID },
       composerDraftTarget: { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID },
+      previewPanelKey: "env-1:thread-1:/repo/worktree",
     });
   });
 
@@ -126,6 +127,75 @@ describe("resolveFilesDockPanelView — server thread, ready", () => {
     expect(view.kind).toBe("ready");
     if (view.kind === "ready") {
       expect(view.composerDraftTarget).toEqual(view.threadRef);
+    }
+  });
+});
+
+// Task #112: FilesDockPanel.tsx mounts `<FilePreviewPanel key={view.previewPanelKey}>`.
+// React only remounts a component (resetting its own internal useState —
+// FilePreviewPanel.tsx's explorerOpen/handledReveal/etc.) when its `key`
+// CHANGES. What's provable here, without jsdom/mounted-component infra (see
+// openPanel.ts's own doc comment for why this repo's dock module extracts
+// pure decision logic instead), is that the INPUT to that reconciliation
+// differs between two threads — not the DOM-level remount/reset itself.
+describe("resolveFilesDockPanelView — previewPanelKey (task #112)", () => {
+  const THREAD_B_ID = ThreadId.make("thread-2");
+
+  it("differs for two different threads in the SAME project — the actual repro shape (same cwd, different thread)", () => {
+    const viewA = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject,
+    });
+    const viewB = resolveFilesDockPanelView({
+      routeContext: { ...serverRouteContext, threadId: THREAD_B_ID },
+      activeThread,
+      activeProject,
+    });
+    expect(viewA.kind).toBe("ready");
+    expect(viewB.kind).toBe("ready");
+    if (viewA.kind === "ready" && viewB.kind === "ready") {
+      // Both threads share the identical cwd — proving THIS is what makes
+      // the case meaningful: a key that only varied by cwd (the pre-fix
+      // formula) would collide right here.
+      expect(viewA.cwd).toBe(viewB.cwd);
+      expect(viewA.previewPanelKey).not.toBe(viewB.previewPanelKey);
+    }
+  });
+
+  it("still differs when the SAME thread's cwd changes — preserves the original remount trigger (e.g. a worktree operation)", () => {
+    const viewBefore = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject,
+    });
+    const viewAfter = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread: { ...activeThread, worktreePath: "/repo/worktree-2" } as EnvironmentThread,
+      activeProject,
+    });
+    expect(viewBefore.kind).toBe("ready");
+    expect(viewAfter.kind).toBe("ready");
+    if (viewBefore.kind === "ready" && viewAfter.kind === "ready") {
+      expect(viewBefore.previewPanelKey).not.toBe(viewAfter.previewPanelKey);
+    }
+  });
+
+  it("is stable across an unrelated re-render of the SAME thread and cwd", () => {
+    const first = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject,
+    });
+    const second = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject,
+    });
+    expect(first.kind).toBe("ready");
+    expect(second.kind).toBe("ready");
+    if (first.kind === "ready" && second.kind === "ready") {
+      expect(first.previewPanelKey).toBe(second.previewPanelKey);
     }
   });
 });

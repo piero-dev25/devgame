@@ -231,7 +231,16 @@ export default function FilesDockPanel(_props: PanelProps) {
       <div className="min-h-0 flex-1">
         <Suspense fallback={null}>
           <FilePreviewPanel
-            key={`${view.environmentId}:${view.cwd}`}
+            // Task #112: was `${view.environmentId}:${view.cwd}` — two
+            // threads in the same project share one cwd, so that key never
+            // changed on a thread switch and React reused this component
+            // INSTANCE instead of remounting it, leaving its own internal
+            // state (explorerOpen, handledReveal, etc.) stale from whichever
+            // thread was open before. `view.previewPanelKey`
+            // (resolveFilesDockPanelView.ts) adds thread identity while
+            // keeping cwd, so the original "cwd changed" remount trigger
+            // (e.g. a worktree operation) still works too.
+            key={view.previewPanelKey}
             environmentId={view.environmentId}
             cwd={view.cwd}
             projectName={view.projectName}

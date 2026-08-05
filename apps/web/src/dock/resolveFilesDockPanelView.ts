@@ -22,6 +22,7 @@
  * else, so a draft never falls through to treating stale/absent
  * thread-project data as if it were a real thread's.
  */
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { EnvironmentProject, EnvironmentThread } from "@t3tools/client-runtime/state/shell";
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 
@@ -37,6 +38,22 @@ export type FilesDockPanelView =
       readonly projectName: string;
       readonly threadRef: ScopedThreadRef;
       readonly composerDraftTarget: ScopedThreadRef;
+      /**
+       * Task #112: `FilesDockPanel.tsx`'s `<FilePreviewPanel key={...}>`.
+       * Deliberately `scopedThreadKey(threadRef)` + `cwd`, NOT `cwd` alone —
+       * two threads in the SAME project share one `cwd`, and a `key` that
+       * doesn't vary by thread means React reuses the same
+       * `FilePreviewPanel` INSTANCE across a thread switch instead of
+       * remounting it, leaving that component's own internal `useState`s
+       * (`explorerOpen`, `handledReveal`, etc. — `FilePreviewPanel.tsx`,
+       * untouched per this repo's "delete ours, never theirs" rule for T3's
+       * own surfaces) stale from whichever thread was open before. `cwd` is
+       * still part of the key (not dropped in favor of `threadRef` alone) so
+       * the ORIGINAL remount trigger — the SAME thread's `cwd` changing,
+       * e.g. a worktree operation — keeps working exactly as it did before
+       * this fix.
+       */
+      readonly previewPanelKey: string;
     };
 
 export function resolveFilesDockPanelView(input: {
@@ -62,5 +79,6 @@ export function resolveFilesDockPanelView(input: {
     projectName: input.activeProject.title,
     threadRef,
     composerDraftTarget: threadRef,
+    previewPanelKey: `${scopedThreadKey(threadRef)}:${cwd}`,
   };
 }
