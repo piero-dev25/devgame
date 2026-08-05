@@ -44,8 +44,17 @@ describe("postUnityPipelineInstall", () => {
     ).rejects.toBeTruthy();
   });
 
-  it("resolves with the decoded result for a well-formed response", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ _tag: "notReady" })));
+  it("resolves with both decoded package outcomes for a well-formed success response", async () => {
+    const response = {
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.ironmind.editor-presence",
+        version: "0.2.0",
+        operation: "installed",
+      },
+    } as const;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(response)));
 
     const result = await postUnityPipelineInstall({
       projectId: ProjectId.make("project-unity"),
@@ -53,6 +62,6 @@ describe("postUnityPipelineInstall", () => {
       httpAuthorization: null,
     });
 
-    expect(result).toEqual({ _tag: "notReady" });
+    expect(result).toEqual(response);
   });
 });

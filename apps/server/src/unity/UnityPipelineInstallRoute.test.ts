@@ -15,10 +15,13 @@
  * gives (this repo's `globalFetchInEffect` diagnostic, no existing
  * suppression to follow as precedent).
  */
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import {
@@ -35,21 +38,29 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
-import { dispatchUnityPipelineInstall } from "./UnityPipelineInstallRoute.ts";
+import {
+  dispatchUnityPipelineInstall,
+  unitySelectionPackageSourceCandidates,
+} from "./UnityPipelineInstallRoute.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 const PROJECT_ID = ProjectId.make("project-unity");
 const PROJECT_ROOT = "/Users/piero/Projects/Deepmind";
 
-const PROJECT = Schema.decodeUnknownSync(OrchestrationProjectShell)({
-  id: PROJECT_ID,
-  title: "Deepmind",
-  workspaceRoot: PROJECT_ROOT,
-  defaultModelSelection: null,
-  scripts: [],
-  createdAt: "2026-08-05T00:00:00.000Z",
-  updatedAt: "2026-08-05T00:00:00.000Z",
-});
+function makeProject(workspaceRoot: string) {
+  return Schema.decodeUnknownSync(OrchestrationProjectShell)({
+    id: PROJECT_ID,
+    title: "Deepmind",
+    workspaceRoot,
+    defaultModelSelection: null,
+    scripts: [],
+    createdAt: "2026-08-05T00:00:00.000Z",
+    updatedAt: "2026-08-05T00:00:00.000Z",
+  });
+}
+
+const PROJECT = makeProject(PROJECT_ROOT);
 
 function makeSession(
   scopes: EnvironmentAuth.AuthenticatedSession["scopes"],
@@ -146,10 +157,39 @@ const runDispatchTest = (
   projection: ReturnType<typeof makeProjectionSnapshotQuerySpy>,
 ) =>
   dispatchUnityPipelineInstall(session, PROJECT_ID).pipe(
-    Effect.provide(Layer.mergeAll(spy.layer, projection.layer)),
+    Effect.provide(Layer.mergeAll(spy.layer, projection.layer, NodeServices.layer)),
   );
 
+const runTempProjectDispatch = Effect.fn("runTempProjectDispatch")(function* () {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+    prefix: "t3code-unity-pipeline-install-",
+  });
+  const spy = makeUnityPipelineClientSpy();
+  const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+  const session = makeSession([AuthPresenceCommandScope]);
+  const outcome = yield* runDispatchTest(spy, session, projection);
+  return { fileSystem, outcome, projection, spy, workspaceRoot };
+});
+
 describe("dispatchUnityPipelineInstall", () => {
+  it.effect("resolves the packaged desktop resource before every repo-path dev fallback", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* unitySelectionPackageSourceCandidates({
+          moduleUrl:
+            "file:///Applications/DevGame.app/Contents/Resources/app.asar/apps/server/dist/bin.mjs",
+          cwd: "/Users/dev/t3code-fork",
+        }),
+      ).toEqual([
+        "/Applications/DevGame.app/Contents/Resources/unity-packages/com.ironmind.editor-presence",
+        "/Applications/DevGame.app/Contents/Resources/unity/com.ironmind.editor-presence",
+        "/Applications/DevGame.app/Contents/Resources/app.asar/unity/com.ironmind.editor-presence",
+        "/Users/dev/t3code-fork/unity/com.ironmind.editor-presence",
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "refuses a session without the dedicated presence:command scope, without ever calling UnityPipelineClient",
     () =>
@@ -179,13 +219,12 @@ describe("dispatchUnityPipelineInstall", () => {
   );
 
   it.effect(
-    "known projectId resolves through the projection store and installs into its canonical root",
+    "known projectId resolves through the projection store and one install reports both package outcomes",
     () =>
       Effect.gen(function* () {
-        const spy = makeUnityPipelineClientSpy();
-        const projection = makeProjectionSnapshotQuerySpy(PROJECT);
-        const session = makeSession([AuthPresenceCommandScope]);
-        const outcome = yield* runDispatchTest(spy, session, projection);
+        const path = yield* Path.Path;
+        const { fileSystem, outcome, projection, spy, workspaceRoot } =
+          yield* runTempProjectDispatch();
         expect(outcome._tag).toBe("ok");
         if (outcome._tag !== "ok") return;
         expect(outcome.value).toEqual({
@@ -195,10 +234,89 @@ describe("dispatchUnityPipelineInstall", () => {
             version: "0.4.0-exp.1",
             alreadyInstalled: false,
           },
+          selectionPackage: {
+            packageId: "com.ironmind.editor-presence",
+            version: "0.2.0",
+            operation: "installed",
+          },
         });
         expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
-        expect(spy.calls).toEqual([{ method: "install", workspaceRoot: PROJECT_ROOT }]);
-      }),
+        expect(spy.calls).toEqual([{ method: "install", workspaceRoot }]);
+        expect(
+          yield* fileSystem.exists(
+            path.join(workspaceRoot, "Packages/com.ironmind.editor-presence/package.json.meta"),
+          ),
+        ).toBe(true);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("same selection-package version is a no-op success", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-same-",
+      });
+      const destination = path.join(workspaceRoot, "Packages/com.ironmind.editor-presence");
+      yield* fileSystem.makeDirectory(destination, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(destination, "package.json"),
+        encodeJson({ name: "com.ironmind.editor-presence", version: "0.2.0" }),
+      );
+      yield* fileSystem.writeFileString(path.join(destination, "keep-on-no-op.txt"), "sentinel");
+
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.selectionPackage).toEqual({
+        packageId: "com.ironmind.editor-presence",
+        version: "0.2.0",
+        operation: "alreadyInstalled",
+      });
+      expect(yield* fileSystem.exists(path.join(destination, "keep-on-no-op.txt"))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("different selection-package version replaces the destination directory whole", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-unity-pipeline-install-replace-",
+      });
+      const destination = path.join(workspaceRoot, "Packages/com.ironmind.editor-presence");
+      yield* fileSystem.makeDirectory(destination, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(destination, "package.json"),
+        encodeJson({ name: "com.ironmind.editor-presence", version: "0.1.0" }),
+      );
+      yield* fileSystem.writeFileString(path.join(destination, "stale.txt"), "remove me");
+
+      const spy = makeUnityPipelineClientSpy();
+      const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+      const outcome = yield* runDispatchTest(
+        spy,
+        makeSession([AuthPresenceCommandScope]),
+        projection,
+      );
+
+      expect(outcome._tag).toBe("ok");
+      if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+      expect(outcome.value.selectionPackage).toEqual({
+        packageId: "com.ironmind.editor-presence",
+        version: "0.2.0",
+        operation: "replaced",
+      });
+      expect(yield* fileSystem.exists(path.join(destination, "stale.txt"))).toBe(false);
+      expect(yield* fileSystem.exists(path.join(destination, "package.json.meta"))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect(

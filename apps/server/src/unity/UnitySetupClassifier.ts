@@ -155,7 +155,7 @@ const S13_MESSAGE =
 const S9_MESSAGE =
   "Unity selection chips are off — this project doesn't have DevGame's selection package.";
 const S10_MESSAGE =
-  "Unity has DevGame's selection package but isn't paired with this app yet. Pair it from Settings > Connections.";
+  "Unity has DevGame's selection package but isn't paired with this app yet; in Unity, open Settings > DevGame Editor Presence and paste this app's pairing token.";
 const S10_PRIME_MESSAGE = "Checking Unity's connection…";
 
 function buildS2Message(discoveredPath: string): string {

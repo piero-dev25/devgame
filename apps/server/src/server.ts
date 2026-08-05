@@ -341,6 +341,11 @@ const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
   Layer.provide(PlatformServicesLive),
 );
 
+const UnityPipelineInstallDependenciesLive = Layer.mergeAll(
+  UnityPipelineClientLayerLive,
+  PlatformServicesLive,
+);
+
 // `EngineTypeResolverLayerLive` is defined here (moved up from its
 // original spot below `ProjectFaviconResolverLayerLive`) so
 // `UnitySetupProbeLayerLive` right after it can reference the same const
@@ -541,7 +546,9 @@ export const makeRoutesLayer = Layer.mergeAll(
     editorPresenceRouteLayer,
     editorPresenceCommandRouteLayer,
     unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
-    unityPipelineInstallRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityPipelineInstallRouteLayer.pipe(
+      HttpRouter.provideRequest(UnityPipelineInstallDependenciesLive),
+    ),
     unityColdStartRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,

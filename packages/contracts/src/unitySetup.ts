@@ -22,17 +22,18 @@ import { ProjectId } from "./baseSchemas.ts";
  * verdict for ONE package id — shared shape for both Pipeline
  * (`com.unity.pipeline`) and the selection package
  * (`com.ironmind.editor-presence`). Plan §1, F1: `packages-lock.json` is
- * the authoritative "is it installed" source, not `manifest.json` — a
+ * the authoritative resolved-package source, not `manifest.json` — a
  * package embedded or vendored (present in the lock, absent from
- * `manifest.json`) is still genuinely installed. `installed` reflects the
- * lock's own verdict; `declaredVersion`/`resolvedVersion` are reporting
- * fields for increment 3's per-item panel, not used by classification.
+ * `manifest.json`) is still genuinely installed. For the selection package,
+ * `installed` also becomes true as soon as its embedded package.json exists
+ * under `Packages/`, before Unity catches the lockfile up. The version fields
+ * are reporting-only and are not used by classification.
  */
 export const UnitySetupPackageLockState = Schema.Struct({
   installed: Schema.Boolean,
   /** The version string from `packages-lock.json`'s own entry, when
-   * installed — `null` when not installed, or when the entry exists but
-   * carries no readable version field. */
+   * resolved — `null` when not resolved yet, including a freshly copied
+   * embedded selection package that Unity has not put in the lockfile. */
   resolvedVersion: Schema.NullOr(Schema.String),
   /** Whether `Packages/manifest.json` names this package directly —
    * DECLARED intent (`UnityPackageLock.ts`'s `readManifestDependencyIds`),

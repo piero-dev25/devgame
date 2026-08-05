@@ -310,6 +310,66 @@ describe("UnitySetupProbe", () => {
   );
 
   it.effect(
+    "an embedded selection package copied under Packages is installed on the next probe before Unity updates packages-lock.json",
+    () =>
+      runProbeTest(
+        (cwd) =>
+          stubPipelineClient({
+            list: () =>
+              Effect.succeed({
+                _tag: "ok",
+                value: {
+                  instances: [
+                    {
+                      projectPath: cwd,
+                      pid: 433,
+                      isRunning: true,
+                      hasPipelinePackage: true,
+                      isReachable: true,
+                      pipelineVersion: "0.4.0",
+                      updateAvailable: false,
+                      safeMode: false,
+                    },
+                  ],
+                  latestVersion: null,
+                  unparseableInstanceCount: 0,
+                },
+              }),
+          }),
+        (cwd) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(
+              cwd,
+              "Packages/packages-lock.json",
+              encodeJson({
+                dependencies: {
+                  "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
+                },
+              }),
+            );
+            yield* writeTextFile(
+              cwd,
+              "Packages/com.ironmind.editor-presence/package.json",
+              encodeJson({
+                name: "com.ironmind.editor-presence",
+                version: "0.2.0",
+              }),
+            );
+            return yield* runProbe(cwd);
+          }),
+      ).pipe(
+        Effect.map((result) => {
+          expect(result.facts.selectionPackage).toEqual({
+            installed: true,
+            resolvedVersion: null,
+            declaredInManifest: false,
+          });
+          expect(result.primary.state).toBe("S10'");
+        }),
+      ),
+  );
+
+  it.effect(
     "everything green: registering a publisher THEN probing (both against the same registry instance) reaches S11",
     () =>
       runProbeTest(

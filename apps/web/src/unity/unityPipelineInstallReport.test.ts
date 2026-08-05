@@ -7,15 +7,19 @@ describe("describeUnityPipelineInstallOutcome — ok, freshly installed", () => 
     const report = describeUnityPipelineInstallOutcome({
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.ironmind.editor-presence",
+        version: "0.2.0",
+        operation: "installed",
+      },
     });
 
     expect(report.type).toBe("success");
-    // The whole point of "report, not a question": the manifest.json write
-    // AND the later packages-lock.json/Assets churn the removed dialog used
-    // to explain BEFORE the click must both still be named, just after it.
+    expect(report.title).toContain("Unity integrations");
     expect(report.description).toContain("manifest.json");
-    expect(report.description).toContain("packages-lock.json");
     expect(report.description).toContain("com.unity.pipeline@1.2.3");
+    expect(report.description).toContain("com.ironmind.editor-presence@0.2.0");
+    expect(report.description).toContain("Packages/");
   });
 });
 
@@ -24,6 +28,11 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
     const report = describeUnityPipelineInstallOutcome({
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
+      selectionPackage: {
+        packageId: "com.ironmind.editor-presence",
+        version: "0.2.0",
+        operation: "alreadyInstalled",
+      },
     });
 
     expect(report.type).toBe("success");
@@ -33,6 +42,8 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
     // careless implementation that always shows the same description
     // regardless of `alreadyInstalled`.
     expect(report.description).not.toContain("manifest.json");
+    expect(report.description).toContain("com.unity.pipeline@1.2.3");
+    expect(report.description).toContain("com.ironmind.editor-presence@0.2.0");
   });
 });
 

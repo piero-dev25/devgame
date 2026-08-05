@@ -2,8 +2,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -41,11 +44,14 @@ import {
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
   stageLinuxIconSize,
+  stageUnitySelectionPackage,
   STAGE_INSTALL_ARGS,
   WINDOWS_ASAR_UNPACK,
 } from "./build-desktop-artifact.ts";
 import { BRAND_ASSET_PATHS } from "./lib/brand-assets.ts";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 function mockProcess(exitCode: number) {
   return ChildProcessSpawner.makeHandle({
@@ -558,6 +564,10 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
       },
+      {
+        from: "apps/desktop/prod-resources/unity-packages/com.ironmind.editor-presence",
+        to: "unity-packages/com.ironmind.editor-presence",
+      },
     ]);
     assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [
       "aarch64-apple-darwin",
@@ -572,6 +582,34 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.equal(resourceMonitorExecutableName("mac"), "t3-resource-monitor");
     assert.equal(resourceMonitorExecutableName("win"), "t3-resource-monitor.exe");
   });
+
+  it.effect("stages the exact selection package directory for desktop extraResources", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-desktop-unity-source-",
+      });
+      const stageResourcesDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-desktop-unity-stage-",
+      });
+      const source = path.join(repoRoot, "unity/com.ironmind.editor-presence");
+      yield* fileSystem.makeDirectory(source, { recursive: true });
+      yield* fileSystem.writeFileString(
+        path.join(source, "package.json"),
+        encodeJson({ name: "com.ironmind.editor-presence", version: "0.2.0" }),
+      );
+      yield* fileSystem.writeFileString(path.join(source, "package.json.meta"), "meta");
+
+      yield* stageUnitySelectionPackage({ repoRoot, stageResourcesDir });
+
+      const staged = path.join(stageResourcesDir, "unity-packages/com.ironmind.editor-presence");
+      assert.equal(
+        yield* fileSystem.readFileString(path.join(staged, "package.json.meta")),
+        "meta",
+      );
+    }),
+  );
   it("promotes target fff binaries to direct staged dependencies", () => {
     assert.deepStrictEqual(resolveFffNativeDependencies("mac", "arm64", "0.9.4"), {
       "@ff-labs/fff-bin-darwin-arm64": "0.9.4",

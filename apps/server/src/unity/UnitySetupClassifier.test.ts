@@ -504,7 +504,7 @@ describe("classifyUnitySetup", () => {
     expect(classifyUnitySetup(input)).toEqual({
       state: "S10",
       message:
-        "Unity has DevGame's selection package but isn't paired with this app yet. Pair it from Settings > Connections.",
+        "Unity has DevGame's selection package but isn't paired with this app yet; in Unity, open Settings > DevGame Editor Presence and paste this app's pairing token.",
     });
   });
 

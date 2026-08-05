@@ -8,12 +8,11 @@
  * `com.ironmind.editor-presence` package was not, and the `unity` CLI
  * proves a working play/stop round trip against a live Editor RIGHT NOW —
  * so it is the path that can produce a working Play button tonight, not a
- * socket protocol nothing had installed. `com.ironmind.editor-presence` has
- * since been DELETED entirely ("Delete our Unity plugin — Unity is served
- * by com.unity.pipeline") — never installed, never compiled, and made
- * redundant by Pipeline; see `docs/workbench/unity-integration-architecture.md`.
- * Unity is now the one engine of the three (Godot, Unreal, Unity) with no
- * Editor Presence publisher at all.
+ * socket protocol nothing had installed. `com.ironmind.editor-presence` was
+ * deleted during that pivot, then rebuilt as a selection-only publisher:
+ * Pipeline owns play/stop/pause and status, while the rebuilt DevGame package
+ * owns Unity selection publishing. See
+ * `docs/workbench/unity-integration-architecture.md`.
  *
  * VERIFIED LIVE against a real Unity 6000.3.14f1 Editor on a disposable
  * project under `$CLAUDE_JOB_DIR/tmp/unity-cli-test/scratch-project`
@@ -40,10 +39,10 @@
  * SCOPE, deliberately narrow: play / stop / pause / status / CLI-presence
  * only. No `eval`/`eval_file` (arbitrary C# execution, not bounded by
  * `set_authoring_root` — explicitly out per the owner's ruling). No
- * `editor_step` — Pipeline has no frame-step command at all, and (now that
- * `com.ironmind.editor-presence` is deleted) Unity has no scriptable
- * frame-step path through this codebase anymore, unlike the frozen spec's
- * original assumption. No generic "run any Pipeline command" passthrough —
+ * `editor_step` — Pipeline has no frame-step command at all, and the rebuilt
+ * selection-only package intentionally implements no commands, so Unity has
+ * no scriptable frame-step path through this codebase anymore, unlike the
+ * frozen spec's original assumption. No generic "run any Pipeline command" passthrough —
  * that would be exactly the "general Unity command abstraction" scope
  * creep this task was told to avoid.
  */

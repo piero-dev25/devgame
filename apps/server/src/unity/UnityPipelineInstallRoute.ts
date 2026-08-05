@@ -10,8 +10,9 @@
  * `AuthPresenceReadScope` (the setup-probe route's scope). That scope's own
  * doc comment is explicit about why it's safe to grant broadly: "this scope
  * authorizes no code execution and no project mutation." This route DOES
- * mutate the project (`Packages/manifest.json`, and indirectly
- * `packages-lock.json` once Unity resolves it) — the same risk class
+ * mutate the project (`Packages/manifest.json`, the embedded selection
+ * package directory, and indirectly `packages-lock.json` once Unity resolves
+ * them) — the same risk class
  * `AuthPresenceCommandScope`'s own doc comment already covers
  * (`projectsWriteFile`). A second scope for the same capability reached
  * through a different mechanism (CLI shell-out vs. WS command frame) would
@@ -35,7 +36,9 @@ import {
   UNITY_PIPELINE_INSTALL_PATH,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import {
   HttpRouter,
@@ -49,6 +52,12 @@ import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "../auth/htt
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
+import {
+  installUnityEmbeddedSelectionPackage,
+  unitySelectionPackageSourceCandidates,
+} from "./UnityEmbeddedSelectionPackage.ts";
+
+export { unitySelectionPackageSourceCandidates };
 
 export type UnityPipelineInstallDispatchOutcome =
   | { readonly _tag: "ok"; readonly value: UnityPipelineInstallResult }
@@ -72,7 +81,10 @@ export const dispatchUnityPipelineInstall = (
 ): Effect.Effect<
   UnityPipelineInstallDispatchOutcome,
   never,
-  UnityPipelineClient.UnityPipelineClient | ProjectionSnapshotQuery.ProjectionSnapshotQuery
+  | FileSystem.FileSystem
+  | Path.Path
+  | UnityPipelineClient.UnityPipelineClient
+  | ProjectionSnapshotQuery.ProjectionSnapshotQuery
 > =>
   Effect.gen(function* () {
     if (!session.scopes.includes(AuthPresenceCommandScope)) {
@@ -108,8 +120,31 @@ export const dispatchUnityPipelineInstall = (
     // The Editor binds to the canonical root. A thread worktree is
     // deliberately not considered here: installing into a copy no Editor
     // has open would mutate the wrong manifest.
-    const value = yield* client.install(lookup.project.value.workspaceRoot);
-    return { _tag: "ok", value } as const;
+    const pipeline = yield* client.install(lookup.project.value.workspaceRoot);
+    if (pipeline._tag !== "ok") {
+      return { _tag: "ok", value: pipeline } as const;
+    }
+    const selectionPackage = yield* installUnityEmbeddedSelectionPackage(
+      lookup.project.value.workspaceRoot,
+    ).pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("unity selection package install failed", { cause }),
+      ),
+      Effect.match({
+        onFailure: () => null,
+        onSuccess: (outcome) => outcome,
+      }),
+    );
+    if (selectionPackage === null) {
+      return {
+        _tag: "ok",
+        value: { _tag: "error", message: "Could not install Unity selection package." },
+      } as const;
+    }
+    return {
+      _tag: "ok",
+      value: { ...pipeline, selectionPackage },
+    } as const;
   });
 
 // Deliberately NOT `.pipe(Layer.provide(UnityPipelineClient.layer))` here —

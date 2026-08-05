@@ -41,6 +41,11 @@ import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 const PIPELINE_PACKAGE_ID = "com.unity.pipeline";
 const SELECTION_PACKAGE_ID = "com.ironmind.editor-presence";
 const UNITY_PROJECT_VERSION_PATH = ["ProjectSettings", "ProjectVersion.txt"] as const;
+const EMBEDDED_SELECTION_PACKAGE_MANIFEST_PATH = [
+  "Packages",
+  SELECTION_PACKAGE_ID,
+  "package.json",
+] as const;
 
 /** Plan §2's F3 default — tunable, per that section's own note. */
 const PAIRING_GRACE_WINDOW_MS = 15_000;
@@ -184,6 +189,13 @@ export const make = Effect.gen(function* () {
       const dependencies = yield* packageLock.readDependencies(workspaceRoot);
       const pipelineEntry = dependencies.get(PIPELINE_PACKAGE_ID) ?? null;
       const selectionEntry = dependencies.get(SELECTION_PACKAGE_ID) ?? null;
+      const selectionPackagePresentOnDisk = yield* fileSystem
+        .stat(path.join(workspaceRoot, ...EMBEDDED_SELECTION_PACKAGE_MANIFEST_PATH))
+        .pipe(
+          Effect.map((info) => info.type === "File"),
+          Effect.orElseSucceed(() => false),
+        );
+      const selectionPackageInstalled = selectionEntry !== null || selectionPackagePresentOnDisk;
       // Declared-intent read (manifest.json), NOT the installed-check —
       // see `UnityPackageLock.ts`'s own module doc. Exists so a successful
       // `unity pipeline install` (plan §5's increment 4a) doesn't report
@@ -261,7 +273,7 @@ export const make = Effect.gen(function* () {
         lockfilePresent,
         pipelinePackageInstalled: pipelineEntry !== null,
         pipelinePackageDeclaredInManifest,
-        selectionPackageInstalled: selectionEntry !== null,
+        selectionPackageInstalled,
         pipelineList: classifierPipelineList,
         selectionPublisherRegistered,
         withinPairingGraceWindow,
@@ -278,7 +290,7 @@ export const make = Effect.gen(function* () {
           declaredInManifest: pipelinePackageDeclaredInManifest,
         },
         selectionPackage: {
-          installed: selectionEntry !== null,
+          installed: selectionPackageInstalled,
           resolvedVersion: selectionEntry?.version ?? null,
           declaredInManifest: selectionPackageDeclaredInManifest,
         },

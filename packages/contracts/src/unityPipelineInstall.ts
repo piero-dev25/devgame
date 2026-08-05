@@ -42,6 +42,13 @@ export const UnityPipelineInstallOutcome = Schema.Struct({
 });
 export type UnityPipelineInstallOutcome = typeof UnityPipelineInstallOutcome.Type;
 
+export const UnitySelectionPackageInstallOutcome = Schema.Struct({
+  packageId: Schema.Literal("com.ironmind.editor-presence"),
+  version: Schema.String,
+  operation: Schema.Literals(["installed", "alreadyInstalled", "replaced"]),
+});
+export type UnitySelectionPackageInstallOutcome = typeof UnitySelectionPackageInstallOutcome.Type;
+
 /**
  * Mirrors `UnityPipelineClient.ts`'s own `UnityPipelineResult<A>` exactly —
  * same shape `UnityCommandResult` uses for the identical reason: a client
@@ -52,7 +59,11 @@ export type UnityPipelineInstallOutcome = typeof UnityPipelineInstallOutcome.Typ
  * an HTTP-layer 403, not a value in this union.
  */
 export const UnityPipelineInstallResult = Schema.Union([
-  Schema.Struct({ _tag: Schema.Literal("ok"), value: UnityPipelineInstallOutcome }),
+  Schema.Struct({
+    _tag: Schema.Literal("ok"),
+    value: UnityPipelineInstallOutcome,
+    selectionPackage: UnitySelectionPackageInstallOutcome,
+  }),
   Schema.Struct({ _tag: Schema.Literal("notReady") }),
   Schema.Struct({ _tag: Schema.Literal("cliUnavailable") }),
   Schema.Struct({ _tag: Schema.Literal("error"), message: Schema.String }),
