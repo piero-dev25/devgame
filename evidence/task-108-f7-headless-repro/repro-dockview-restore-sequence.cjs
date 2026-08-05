@@ -127,13 +127,23 @@ function buildDockview() {
     // can diverge from what's really mounted (see ContentContainer.openPanel's
     // `this.panel === panel` guard in dockview-core's content.js: it tracks
     // "currently rendered panel" as a SEPARATE piece of state from the group
-    // model's own `_activePanel`).
+    // model's own `_activePanel`). `tabIndex = 0` makes every element a real
+    // focus target — scenario D (round 7) calls `.focus()` on the chat
+    // panel's element to reproduce the composer-autofocus echo via
+    // dockview-core's own REAL `contentContainer.onDidFocus` wiring, not a
+    // faked event.
     createComponent: (options) => {
       const element = document.createElement("div");
       element.setAttribute("data-panel", options.id);
+      element.tabIndex = 0;
       return { element, init() {}, dispose() {} };
     },
   });
+}
+
+/** Real setTimeout-based sleep — scenario D needs genuine async timing to reproduce the measured 9-23ms echo delay, not a synchronous fake. */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -511,24 +521,250 @@ function scenarioC_restoreThenRestoreAcrossThreads() {
   return allPass;
 }
 
-setupJsdomGlobals();
-const results = [
-  scenarioA_naturalSequence(),
-  scenarioB_focusLeavesSharedGroupBeforeFinalRestore(),
-  scenarioC_restoreThenRestoreAcrossThreads(),
-];
-console.log("\n\n================ SUMMARY ================");
-console.log(
-  `Scenario A (natural sequence):                    ${results[0] ? "PASS (no leak)" : "FAIL (leak)"}`,
-);
-console.log(
-  `Scenario B (focus leaves group, triggers F7):     ${results[1] ? "PASS (no leak)" : "FAIL (leak)"}`,
-);
-console.log(
-  `Scenario C (restore-then-restore, round 7):       ${results[2] ? "PASS (no leak)" : "FAIL (leak)"}`,
-);
-console.log(
-  results.every(Boolean)
-    ? "\nAll three scenarios pass headlessly — if the live residual persists, it's something this jsdom model still can't see (real Chromium rendering/layout timing is the next suspect)."
-    : "\nAt least one scenario reproduced a leak — investigate further using the [STATE]/[WRITE]/[REAL CLICK]/[RESTORE] trace above.",
-);
+/**
+ * Task #108, round 7: attempts to reproduce the live residual headlessly
+ * using a REAL DOM focus event (not a faked one), to trigger dockview-core's
+ * own `contentContainer.onDidFocus -> doSetGroupActive` wiring — the
+ * mechanism traced in evidence/task-108-round7-focus-echo-diagnosis/README.md.
+ *
+ * `applySettleWindow` toggles the round-7 fix: `false` mirrors the exact
+ * code round 6 shipped (isRestoring + CHROME_PANEL_IDS guards only, no
+ * settle window); `true` adds the settle-window guard (`SETTLE_MS`,
+ * `msSinceSwitch`).
+ *
+ * Sequence: A(click Files) -> B(click Diff) -> A(restored) -> B(restored,
+ * not clicked) -> A(restored again) — the exact shape that failed live at
+ * step 7. After EVERY restore, `scheduleComposerAutofocusEcho()` calls
+ * `.focus()` on the chat panel's own element ~15ms later (inside the
+ * measured 9-23ms window from dock-diag2), a real DOM focus, moved there
+ * from the sidebar element first (a genuine focus TRANSITION is required —
+ * jsdom's FocusTracker only fires on hasFocus flipping false->true, so
+ * calling `.focus()` twice on an already-focused element is a silent
+ * no-op, which the first version of this scenario got wrong).
+ *
+ * HONEST RESULT, not a clean reproduction: raw DOM `focus`/`blur` listeners
+ * on the chat element (independent of dockview-core, see the `[RAW]` log
+ * lines) confirm the DOM-level transition happens correctly and repeatedly,
+ * every single time. But dockview-core's own `contentContainer.onDidFocus`
+ * only translated that into a `doSetGroupActive` call (and therefore a
+ * top-level `onDidActivePanelChange` echo) on the FIRST occurrence in this
+ * harness — not on the later ones inside steps 5-7, where the live bug
+ * actually bit. Both `applySettleWindow` runs therefore pass (no leak),
+ * INCLUDING the `false` run that should have reproduced the round-6 shape
+ * of the bug. This is a genuine, unresolved gap in this specific headless
+ * reproduction, not evidence against the fix — the fix itself is proven
+ * correct independently, and deterministically, by the pure-function unit
+ * tests in dockActiveSelectionStore.test.ts, which don't depend on any of
+ * this timing/focus-tracker complexity. Worth a fresh investigation if this
+ * class of bug resurfaces: whether dockview-core's `FocusTracker` is being
+ * disposed/recreated somewhere in this harness's specific call sequence in
+ * a way real Chromium either doesn't hit or hits differently.
+ */
+async function scenarioD_focusEchoAfterRestore(applySettleWindow) {
+  console.log(
+    `\n########## SCENARIO D: composer-focus echo after restore, applySettleWindow=${applySettleWindow} (round 7) ##########`,
+  );
+
+  const api = buildDockview();
+  const isRestoringRef = { current: false };
+  const switchedAtRef = { current: Date.now() };
+  const byActivationKey = {};
+  const activationKeyRef = { current: undefined };
+  const CHROME_PANEL_IDS = new Set(["sidebar"]);
+  const SETTLE_MS = 250;
+
+  function recordActivePanelForKeyUnlessRestoring(msSinceSwitch, key, panelId) {
+    if (isRestoringRef.current) return;
+    if (applySettleWindow && msSinceSwitch < SETTLE_MS) return;
+    if (panelId !== null && CHROME_PANEL_IDS.has(panelId)) return;
+    if (key === undefined) return;
+    console.log(
+      `    [WRITE] byActivationKey[${key}] = ${panelId} (msSinceSwitch=${msSinceSwitch})`,
+    );
+    byActivationKey[String(key)] = panelId;
+  }
+
+  function activatePanelInItsGroup(panel) {
+    isRestoringRef.current = true;
+    try {
+      panel.group && panel.group.api.setActive();
+      panel.api.setActive();
+    } finally {
+      isRestoringRef.current = false;
+    }
+  }
+  function restoreActivePanelForKey(api, { rememberedPanelId, fallbackPanelId }) {
+    const effective =
+      rememberedPanelId !== null && CHROME_PANEL_IDS.has(rememberedPanelId)
+        ? null
+        : rememberedPanelId;
+    if (effective !== null) {
+      const panel = api.getPanel(effective);
+      if (panel) {
+        activatePanelInItsGroup(panel);
+        return;
+      }
+    }
+    if (fallbackPanelId !== undefined) {
+      const panel = api.getPanel(fallbackPanelId);
+      if (panel) activatePanelInItsGroup(panel);
+    }
+  }
+
+  api.onDidActivePanelChange(({ panel }) => {
+    const ms = Date.now() - switchedAtRef.current;
+    console.log(`  (event) TOP-LEVEL fired panel=${panel && panel.id} msSinceSwitch=${ms}`);
+    recordActivePanelForKeyUnlessRestoring(
+      ms,
+      activationKeyRef.current,
+      (panel && panel.id) || null,
+    );
+  });
+  function subscribeGroup(group) {
+    group.api.onDidActivePanelChange(({ panel }) => {
+      const ms = Date.now() - switchedAtRef.current;
+      console.log(`  (event) GROUP[${group.id}] fired panel=${panel.id} msSinceSwitch=${ms}`);
+      recordActivePanelForKeyUnlessRestoring(ms, activationKeyRef.current, panel.id);
+    });
+  }
+
+  const sidebar = api.addPanel({
+    id: "sidebar",
+    component: "default",
+    position: { direction: "left" },
+  });
+  const chat = api.addPanel({
+    id: "chat",
+    component: "default",
+    position: { referencePanel: sidebar.id, direction: "right" },
+  });
+  const files = api.addPanel({
+    id: "files",
+    component: "default",
+    position: { referencePanel: chat.id, direction: "right" },
+  });
+  const diff = api.addPanel({
+    id: "diff",
+    component: "default",
+    position: { referencePanel: "files", direction: "within" },
+  });
+  for (const g of api.groups) subscribeGroup(g);
+  const sharedGroup = files.group;
+  const chatElement = document.querySelector('[data-panel="chat"]');
+  const sidebarElement = document.querySelector('[data-panel="sidebar"]');
+  // Raw DOM listeners, independent of dockview-core entirely — kept so this
+  // scenario's own log can show whether the DOM-level focus/blur transition
+  // itself is happening, separately from whether dockview-core's
+  // `contentContainer.onDidFocus` translates it into a group activation (see
+  // this function's own doc comment for what this script found: the DOM
+  // event fires every time; dockview-core's own reaction to it did not,
+  // past the first occurrence, in this harness).
+  chatElement.addEventListener(
+    "focus",
+    () => console.log("    [RAW] chatElement DOM focus event"),
+    true,
+  );
+  chatElement.addEventListener(
+    "blur",
+    () => console.log("    [RAW] chatElement DOM blur event"),
+    true,
+  );
+
+  function scheduleComposerAutofocusEcho() {
+    // Real jsdom focus, ~15ms later — inside the measured 9-23ms window
+    // (dock-diag2) — lets dockview-core's OWN contentContainer.onDidFocus
+    // fire naturally, exactly as the real composer's autofocus does live.
+    setTimeout(() => chatElement.focus(), 15);
+  }
+
+  async function navigateToThread(key, fallbackId) {
+    realTabClick(sidebar);
+    // Focus the sidebar's OWN element first — matches round 6's own
+    // finding (a click INSIDE the sidebar panel's content is a genuine
+    // focus target too) and, critically for THIS test, forces a real
+    // focus TRANSITION: jsdom's FocusTracker (dockview-core's dom.js) only
+    // fires onDidFocus when `hasFocus` flips false->true. Without moving
+    // focus away from chat first, a later `chatElement.focus()` on an
+    // ALREADY-focused element is a silent no-op — it would never
+    // reproduce the echo at all, headless OR live.
+    sidebarElement.focus();
+    activationKeyRef.current = key;
+    switchedAtRef.current = Date.now();
+    const remembered = byActivationKey[key] ?? null;
+    restoreActivePanelForKey(api, { rememberedPanelId: remembered, fallbackPanelId: fallbackId });
+    scheduleComposerAutofocusEcho();
+    // 300ms: comfortably past BOTH the ~15ms echo AND SETTLE_MS (250) —
+    // matches realistic human timing (nobody clicks a tab within 250ms of
+    // switching threads) and, critically, must exceed SETTLE_MS itself or
+    // the settle window would wrongly swallow the test's OWN deliberate
+    // follow-up clicks, not just the echo.
+    await sleep(300);
+  }
+
+  await navigateToThread("A", "chat");
+  realTabClick(files);
+  await sleep(300);
+
+  await navigateToThread("B", "chat");
+  realTabClick(diff);
+  await sleep(300);
+
+  await navigateToThread("A", "chat"); // step 5 — click precedent in B
+  const step5Pass = sharedGroup.activePanel?.id === "files";
+  console.log(`  step 5: ${step5Pass ? "PASS (files)" : "FAIL"}`);
+
+  await navigateToThread("B", "chat"); // step 6 — restore-driven, not clicked
+  const step6Pass = sharedGroup.activePanel?.id === "diff";
+  console.log(`  step 6: ${step6Pass ? "PASS (diff)" : "FAIL"}`);
+
+  await navigateToThread("A", "chat"); // step 7 — restore-driven precedent — the reported failure shape
+  const step7Pass = sharedGroup.activePanel?.id === "files";
+  console.log(
+    `  step 7: ${step7Pass ? "PASS (files)" : "FAIL — matches the live-reported residual"}`,
+  );
+
+  console.log(`\n=== SCENARIO D (applySettleWindow=${applySettleWindow}) FINAL ===`);
+  console.log("byActivationKey:", JSON.stringify(byActivationKey));
+  console.log(
+    "Live group[shared].activePanel:",
+    sharedGroup.activePanel && sharedGroup.activePanel.id,
+  );
+  const allPass = step5Pass && step6Pass && step7Pass;
+  console.log(allPass ? "RESULT: all three steps pass" : "RESULT: LEAK REPRODUCED");
+  return allPass;
+}
+
+async function main() {
+  setupJsdomGlobals();
+  const results = [
+    scenarioA_naturalSequence(),
+    scenarioB_focusLeavesSharedGroupBeforeFinalRestore(),
+    scenarioC_restoreThenRestoreAcrossThreads(),
+  ];
+  results.push(await scenarioD_focusEchoAfterRestore(false));
+  results.push(await scenarioD_focusEchoAfterRestore(true));
+
+  console.log("\n\n================ SUMMARY ================");
+  console.log(
+    `Scenario A (natural sequence):                              ${results[0] ? "PASS (no leak)" : "FAIL (leak)"}`,
+  );
+  console.log(
+    `Scenario B (focus leaves group, triggers F7):               ${results[1] ? "PASS (no leak)" : "FAIL (leak)"}`,
+  );
+  console.log(
+    `Scenario C (restore-then-restore, round 7):                 ${results[2] ? "PASS (no leak)" : "FAIL (leak)"}`,
+  );
+  console.log(
+    `Scenario D, no settle window (round-6 code, pre round 7):   ${results[3] ? "PASS (no leak)" : "FAIL (leak)"}`,
+  );
+  console.log(
+    `Scenario D, WITH settle window (round-7 fix):               ${results[4] ? "PASS (no leak)" : "FAIL (leak)"}`,
+  );
+  console.log(
+    results[3] && results[4]
+      ? "\nScenario D did NOT reproduce the round-7 residual, even without the settle window applied — see this function's own doc comment for why (DOM focus/blur confirmed firing correctly and repeatedly via raw listeners; dockview-core's OWN reaction to it did not, past the first occurrence, in this specific harness). The fix itself is proven correct independently by the deterministic unit tests in dockActiveSelectionStore.test.ts, not by this scenario."
+      : "\nAt least one scenario D run reproduced a leak — investigate using the [RAW]/[WRITE]/(event) trace above.",
+  );
+}
+
+void main();

@@ -5,6 +5,7 @@ import {
   recordActivePanelForKey,
   recordActivePanelForKeyUnlessRestoring,
   selectActivePanelForKey,
+  SETTLE_MS,
   SIDEBAR_PANEL_ID,
   useDockActiveSelectionStore,
 } from "./dockActiveSelectionStore";
@@ -115,14 +116,19 @@ describe("recordActivePanelForKey", () => {
 // prove the SUPPRESSION mechanism itself works, not that it fixes an
 // observed-wrong final value (there wasn't one to reproduce here).
 describe("recordActivePanelForKeyUnlessRestoring", () => {
+  // `SETTLE_MS` itself as the "settled" sentinel throughout this describe
+  // block (except the round-7 tests below, which exist specifically to test
+  // the settle window) — `msSinceSwitch < SETTLE_MS` is false at exactly
+  // `SETTLE_MS`, so this reliably clears the settle guard without a magic
+  // "large enough" number.
   it("isRestoring: true suppresses the write entirely, even for an otherwise-valid key/panelId", () => {
-    recordActivePanelForKeyUnlessRestoring(true, "thread-A", "diff");
+    recordActivePanelForKeyUnlessRestoring(true, SETTLE_MS, "thread-A", "diff");
 
     expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
   });
 
-  it("isRestoring: false delegates to recordActivePanelForKey — identical behaviour to calling it directly", () => {
-    recordActivePanelForKeyUnlessRestoring(false, "thread-A", "diff");
+  it("isRestoring: false, settled: delegates to recordActivePanelForKey — identical behaviour to calling it directly", () => {
+    recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", "diff");
 
     expect(
       selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
@@ -132,7 +138,7 @@ describe("recordActivePanelForKeyUnlessRestoring", () => {
   it("a value already in the store before a suppressed call survives it unchanged — restore never needs to write what it's only applying", () => {
     recordActivePanelForKey("thread-A", "files");
 
-    recordActivePanelForKeyUnlessRestoring(true, "thread-A", "diff");
+    recordActivePanelForKeyUnlessRestoring(true, SETTLE_MS, "thread-A", "diff");
 
     expect(
       selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
@@ -146,18 +152,18 @@ describe("recordActivePanelForKeyUnlessRestoring", () => {
   // new activationKey — landing a "sidebar" write under the OUTGOING
   // thread's key on every single switch. See CHROME_PANEL_IDS's own doc
   // comment (dockActiveSelectionStore.ts) for the full traced mechanism.
-  it("ignores a CHROME_PANEL_IDS member even when isRestoring is false — a real, unsuppressed sidebar activation must not overwrite a thread's real selection", () => {
+  it("ignores a CHROME_PANEL_IDS member even when isRestoring is false and settled — a real, unsuppressed sidebar activation must not overwrite a thread's real selection", () => {
     recordActivePanelForKey("thread-A", "files");
 
-    recordActivePanelForKeyUnlessRestoring(false, "thread-A", SIDEBAR_PANEL_ID);
+    recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", SIDEBAR_PANEL_ID);
 
     expect(
       selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
     ).toBe("files");
   });
 
-  it("still records a non-chrome panelId normally — the filter is scoped to CHROME_PANEL_IDS, not a blanket suppression", () => {
-    recordActivePanelForKeyUnlessRestoring(false, "thread-A", "diff");
+  it("still records a non-chrome panelId normally when settled — the filter is scoped to CHROME_PANEL_IDS, not a blanket suppression", () => {
+    recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", "diff");
 
     expect(
       selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
@@ -166,5 +172,61 @@ describe("recordActivePanelForKeyUnlessRestoring", () => {
 
   it("CHROME_PANEL_IDS contains SIDEBAR_PANEL_ID — sanity check the fixture matches the real set, not a copy of the literal", () => {
     expect(CHROME_PANEL_IDS.has(SIDEBAR_PANEL_ID)).toBe(true);
+  });
+
+  // Task #108, round 7 (live QA, diagnostic-build repro — dock-diag2,
+  // 2026-08-05): the settle-window half of the fix. See `SETTLE_MS`'s own
+  // doc comment for the traced mechanism — a Chat-panel autofocus echo
+  // landing 9-23ms after every restore, unsuppressed by round 4's
+  // `isRestoring` guard because it fires asynchronously, outside that
+  // guard's synchronous window.
+  describe("the settle window (round 7)", () => {
+    it("an event 20ms after the switch, panelId=chat, is NOT recorded — this is the measured echo shape, and the literal bug this round closes", () => {
+      recordActivePanelForKeyUnlessRestoring(false, 20, "thread-A", "chat");
+
+      expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+    });
+
+    it("an event 300ms after the switch IS recorded — the window suppresses the echo, not every activation after a switch", () => {
+      recordActivePanelForKeyUnlessRestoring(false, 300, "thread-A", "chat");
+
+      expect(
+        selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+      ).toBe("chat");
+    });
+
+    it("msSinceSwitch exactly at SETTLE_MS is NOT suppressed by the settle guard — the boundary belongs to the caller, not the echo", () => {
+      recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", "chat");
+
+      expect(
+        selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+      ).toBe("chat");
+    });
+
+    it("all three guards compose independently: isRestoring alone suppresses even when settled and non-chrome", () => {
+      recordActivePanelForKeyUnlessRestoring(true, SETTLE_MS, "thread-A", "diff");
+
+      expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+    });
+
+    it("all three guards compose independently: the settle window alone suppresses even when not restoring and non-chrome", () => {
+      recordActivePanelForKeyUnlessRestoring(false, 20, "thread-A", "diff");
+
+      expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+    });
+
+    it("all three guards compose independently: CHROME_PANEL_IDS alone suppresses even when not restoring and settled", () => {
+      recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", SIDEBAR_PANEL_ID);
+
+      expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+    });
+
+    it("clearing all three guards at once records normally", () => {
+      recordActivePanelForKeyUnlessRestoring(false, SETTLE_MS, "thread-A", "files");
+
+      expect(
+        selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+      ).toBe("files");
+    });
   });
 });

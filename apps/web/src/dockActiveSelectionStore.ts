@@ -75,6 +75,47 @@ import { resolveStorage } from "./lib/storage";
 export const SIDEBAR_PANEL_ID = "sidebar";
 export const CHROME_PANEL_IDS: ReadonlySet<string> = new Set([SIDEBAR_PANEL_ID]);
 
+/**
+ * Task #108, round 7 (live QA, diagnostic-build repro — the fourth window's
+ * "restore lands, but the SECOND return to the same thread doesn't" shape;
+ * see evidence/task-108-round7-focus-echo-diagnosis/README.md for the full
+ * trace). Root cause this closes: T3's Chat panel autofocuses shortly after
+ * each thread's content mounts (almost certainly the message composer),
+ * and dockview-core's own `dockviewGroupPanelModel.js` wires
+ * `contentContainer.onDidFocus(() => accessor.doSetGroupActive(this.groupPanel))`
+ * — a DOM focus event landing anywhere inside a group's content
+ * unconditionally activates that GROUP, which fires the top-level
+ * `onDidActivePanelChange` event with whatever panel that group's own
+ * `activePanel` is (always "chat," since Chat's group holds only Chat).
+ * This landed 9–23ms after EVERY restore completed in the measured trace
+ * (dock-diag2, 2026-08-05) — well outside `isRestoringRef`'s synchronous
+ * suppression window (round 4), since the focus event is asynchronous
+ * relative to the restore call, not part of it. Unlike round 6's sidebar
+ * (pure navigation chrome, safe to exclude by id unconditionally), Chat is
+ * genuine thread-scoped content a user CAN legitimately select by clicking
+ * its own tab — so `CHROME_PANEL_IDS`-style exclusion is wrong here; it
+ * would make Chat permanently unrestorable as a real selection.
+ *
+ * The fix is a SETTLE WINDOW anchored to the ACTIVATION-KEY CHANGE (the
+ * thread switch itself), not to the restore call — the true invariant is
+ * "for a short window after a thread switch, activation events are
+ * machinery (restore, autofocus, mount churn), not user selections,"
+ * which covers this echo regardless of exactly how long after restore it
+ * happens to land. `DockviewLayout.tsx` stamps a ref with `Date.now()` on
+ * every activation-key change and passes the elapsed time to
+ * `recordActivePanelForKeyUnlessRestoring` below.
+ *
+ * `SETTLE_MS = 250`: the measured echo landed at 9–23ms after restore in
+ * every observed case (dock-diag2, 2026-08-05) — 250ms is a 10–25x margin.
+ * A genuine human tab click can't land inside 250ms of the thread switch
+ * that made the tab visible in the first place (the switch itself involves
+ * a real user click on the sidebar), so this can't blanket-mute real
+ * selections. Do not "clean up" this number without re-measuring the echo
+ * timing first — it is not an arbitrary round number, it's a margin over a
+ * specific measured value.
+ */
+export const SETTLE_MS = 250;
+
 interface DockActiveSelectionStoreState {
   byActivationKey: Record<string, string>;
   /**
@@ -185,13 +226,24 @@ export function recordActivePanelForKey(
  * filter would be insufficient, since the TOP-LEVEL `onDidActivePanelChange`
  * fires for the sidebar's own group-activation independently of whether any
  * per-group subscription also exists for it.
+ *
+ * Task #108, round 7: also ignores any event within `SETTLE_MS` of the last
+ * activation-key change (`SETTLE_MS`'s own doc comment above has the traced
+ * mechanism — a Chat-panel autofocus echo landing 9–23ms after restore,
+ * asynchronously, outside `isRestoring`'s synchronous window). `msSinceSwitch`
+ * is computed by the caller (`Date.now() - switchedAtRef.current` in
+ * `DockviewLayout.tsx`) rather than read from a ref in here, same reasoning
+ * `isRestoring` already applies: this function stays a pure, directly
+ * testable decision over plain values, not over ref plumbing.
  */
 export function recordActivePanelForKeyUnlessRestoring(
   isRestoring: boolean,
+  msSinceSwitch: number,
   activationKey: string | number | undefined,
   panelId: string | null,
 ): void {
   if (isRestoring) return;
+  if (msSinceSwitch < SETTLE_MS) return;
   if (panelId !== null && CHROME_PANEL_IDS.has(panelId)) return;
   recordActivePanelForKey(activationKey, panelId);
 }

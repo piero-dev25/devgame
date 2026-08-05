@@ -382,6 +382,24 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // out — restore never NEEDS to write, since it's only ever applying a
     // value the store already holds.
     const isRestoringRef = useRef(false);
+    // Task #108, round 7 (live QA, diagnostic-build repro): stamped with
+    // `Date.now()` on every activation-key change (below) — the record-side
+    // subscriptions compute `Date.now() - switchedAtRef.current` and pass it
+    // to `recordActivePanelForKeyUnlessRestoring`, which ignores anything
+    // within `SETTLE_MS` (`dockActiveSelectionStore.ts`) of the switch.
+    // Root cause this closes: T3's Chat panel autofocuses shortly after each
+    // thread's content mounts, and dockview-core's own
+    // `contentContainer.onDidFocus -> doSetGroupActive` wiring turns that
+    // focus into an unsuppressed top-level activation write 9-23ms AFTER
+    // restore completes — outside `isRestoringRef`'s synchronous window
+    // above, since the focus event is asynchronous relative to the restore
+    // call, not part of it (measured via a diagnostic build, dock-diag2,
+    // 2026-08-05 — see evidence/task-108-round7-focus-echo-diagnosis/).
+    // Anchored to the SWITCH, not the restore call, because that's the true
+    // invariant: restore, autofocus and mount churn are all machinery
+    // triggered by the SAME thread switch, not independent events that each
+    // need their own suppression window.
+    const switchedAtRef = useRef(Date.now());
     const [notice, setNotice] = useState<string | null>(null);
     // Task #109: which group (if any) is currently maximized — drives the
     // visible "Restore" button below. dockview's own maximize mechanism
@@ -497,6 +515,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // switch while touching nothing else about the live dockview instance.
     useEffect(() => {
       activationKeyRef.current = activationKey;
+      // See `switchedAtRef`'s own declaration above — stamped on EVERY
+      // activation-key change (including this effect's first, mount-time
+      // run), not just when a restore is about to fire, so the settle
+      // window covers the switch itself, not merely restore's own duration.
+      switchedAtRef.current = Date.now();
       const api = apiRef.current;
       if (!api || activationKey === undefined) return;
       restoreActivePanelForCurrentThread(api);
@@ -937,6 +960,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         activePanelChangeSub = api.onDidActivePanelChange(({ panel }) => {
           recordActivePanelForKeyUnlessRestoring(
             isRestoringRef.current,
+            Date.now() - switchedAtRef.current,
             activationKeyRef.current,
             panel?.id ?? null,
           );
@@ -953,6 +977,7 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
             group.api.onDidActivePanelChange(({ panel }) => {
               recordActivePanelForKeyUnlessRestoring(
                 isRestoringRef.current,
+                Date.now() - switchedAtRef.current,
                 activationKeyRef.current,
                 panel.id,
               );
