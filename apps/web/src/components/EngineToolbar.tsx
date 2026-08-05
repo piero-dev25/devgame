@@ -98,6 +98,14 @@ export interface EngineToolbarProps {
    * Retry button; this is the toolbar's.
    */
   readonly onRetryUnitySetup?: () => void;
+  /**
+   * Seeds a new chat turn asking the agent to diagnose and fix this
+   * project's Unity setup — the CTA's whole job (see
+   * `unitySetupPrompt.ts`'s doc comment: the click IS the consent,
+   * `.agents/skills/unity-setup/SKILL.md` doesn't ask again). Only ever
+   * rendered/called for the `"unity-cli"` backend's not-ready state.
+   */
+  readonly onSetupUnityIntegrations?: () => void;
 }
 
 export function EngineToolbar(props: EngineToolbarProps) {
@@ -138,6 +146,9 @@ export function EngineToolbar(props: EngineToolbarProps) {
             ? { onOpenConnectionsSettings: props.onOpenConnectionsSettings }
             : {})}
           {...(props.onRetryUnitySetup ? { onRetryUnitySetup: props.onRetryUnitySetup } : {})}
+          {...(props.onSetupUnityIntegrations
+            ? { onSetupUnityIntegrations: props.onSetupUnityIntegrations }
+            : {})}
         />
       ) : null}
     </div>
@@ -195,8 +206,11 @@ function ControlCluster(props: {
   readonly onOpenConnectionsSettings?: () => void;
   /** See `EngineToolbarProps.onRetryUnitySetup`'s own doc comment. */
   readonly onRetryUnitySetup?: () => void;
+  /** See `EngineToolbarProps.onSetupUnityIntegrations`'s own doc comment. */
+  readonly onSetupUnityIntegrations?: () => void;
 }) {
   const { view } = props;
+  const isUnity = view.backend === "unity-cli";
 
   if (view.requiresPresenceCommandScope && !props.hasPresenceCommandScope) {
     return (
@@ -234,11 +248,18 @@ function ControlCluster(props: {
       (view.hasConnectedEditor
         ? "The connected editor hasn't advertised any commands yet."
         : "No editor is connected for this project.");
+    // #107: the accessible name used to be the hard-coded literal
+    // "No editor connected" regardless of `reason` — so a screen reader (and
+    // our own computer-use QA driver, which reads the accessible NAME, not
+    // the visible tooltip) always heard that generic sentence even when
+    // `reason` had Unity's own specific classified message. Same fix as
+    // #111's `ThreeJsPlayButton`/`RightPanelMaximizeControl`: one expression
+    // drives both the aria-label and the tooltip body, so they can't drift.
     const disabledPlayButton = (
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button size="xs" variant="outline" disabled aria-label="No editor connected">
+            <Button size="xs" variant="outline" disabled aria-label={reason}>
               <PlayIcon className="size-3.5" aria-hidden />
               <span className="ml-0.5">Play</span>
             </Button>
@@ -252,13 +273,8 @@ function ControlCluster(props: {
     // #106), never for a confirmed classifier state: retrying "Pipeline
     // package missing" wouldn't produce a different answer, so no control
     // is shown there — see `unitySetupCheckFailed`'s own doc comment.
-    if (!view.unitySetupCheckFailed || !props.onRetryUnitySetup) {
-      return disabledPlayButton;
-    }
-    const onRetryUnitySetup = props.onRetryUnitySetup;
-    return (
-      <div className="flex shrink-0 items-center gap-1">
-        {disabledPlayButton}
+    const retryButton =
+      view.unitySetupCheckFailed && props.onRetryUnitySetup ? (
         <Tooltip>
           <TooltipTrigger
             render={
@@ -266,13 +282,107 @@ function ControlCluster(props: {
                 size="icon-xs"
                 variant="outline"
                 aria-label="Retry checking Unity's status"
-                onClick={() => onRetryUnitySetup()}
+                onClick={() => props.onRetryUnitySetup?.()}
               />
             }
           >
             <RotateCcwIcon className="size-3.5" aria-hidden />
           </TooltipTrigger>
           <TooltipPopup side="bottom">Retry checking Unity's status</TooltipPopup>
+        </Tooltip>
+      ) : null;
+
+    // The owner's mock: not-ready Unity gets a loud CTA (the header saying
+    // what to do next) beside the same disabled Play a sighted user would
+    // otherwise stare at with no obvious next step. `variant="default"` is
+    // the SAME filled/`--primary` vocabulary `ComposerPrimaryActions.tsx`'s
+    // own "Implement" button and the plan-sidebar submit button already use
+    // elsewhere in this codebase — reusing that existing variant rather than
+    // hand-rolling bespoke classes matching the composer send button's exact
+    // (differently-directioned) hover state, so this doesn't become a THIRD
+    // subtly-different "filled button" convention. This is the first
+    // `variant="default"` control in this header row — every neighbour
+    // (`Add action`, `Open`, `Commit`, and every other control in THIS
+    // toolbar) is `variant="outline"`; deliberate, per the mock, not an
+    // oversight.
+    if (isUnity && props.onSetupUnityIntegrations) {
+      const onSetupUnityIntegrations = props.onSetupUnityIntegrations;
+      return (
+        <div className="flex shrink-0 items-center gap-1">
+          <Button size="xs" variant="default" onClick={() => onSetupUnityIntegrations()}>
+            Setup Unity Integrations
+          </Button>
+          {disabledPlayButton}
+          {retryButton}
+        </div>
+      );
+    }
+
+    if (!retryButton) {
+      return disabledPlayButton;
+    }
+    return (
+      <div className="flex shrink-0 items-center gap-1">
+        {disabledPlayButton}
+        {retryButton}
+      </div>
+    );
+  }
+
+  // Owner's mock, ready state: "collapses to two quiet outline buttons —
+  // Unity (bring the Editor to the front) and Play (bring to front AND
+  // play)." Deliberately Unity-only — every OTHER engine (Godot/Unreal
+  // today, both `"editor-presence"`) keeps the existing multi-action Group
+  // below untouched; that toolbar path isn't part of this change.
+  //
+  // Two things this build deliberately does NOT attempt, per the owner not
+  // having ruled on them yet:
+  //  - Pause. Unity's real playState is stopped|playing|paused (three
+  //    states); the mock shows two buttons. Rather than invent a home for a
+  //    third affordance the mock doesn't show, Pause is simply omitted here
+  //    — `onAction("pause")` is still fully wired (`handleEngineAction` in
+  //    ChatView.tsx never changed), just not exposed as a button for Unity.
+  //  - Bring-to-front. `open -a "Unity"` via `ExternalLauncher` is a
+  //    separate task. The `Unity` button below is PRESENT but DISABLED with
+  //    a stated reason, not omitted and not a silent no-op — this file's own
+  //    established "disabled-with-a-reason, never hidden-or-silently-broken"
+  //    principle (see `ThreeJsPlayButton`'s doc comment) applies exactly as
+  //    much to a deferred feature as to a missing one: a control that LOOKS
+  //    clickable but does nothing on click would be worse than one that's
+  //    honestly disabled, and omitting it entirely would leave the ready
+  //    state showing only one button, not the pair the mock specifies.
+  if (isUnity) {
+    const engaged = isPlayEngaged(view.playState);
+    return (
+      <div className="flex shrink-0 items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button size="xs" variant="outline" disabled aria-label="Bring Unity to the front">
+                Unity
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">
+            Bringing the Unity Editor to the front isn't wired up yet.
+          </TooltipPopup>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="xs"
+                variant={engaged ? "default" : "outline"}
+                aria-label="Play"
+                aria-pressed={engaged}
+                onClick={() => props.onAction("play")}
+              >
+                <PlayIcon className="size-3.5" aria-hidden />
+                <span className="ml-0.5">Play</span>
+              </Button>
+            }
+          />
+          <TooltipPopup side="bottom">Play</TooltipPopup>
         </Tooltip>
       </div>
     );

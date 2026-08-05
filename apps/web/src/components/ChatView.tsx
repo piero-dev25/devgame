@@ -223,6 +223,7 @@ import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand
 import type { EditorPresencePlayState } from "../editorPresence/protocol";
 import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
+import { buildUnitySetupIntegrationPrompt } from "../unity/unitySetupPrompt";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
@@ -5382,6 +5383,25 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  // The `Setup Unity Integrations` CTA (EngineToolbar.tsx's not-ready Unity
+  // state): "same shape, new trigger" — reuses `onSubmitPlanFollowUp`
+  // directly rather than duplicating its ~150 lines of send plumbing
+  // (optimistic message, `persistThreadSettingsForNextTurn`, `startThreadTurn`,
+  // failure handling). Its ONE plan-specific behaviour —
+  // `sourceProposedPlan` — only activates when `activeProposedPlan` is set,
+  // which it never is on this path, so this is a plain "send this exact
+  // text as a new turn" call in practice. Deliberately does NOT go through
+  // `resolvePlanFollowUpSubmission` (which prefers the composer's current
+  // draft text over the built prompt) — clicking this CTA should always
+  // send the fixed nudge, not whatever unrelated text happens to be sitting
+  // in the composer.
+  const handleSetupUnityIntegrations = useCallback(() => {
+    void onSubmitPlanFollowUp({
+      text: buildUnitySetupIntegrationPrompt(),
+      interactionMode: "default",
+    });
+  }, [onSubmitPlanFollowUp]);
+
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
       !activeThread ||
@@ -5814,6 +5834,7 @@ function ChatViewContent(props: ChatViewProps) {
             hasPresenceCommandScope={hasPresenceCommandScope}
             onOpenConnectionsSettings={handleOpenConnectionsSettings}
             onRetryUnitySetup={unitySetupQuery.refresh}
+            onSetupUnityIntegrations={handleSetupUnityIntegrations}
           />
         </header>
 

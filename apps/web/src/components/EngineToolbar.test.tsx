@@ -51,6 +51,20 @@ function isInsideButton(html: string, text: string): boolean {
   return buttonBlocks.some((block) => block.includes(text));
 }
 
+// React's static renderer emits a true boolean `disabled` prop as the
+// literal attribute `disabled=""`, and OMITS it entirely when false —
+// verified directly against `react-dom/server` (`disabled: true` ->
+// `<button disabled="">`, `disabled: false` -> `<button>`, no attribute at
+// all). A bare `.includes("disabled")` on a button's full outerHTML is
+// NOT safe: `Button`'s own class list contains `disabled:pointer-events-none
+// disabled:opacity-64` (Tailwind's `disabled:` variant) on EVERY button,
+// disabled or not — that string match would report every button as
+// disabled, catching nothing. Found by running this suite against the fix
+// and getting a false failure on an ENABLED Play button.
+function isDisabled(buttonHtml: string): boolean {
+  return /\sdisabled=""/.test(buttonHtml);
+}
+
 describe("EngineToolbar three.js Play button accessible name (#111)", () => {
   it("uses 'Run preview' as the accessible name when playable", () => {
     const html = renderToolbar({ onPlayThreeJs: () => {} });
@@ -101,5 +115,174 @@ describe("EngineToolbar engine label is a static badge, not a picker", () => {
     const html = renderToolbar({ resolvedEngineType: null });
 
     expect(html).toContain(">No engine<");
+  });
+});
+
+// The two-state Unity header (owner's mock): not set up -> a loud CTA the
+// header itself is asking you to click; set up -> a quiet pair. Both states
+// are driven off `resolveEngineToolbarView`'s existing unity-cli branch
+// (already covered by EngineToolbar.test.ts's own suite for READY vs
+// NOT-READY) — what's new and provable HERE is the RENDERED markup for
+// each, which that pure-logic suite can't see.
+const UNITY_NOT_READY_VIEW: EngineToolbarView = {
+  engineType: "unity",
+  backend: "unity-cli",
+  requiresPresenceCommandScope: true,
+  hasConnectedEditor: false,
+  availableActions: [],
+  playState: null,
+  disabledReason: "Pipeline package missing from Packages/packages-lock.json.",
+  unitySetupCheckFailed: false,
+};
+
+const UNITY_READY_VIEW: EngineToolbarView = {
+  engineType: "unity",
+  backend: "unity-cli",
+  requiresPresenceCommandScope: true,
+  hasConnectedEditor: false,
+  availableActions: ["play", "pause", "stop"],
+  playState: null,
+  disabledReason: null,
+  unitySetupCheckFailed: false,
+};
+
+function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineToolbarProps> = {}) {
+  return renderToStaticMarkup(
+    <EngineToolbar
+      resolvedEngineType="unity"
+      view={view}
+      onAction={() => {}}
+      hasPresenceCommandScope
+      {...overrides}
+    />,
+  );
+}
+
+describe("EngineToolbar — Unity not-ready state renders the Setup CTA", () => {
+  it("renders the filled CTA and a disabled Play beside it", () => {
+    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW, {
+      onSetupUnityIntegrations: () => {},
+    });
+
+    expect(html).toContain(">Setup Unity Integrations<");
+    // Disabled is asserted structurally (the real `disabled=""` attribute,
+    // via `isDisabled` — see its own doc comment for why a bare
+    // `.includes("disabled")` is NOT safe here), not just "a Play-labelled
+    // button exists somewhere" — a CTA next to an ENABLED Play would be a
+    // materially different (and wrong) state.
+    const playButtons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const disabledPlay = playButtons.find((block) => block.includes(">Play<") && isDisabled(block));
+    expect(disabledPlay).toBeDefined();
+  });
+
+  it("does NOT render the CTA when the caller supplies no onSetupUnityIntegrations handler", () => {
+    // Mirrors every other optional-callback gate in this file
+    // (onOpenConnectionsSettings, onRetryUnitySetup): a control whose click
+    // handler is absent must not render as if it were wired.
+    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW);
+
+    expect(html).not.toContain("Setup Unity Integrations");
+  });
+
+  it("does NOT render the CTA once Unity is ready", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW, { onSetupUnityIntegrations: () => {} });
+
+    expect(html).not.toContain("Setup Unity Integrations");
+  });
+});
+
+describe("EngineToolbar — Unity ready state renders the quiet Unity/Play pair", () => {
+  it("renders both 'Unity' and 'Play', with Unity disabled (bring-to-front not wired up yet)", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW);
+
+    expect(html).toContain(">Unity<");
+    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const unityButton = buttons.find((block) => block.includes(">Unity<"));
+    expect(unityButton).toBeDefined();
+    expect(isDisabled(unityButton ?? "")).toBe(true);
+    const playButton = buttons.find((block) => block.includes(">Play<"));
+    expect(playButton).toBeDefined();
+    // Unlike the not-ready state's Play, THIS Play must be clickable.
+    expect(isDisabled(playButton ?? "")).toBe(false);
+  });
+
+  it("does NOT render the old multi-action cluster (Pause/Stop buttons, play-target chevron) for Unity", () => {
+    // The mock shows two buttons, not the generic editor-presence Group —
+    // Pause/Stop are deliberately omitted per this build's own scope notes,
+    // not accidentally dropped.
+    const html = renderUnityToolbar(UNITY_READY_VIEW);
+
+    expect(hasAriaLabel(html, "Pause")).toBe(false);
+    expect(hasAriaLabel(html, "Stop")).toBe(false);
+    expect(hasAriaLabel(html, "Play target options")).toBe(false);
+  });
+});
+
+describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () => {
+  const GODOT_READY_VIEW: EngineToolbarView = {
+    engineType: "godot",
+    backend: "editor-presence",
+    requiresPresenceCommandScope: true,
+    hasConnectedEditor: true,
+    availableActions: ["play", "pause", "stop"],
+    playState: null,
+    disabledReason: null,
+    unitySetupCheckFailed: false,
+  };
+
+  it("still renders the full Play/Pause/Stop cluster and play-target chevron for Godot", () => {
+    const html = renderToStaticMarkup(
+      <EngineToolbar
+        resolvedEngineType="godot"
+        view={GODOT_READY_VIEW}
+        onAction={() => {}}
+        hasPresenceCommandScope
+      />,
+    );
+
+    expect(hasAriaLabel(html, "Play")).toBe(true);
+    expect(hasAriaLabel(html, "Pause")).toBe(true);
+    expect(hasAriaLabel(html, "Stop")).toBe(true);
+    expect(hasAriaLabel(html, "Play target options")).toBe(true);
+    // And no Unity-only affordances leak into this path.
+    expect(html).not.toContain("Setup Unity Integrations");
+  });
+});
+
+// #107: Play's accessible name used to be the hard-coded literal
+// "No editor connected" regardless of the REAL reason — so a screen reader
+// (and a computer-use QA driver, which reads the accessible name, not the
+// visible tooltip) always heard that generic sentence even when a specific
+// classified reason (Unity's, or editor-presence's) was available.
+describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
+  it("uses Unity's specific classified reason as the accessible name, not the generic literal", () => {
+    const html = renderUnityToolbar(UNITY_NOT_READY_VIEW);
+
+    expect(hasAriaLabel(html, "No editor connected")).toBe(false);
+    expect(hasAriaLabel(html, UNITY_NOT_READY_VIEW.disabledReason ?? "")).toBe(true);
+  });
+
+  it("still falls back to a stated generic reason for editor-presence with nothing connected (never the old literal)", () => {
+    const godotNotConnected: EngineToolbarView = {
+      engineType: "godot",
+      backend: "editor-presence",
+      requiresPresenceCommandScope: true,
+      hasConnectedEditor: false,
+      availableActions: [],
+      playState: null,
+      disabledReason: null,
+      unitySetupCheckFailed: false,
+    };
+    const html = renderToStaticMarkup(
+      <EngineToolbar
+        resolvedEngineType="godot"
+        view={godotNotConnected}
+        onAction={() => {}}
+        hasPresenceCommandScope
+      />,
+    );
+
+    expect(hasAriaLabel(html, "No editor connected")).toBe(false);
+    expect(hasAriaLabel(html, "No editor is connected for this project.")).toBe(true);
   });
 });

@@ -63,6 +63,8 @@ interface ChatHeaderProps {
   onOpenConnectionsSettings: () => void;
   /** See `EngineToolbarProps.onRetryUnitySetup`'s own doc comment. */
   onRetryUnitySetup?: () => void;
+  /** See `EngineToolbarProps.onSetupUnityIntegrations`'s own doc comment. */
+  onSetupUnityIntegrations?: () => void;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -104,6 +106,7 @@ export const ChatHeader = memo(function ChatHeader({
   hasPresenceCommandScope,
   onOpenConnectionsSettings,
   onRetryUnitySetup,
+  onSetupUnityIntegrations,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const fileScripts = useT3ProjectFileScripts(
@@ -206,6 +209,7 @@ export const ChatHeader = memo(function ChatHeader({
             hasPresenceCommandScope={hasPresenceCommandScope}
             onOpenConnectionsSettings={onOpenConnectionsSettings}
             {...(onRetryUnitySetup ? { onRetryUnitySetup } : {})}
+            {...(onSetupUnityIntegrations ? { onSetupUnityIntegrations } : {})}
           />
         )}
       </div>
