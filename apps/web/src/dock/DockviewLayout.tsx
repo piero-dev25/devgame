@@ -1096,13 +1096,24 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           Fixed by giving up on per-button absolute coordinates entirely:
           both controls now live in `DockControlsCluster` (above) as ONE
           absolutely-positioned flex cluster anchored at `top-1.5 right-1.5`
-          (Reset's old corner, clear of the traffic lights on every platform
-          this app ships for — a right-side cluster is the one corner an OS
-          never overlays its own window chrome onto). A flex row with
-          `gap-1` can't overlap its own children by construction, so the
-          original never-overlap property is preserved for free, and stays
-          true even if a third control is ever added here later — no new
-          magic offset to pick and verify.
+          — Reset's old corner, and clear of macOS's traffic lights, which is
+          the CONFIRMED defect this fixes. That corner is NOT universally
+          safe, though: on every platform other than macOS this app frames
+          its window with `titleBarStyle: "hidden"` + a `titleBarOverlay`
+          (`apps/desktop/src/window/DesktopWindow.ts:185-204`), and on
+          Windows that overlay draws minimize/maximize/close at the top
+          RIGHT — the exact corner this cluster now occupies. That is NOT a
+          regression from this change: Reset alone has lived at
+          `top-1.5 right-1.5` since long before this fix, so whatever
+          Windows collision exists in that corner exists today regardless
+          and isn't something this change introduces or worsens (see #127,
+          filed and left open rather than guessed at — nobody has run this
+          app on Windows, so a platform-conditional position would be
+          invented, not verified). A flex row with `gap-1` can't overlap its
+          own children by construction, so the never-overlap property
+          between Reset and Restore THEMSELVES is preserved for free, and
+          stays true even if a third control is ever added here later — no
+          new magic offset to pick and verify for THAT part.
         */}
         <DockControlsCluster
           maximizedGroupId={maximizedGroupId}
