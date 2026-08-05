@@ -44,7 +44,10 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "~/components/ui/button";
-import { recordActivePanelForKey, useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
+import {
+  recordActivePanelForKeyUnlessRestoring,
+  useDockActiveSelectionStore,
+} from "~/dockActiveSelectionStore";
 import { cn } from "~/lib/utils";
 
 import {
@@ -355,6 +358,30 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // sync by the activationKey-change effect further down, the only other
     // place `activationKey` is read.
     const activationKeyRef = useRef(activationKey);
+    // Task #108, round 4 (live QA, merge-gate finding F7): true for the
+    // duration of a `restoreActivePanelForCurrentThread` call — every
+    // record-side subscription below checks this and skips writing while
+    // it's true. Root cause: `restoreActivePanelForKey`'s own
+    // `panel.group.api.setActive()` call (activating the panel's group
+    // BEFORE the panel itself — see that function's doc comment) can
+    // transiently re-fire dockview's top-level `onDidActivePanelChange`
+    // carrying the group's OLD active panel, not the one restore is trying
+    // to apply: `dockviewComponent.js`'s `doSetGroupActive` override calls
+    // `fireActivePanelChange(this.activePanel)` using whichever panel was
+    // ALREADY active in the group at that instant — confirmed as a REAL,
+    // reproducible transient via a headless dockview-core@7.0.4 + jsdom
+    // repro (not just source reading; see this round's report for the
+    // script). That same repro also showed the transient is synchronously
+    // superseded, within the SAME call, by the subsequent
+    // `panel.api.setActive()` — so the store's FINAL value already comes
+    // out correct without this guard in every scenario the repro could
+    // construct. This flag is added anyway, per explicit instruction: it
+    // makes restore READ-ONLY with respect to the store by construction,
+    // removing the whole transient-wrong-write risk class rather than
+    // relying on dockview-core's own correction timing to keep bailing it
+    // out — restore never NEEDS to write, since it's only ever applying a
+    // value the store already holds.
+    const isRestoringRef = useRef(false);
     const [notice, setNotice] = useState<string | null>(null);
     // Task #109: which group (if any) is currently maximized — drives the
     // visible "Restore" button below. dockview's own maximize mechanism
@@ -438,11 +465,20 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     // `api`-dependent branch below no-ops for exactly that reason.
     const restoreActivePanelForCurrentThread = useCallback(
       (api: DockviewApi) => {
-        restoreActivePanelForThread(api, {
-          byActivationKey: useDockActiveSelectionStore.getState().byActivationKey,
-          activationKey: activationKeyRef.current,
-          ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
-        });
+        // See `isRestoringRef`'s own declaration above for the round-4 (F7)
+        // reasoning — every write this call's own `setActive()`s trigger,
+        // right or transiently wrong, is suppressed; a `finally` so a throw
+        // inside restore can't leave the guard stuck on.
+        isRestoringRef.current = true;
+        try {
+          restoreActivePanelForThread(api, {
+            byActivationKey: useDockActiveSelectionStore.getState().byActivationKey,
+            activationKey: activationKeyRef.current,
+            ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
+          });
+        } finally {
+          isRestoringRef.current = false;
+        }
       },
       [activateOnChangeId],
     );
@@ -641,10 +677,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // (switching focus to a different group whose own active tab was
       // already correct) — `doSetGroupActive` fires the top-level event for
       // exactly that case, and no group-scoped event does. Both routes
-      // converge on `recordActivePanelForKey`
+      // converge on `recordActivePanelForKeyUnlessRestoring`
       // (`dockActiveSelectionStore.ts`), which is idempotent, so the same
       // literal tab click firing both subscriptions is harmless, not a
-      // double-write bug.
+      // double-write bug — see `isRestoringRef`'s own comment for the
+      // "unless restoring" half, added round 4.
       //
       // Keyed by group id (not held as a flat array/Set of disposables) so a
       // group that's removed (its tabs all closed, or the split collapsed)
@@ -885,17 +922,24 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         mutateLayoutSub = api.onDidMutateLayout(scheduleSave);
         // Task #108: records which panel is active RIGHT NOW under the
         // CURRENT thread's key — fires for every activation, whatever
-        // triggered it (a genuine tab click, the initial load applying a
-        // saved/default tree, or this same file's own restore call above),
-        // which is exactly right: the store's only job is to reflect
-        // "whatever is showing now, for whichever thread is now active,"
-        // not to distinguish user-driven from programmatic. Reads
-        // `activationKeyRef` (NOT the `activationKey` closure captured when
-        // this effect first ran) because this subscription is never
-        // recreated on a thread switch — see the activationKey-change effect
-        // above, the one place that ref is kept current.
+        // triggered it (a genuine tab click, or the initial load applying a
+        // saved/default tree), which is exactly right: the store's only job
+        // is to reflect "whatever is showing now, for whichever thread is
+        // now active," not to distinguish user-driven from programmatic.
+        // Round 4 correction: this file's OWN restore call (just above) is
+        // the one exception, not an example — see `isRestoringRef`'s own
+        // comment for why restore must NOT feed back into the store it
+        // reads from. Reads `activationKeyRef` (NOT the `activationKey`
+        // closure captured when this effect first ran) because this
+        // subscription is never recreated on a thread switch — see the
+        // activationKey-change effect above, the one place that ref is kept
+        // current.
         activePanelChangeSub = api.onDidActivePanelChange(({ panel }) => {
-          recordActivePanelForKey(activationKeyRef.current, panel?.id ?? null);
+          recordActivePanelForKeyUnlessRestoring(
+            isRestoringRef.current,
+            activationKeyRef.current,
+            panel?.id ?? null,
+          );
         });
         // Task #108, QA round 3 reopen: the per-GROUP half of the write
         // side — see `groupActivePanelChangeSubs`'s own declaration above
@@ -907,7 +951,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           groupActivePanelChangeSubs.set(
             group.id,
             group.api.onDidActivePanelChange(({ panel }) => {
-              recordActivePanelForKey(activationKeyRef.current, panel.id);
+              recordActivePanelForKeyUnlessRestoring(
+                isRestoringRef.current,
+                activationKeyRef.current,
+                panel.id,
+              );
             }),
           );
         };

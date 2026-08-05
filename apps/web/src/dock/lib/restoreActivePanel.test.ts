@@ -103,6 +103,56 @@ describe("restoreActivePanelForKey — the panel's group is activated first (tas
   });
 });
 
+// Task #108, round 4 (live QA, merge-gate finding F7): models the REAL
+// dockview-core event sequence a group-then-panel restore produces — traced
+// against the installed dockview-core@7.0.4 source AND independently
+// confirmed via a standalone headless dockview-core@7.0.4 + jsdom repro (see
+// this round's report for the script): `panel.group.api.setActive()` can
+// transiently re-fire dockview's TOP-LEVEL `onDidActivePanelChange` carrying
+// the group's OLD active panel (`dockviewComponent.js`'s `doSetGroupActive`
+// override calls `fireActivePanelChange(this.activePanel)` using whichever
+// panel was ALREADY active in the group at that instant), and the following
+// `panel.api.setActive()` then fires it AGAIN, correctly, with the NEW
+// panel.
+//
+// HONEST LIMIT, exactly as the brief for this round anticipated: this does
+// NOT go red against the current (post-round-3) `restoreActivePanelForKey`.
+// The headless repro proved the transient self-corrects to the right FINAL
+// value within the SAME synchronous call, in every scenario it could
+// construct — dockview-core's own guarded re-broadcast
+// (`dockviewComponent.js:3050-3061`) fires a second, correcting event once
+// the group IS the active one, which by this point in the call it already
+// is. What round 4 actually adds is `isRestoringRef` /
+// `recordActivePanelForKeyUnlessRestoring` in `DockviewLayout.tsx` (see that
+// file, and `dockActiveSelectionStore.test.ts`'s own red-then-green pair for
+// the suppression mechanism itself — no jsdom exists here to drive
+// `DockviewLayout`'s own subscriptions end to end), which suppresses BOTH
+// fires unconditionally, rather than continuing to rely on dockview-core's
+// own correction timing to keep bailing this out. This test's narrower job:
+// document that the sequence really is [OLD, NEW] — F7 is real — and that
+// restoreActivePanelForKey's group-then-panel ordering (proven above) is
+// exactly what makes NEW the LAST call, which is what the self-correction
+// depends on upstream of the suppression.
+describe("restoreActivePanelForKey — F7 event sequence (task #108, round 4)", () => {
+  it("group.api.setActive() transiently fires with the group's OLD active panel, THEN panel.api.setActive() fires with the correct NEW one", () => {
+    const topLevelFires: string[] = [];
+    // simulates dockviewComponent.js's doSetGroupActive -> fireActivePanelChange(oldActivePanel)
+    const group = fakeGroup(() => topLevelFires.push("diff"));
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "files"
+          ? // simulates the SUBSEQUENT, corrected top-level fire once the group is active
+            fakePanel("files", () => topLevelFires.push("files"), group)
+          : undefined,
+    });
+
+    restoreActivePanelForKey(api, { rememberedPanelId: "files" });
+
+    expect(topLevelFires).toEqual(["diff", "files"]);
+    expect(topLevelFires.at(-1)).toBe("files");
+  });
+});
+
 describe("restoreActivePanelForKey — nothing remembered yet (a thread visited for the first time)", () => {
   it("falls back to fallbackPanelId — preserves fix-round finding #5's original guarantee", () => {
     let chatActivated = false;

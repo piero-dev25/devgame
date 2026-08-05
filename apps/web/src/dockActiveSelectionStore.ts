@@ -108,3 +108,36 @@ export function recordActivePanelForKey(
   if (activationKey === undefined) return;
   useDockActiveSelectionStore.getState().setActivePanel(String(activationKey), panelId);
 }
+
+/**
+ * Task #108, round 4 (live QA, merge-gate finding F7): the suppression half
+ * of the fix for a transient wrong write during restore. `DockviewLayout.tsx`
+ * calls this — not `recordActivePanelForKey` directly — from BOTH its
+ * top-level and per-group `onDidActivePanelChange` subscriptions, passing
+ * `isRestoringRef.current` (true for the duration of one
+ * `restoreActivePanelForCurrentThread` call). See that ref's own doc comment
+ * for the traced root cause: `restoreActivePanelForKey`'s
+ * `panel.group.api.setActive()` step can transiently re-fire dockview's
+ * top-level active-panel event carrying the group's OLD panel, before the
+ * following `panel.api.setActive()` corrects it — a headless
+ * dockview-core@7.0.4 repro confirmed the transient is real AND that it
+ * self-corrects to the right final value within the same synchronous call
+ * regardless of this guard. Suppressing here anyway is still correct:
+ * restore only ever APPLIES a value the store already holds, so it never
+ * legitimately needs to write one back — making it read-only w.r.t. the
+ * store by construction removes the whole risk class rather than leaning on
+ * dockview-core's own correction timing.
+ *
+ * A plain `isRestoring: boolean` parameter (not a ref) so this stays a pure,
+ * directly testable decision — same reasoning `recordActivePanelForKey`
+ * itself already applies; the ref lives in the component, this function
+ * doesn't need to know it's a ref to decide what to do with its value.
+ */
+export function recordActivePanelForKeyUnlessRestoring(
+  isRestoring: boolean,
+  activationKey: string | number | undefined,
+  panelId: string | null,
+): void {
+  if (isRestoring) return;
+  recordActivePanelForKey(activationKey, panelId);
+}

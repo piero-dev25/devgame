@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   recordActivePanelForKey,
+  recordActivePanelForKeyUnlessRestoring,
   selectActivePanelForKey,
   useDockActiveSelectionStore,
 } from "./dockActiveSelectionStore";
@@ -97,5 +98,42 @@ describe("recordActivePanelForKey", () => {
     recordActivePanelForKey("thread-A", null);
 
     expect("thread-A" in useDockActiveSelectionStore.getState().byActivationKey).toBe(false);
+  });
+});
+
+// Task #108, round 4 (live QA, merge-gate finding F7): the suppression half
+// of the fix — `DockviewLayout.tsx` now calls THIS, not `recordActivePanelForKey`
+// directly, from both its onDidActivePanelChange subscriptions, passing
+// `isRestoringRef.current`. See `recordActivePanelForKeyUnlessRestoring`'s
+// own doc comment for the traced root cause (restoreActivePanelForKey's
+// `panel.group.api.setActive()` step can transiently re-fire dockview's
+// top-level event with the group's OLD panel) and this round's report for
+// why a headless dockview-core repro showed the transient self-corrects to
+// the right final value even WITHOUT this guard — meaning these tests below
+// prove the SUPPRESSION mechanism itself works, not that it fixes an
+// observed-wrong final value (there wasn't one to reproduce here).
+describe("recordActivePanelForKeyUnlessRestoring", () => {
+  it("isRestoring: true suppresses the write entirely, even for an otherwise-valid key/panelId", () => {
+    recordActivePanelForKeyUnlessRestoring(true, "thread-A", "diff");
+
+    expect(useDockActiveSelectionStore.getState().byActivationKey).toEqual({});
+  });
+
+  it("isRestoring: false delegates to recordActivePanelForKey — identical behaviour to calling it directly", () => {
+    recordActivePanelForKeyUnlessRestoring(false, "thread-A", "diff");
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+    ).toBe("diff");
+  });
+
+  it("a value already in the store before a suppressed call survives it unchanged — restore never needs to write what it's only applying", () => {
+    recordActivePanelForKey("thread-A", "files");
+
+    recordActivePanelForKeyUnlessRestoring(true, "thread-A", "diff");
+
+    expect(
+      selectActivePanelForKey(useDockActiveSelectionStore.getState().byActivationKey, "thread-A"),
+    ).toBe("files");
   });
 });
