@@ -8,7 +8,7 @@
 // beyond the transport — this one takes no `workspaceRoot` (the server
 // resolves its own project, per plan §1's F6) and no `action`, and returns
 // the full classified taxonomy rather than a play/stop/pause outcome.
-import { UNITY_SETUP_PROBE_PATH, type UnitySetupProbeResult } from "@t3tools/contracts";
+import { UNITY_SETUP_PROBE_PATH, UnitySetupProbeResult } from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -17,9 +17,16 @@ import {
   withEnvironmentCredentials,
 } from "@t3tools/client-runtime/state/environmentHttpAuth";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { runtime } from "../lib/runtime";
+
+// Pre-composed once at module scope, same convention as
+// `connection/storage.ts`'s `decodeConnectionCatalogDocument` and
+// `cloud/dpop.ts`'s `decodeDpopPublicJwk` — the response body is `unknown`
+// wire data, not something a compile-time cast can vouch for (#100).
+const decodeUnitySetupProbeResult = Schema.decodeUnknownEffect(UnitySetupProbeResult);
 
 function fetchEffect(input: {
   readonly httpBaseUrl: string;
@@ -46,7 +53,7 @@ function fetchEffect(input: {
       input.httpAuthorization,
       client.execute(request),
     );
-    return (yield* response.json) as UnitySetupProbeResult;
+    return yield* decodeUnitySetupProbeResult(yield* response.json);
   }).pipe(
     // Bounded so a hung connection can never leave a caller's `.then`/
     // `.catch` both un-fired forever — found live (2026-08-04, team-lead +

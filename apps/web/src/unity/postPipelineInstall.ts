@@ -10,7 +10,7 @@
 // with the read-only probe beyond the transport, and it is the one call in
 // this whole feature that WRITES to the user's project — worth being able
 // to find, read, and reason about on its own.
-import { UNITY_PIPELINE_INSTALL_PATH, type UnityPipelineInstallResult } from "@t3tools/contracts";
+import { UNITY_PIPELINE_INSTALL_PATH, UnityPipelineInstallResult } from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -19,9 +19,14 @@ import {
   withEnvironmentCredentials,
 } from "@t3tools/client-runtime/state/environmentHttpAuth";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
 
 import { runtime } from "../lib/runtime";
+
+// Pre-composed once at module scope — same convention as
+// `fetchSetupProbe.ts`'s `decodeUnitySetupProbeResult` (#99).
+const decodeUnityPipelineInstallResult = Schema.decodeUnknownEffect(UnityPipelineInstallResult);
 
 function postEffect(input: {
   readonly httpBaseUrl: string;
@@ -51,7 +56,7 @@ function postEffect(input: {
     if (response.status === 403) {
       throw new Error("Forbidden: insufficient scope");
     }
-    return (yield* response.json) as UnityPipelineInstallResult;
+    return yield* decodeUnityPipelineInstallResult(yield* response.json);
   }).pipe(Effect.provide(FetchHttpClient.layer));
 }
 
