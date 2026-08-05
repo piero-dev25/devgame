@@ -154,8 +154,16 @@ const S13_MESSAGE =
   "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it.";
 const S9_MESSAGE =
   "Unity selection chips are off — this project doesn't have DevGame's selection package.";
+// Both halves of the pairing path already exist — this sentence's only job
+// is to point at each. The token MINT side survived the Unity-panel
+// deletion: ConnectionsSettings' generic pairing UI issues credentials, and
+// its scope options include "Operate tasks" (AuthOrchestrationOperateScope),
+// exactly what EditorPresenceRoute's publisher role requires. The PASTE
+// side ships with the package (EditorPresenceSettingsProvider's pane in
+// Unity's own settings). A message naming only one half strands the user
+// at the other.
 const S10_MESSAGE =
-  "Unity has DevGame's selection package but isn't paired with this app yet; in Unity, open Settings > DevGame Editor Presence and paste this app's pairing token.";
+  "Unity has DevGame's selection package but isn't paired with this app yet. Create a pairing token in DevGame's Settings > Connections (scope: Operate tasks), then in Unity open Settings > DevGame Editor Presence and paste it.";
 const S10_PRIME_MESSAGE = "Checking Unity's connection…";
 
 function buildS2Message(discoveredPath: string): string {
