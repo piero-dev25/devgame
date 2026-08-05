@@ -1,0 +1,104 @@
+[12:13:33.295] INFO (#4): runtime logging configured
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-startup
+  logDir: /Users/pieroherrera/.t3/userdata/logs
+[12:13:33.303] INFO (#4): app ready
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-startup
+[12:13:33.310] INFO (#4): bootstrap start
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-bootstrap
+[12:13:33.315] INFO (#4): selected backend port via sequential scan
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-bootstrap
+  port: [33m3773[39m
+  startPort: [33m3773[39m
+[12:13:33.324] INFO (#4): bootstrap resolved backend endpoint
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-bootstrap
+  baseUrl: http://127.0.0.1:3773/
+[12:13:33.325] INFO (#4): bootstrap ipc handlers registered
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-bootstrap
+[12:13:33.327] INFO (#4): bootstrap backend start requested
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-bootstrap
+[12:13:35.871] INFO (#91): backend ready
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-window
+  source: http
+  url: http://127.0.0.1:3773/
+[12:13:35.917] INFO (#91): main window created
+  scope: desktop
+  runId: 41ec977c0ea6
+  component: desktop-window
+[69510:0805/121336.303625:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216303 source=contentRenderer:onShow panelId=sidebar isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.304087:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=browser isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.304445:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=diff isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.304802:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=chat isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307173:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:2f72113e-bf69-41ac-91dc-18ab61f22189", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307208:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307302:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=contentRenderer:onHide panelId=chat isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307339:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=contentRenderer:onShow panelId=chat isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307379:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=restore-complete target=chat groupModel=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121336.307406:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957216307 source=top-level panel=chat isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.650685:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292650 source=top-level panel=sidebar isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.665932:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292665 source=contentRenderer:onShow panelId=sidebar isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.666378:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292666 source=contentRenderer:onShow panelId=browser isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.666745:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292666 source=contentRenderer:onShow panelId=diff isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.667180:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292667 source=contentRenderer:onShow panelId=chat isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668375:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668421:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668505:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=contentRenderer:onHide panelId=chat isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668524:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=contentRenderer:onShow panelId=chat isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668539:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=restore-complete target=chat groupModel=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121452.668561:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957292668 source=top-level panel=chat isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121501.647901:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957301647 source=contentRenderer:onHide panelId=diff isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121501.659687:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957301659 source=contentRenderer:onShow panelId=files isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121501.662373:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957301662 source=group:group-terminal panel=files isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121501.662434:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957301662 source=top-level panel=files isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.825629:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307825 source=top-level panel=sidebar isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.893390:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307893 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:c95ca78e-8fba-487c-bdb9-1e4e029c7774", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.893457:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307893 source=restore-entry rememberedPanelId=diff fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.893480:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307893 source=top-level panel=files isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.893571:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307893 source=contentRenderer:onHide panelId=files isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.893621:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307893 source=contentRenderer:onShow panelId=diff isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.896059:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307895 source=group:group-terminal panel=diff isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.896103:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307896 source=top-level panel=diff isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.896121:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307896 source=restore-complete target=diff groupModel=diff", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121507.905190:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957307905 source=top-level panel=chat isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121517.020214:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957317020 source=top-level panel=diff isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.242268:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321242 source=top-level panel=sidebar isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.311700:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321311 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.311764:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321311 source=restore-entry rememberedPanelId=files fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.311787:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321311 source=top-level panel=diff isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.311892:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321311 source=contentRenderer:onHide panelId=diff isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.317388:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321317 source=contentRenderer:onShow panelId=files isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.318903:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321318 source=group:group-terminal panel=files isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.318943:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321318 source=top-level panel=files isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.318964:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321318 source=restore-complete target=files groupModel=files", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121521.341493:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957321341 source=top-level panel=chat isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.714594:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331714 source=top-level panel=sidebar isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.796082:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331795 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:c95ca78e-8fba-487c-bdb9-1e4e029c7774", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.796155:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331795 source=restore-entry rememberedPanelId=diff fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.796178:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331796 source=top-level panel=files isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.796195:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331796 source=contentRenderer:onHide panelId=files isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.796245:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331796 source=contentRenderer:onShow panelId=diff isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.798443:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331798 source=group:group-terminal panel=diff isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.798483:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331798 source=top-level panel=diff isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121531.798499:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957331798 source=restore-complete target=diff groupModel=diff", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.026255:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343026 source=top-level panel=sidebar isRestoring=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091284:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091348:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091373:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=top-level panel=chat isRestoring=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091660:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=contentRenderer:onHide panelId=chat isConnected=false", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091752:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=contentRenderer:onShow panelId=chat isConnected=true", source: devgame://app/assets/index-CwZhCkKr.js (1936)
+[69510:0805/121543.091786:INFO:CONSOLE:1936] "[dock-diag2] TIMELINE t=1785957343091 source=restore-complete target=chat groupModel=chat", source: devgame://app/assets/index-CwZhCkKr.js (1936)
