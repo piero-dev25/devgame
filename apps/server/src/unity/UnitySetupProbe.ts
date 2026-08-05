@@ -7,20 +7,10 @@
  * 3's future per-item panel) and the one classified primary state
  * (increment 2's future toolbar message) from a SINGLE probe call.
  *
- * PROJECT PATH IS SERVER-RESOLVED, NEVER CALLER-SUPPLIED — plan §1's F6,
- * second half. This server process is already scoped to exactly ONE
- * project (`ServerConfig.cwd` — confirmed at
- * `apps/server/src/serverRuntimeStartup.ts:211`, the same value seeded
- * into the bootstrap project at server start; every T3 server process is
- * one project, one process). There is no multi-project registry to
- * validate a caller-supplied path against, and therefore nothing for a
- * caller to supply: `workspaceRoot` below is read directly from
- * `ServerConfig`, not from any request input. `POST /unity/command`'s
- * caller-supplied `workspaceRoot` is only safe there because
- * `presence:command` is desktop-owner-only (already running locally with
- * full filesystem access regardless of what path it names) — this
- * service is reachable via the broadly-granted `presence:read` and must
- * not mirror that pattern.
+ * PROJECT PATH IS SERVER-RESOLVED, NEVER CALLER-SUPPLIED. The HTTP route
+ * resolves an opaque `projectId` through `ProjectionSnapshotQuery`, then
+ * passes the canonical project root into this service. No filesystem path
+ * crosses the wire, and this service never consults process cwd.
  */
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -35,13 +25,11 @@ import { normalizeWorkspaceRoot } from "@t3tools/shared/workspaceRootPath";
 import type {
   UnitySetupFacts,
   UnitySetupPipelineListOutcome,
-  UnitySetupProbeResult,
+  UnitySetupProbeSuccess,
 } from "@t3tools/contracts";
 
-import * as ServerConfig from "../config.ts";
 import * as EditorPresenceRegistry from "../editorPresence/EditorPresenceRegistry.ts";
 import { probeUnityLockfilePresent } from "../editorPresence/UnityColdStart.ts";
-import * as EngineTypeResolver from "../project/EngineTypeResolver.ts";
 import {
   classifyUnitySetup,
   type UnitySetupClassifierInput,
@@ -52,6 +40,7 @@ import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 
 const PIPELINE_PACKAGE_ID = "com.unity.pipeline";
 const SELECTION_PACKAGE_ID = "com.ironmind.editor-presence";
+const UNITY_PROJECT_VERSION_PATH = ["ProjectSettings", "ProjectVersion.txt"] as const;
 
 /** Plan §2's F3 default — tunable, per that section's own note. */
 const PAIRING_GRACE_WINDOW_MS = 15_000;
@@ -79,7 +68,7 @@ function homeUnityCliCandidatePath(path: Path.Path, homeDir: string): string {
 export class UnitySetupProbe extends Context.Service<
   UnitySetupProbe,
   {
-    readonly probe: () => Effect.Effect<UnitySetupProbeResult>;
+    readonly probe: (workspaceRoot: string) => Effect.Effect<UnitySetupProbeSuccess>;
   }
 >()("t3/unity/UnitySetupProbe") {}
 
@@ -87,8 +76,6 @@ export const make = Effect.gen(function* () {
   const unityPipelineClient = yield* UnityPipelineClient.UnityPipelineClient;
   const packageLock = yield* UnityPackageLock.UnityPackageLock;
   const editorPresenceRegistry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
-  const engineTypeResolver = yield* EngineTypeResolver.EngineTypeResolver;
-  const serverConfig = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
@@ -136,9 +123,10 @@ export const make = Effect.gen(function* () {
 
   const probeCliUnavailable = Effect.fn("UnitySetupProbe.probeCliUnavailable")(function* (
     isUnityProject: boolean,
-  ): Effect.fn.Return<UnitySetupProbeResult> {
+  ): Effect.fn.Return<UnitySetupProbeSuccess> {
     const cliDiscoveredPath = yield* findCliCandidatePath();
     const classifierInput: UnitySetupClassifierInput = {
+      isUnityProject,
       cliAvailable: false,
       cliDiscoveredPath,
       // Phase 1 has no install action (§5, increments 4a-4c are Phase
@@ -148,8 +136,8 @@ export const make = Effect.gen(function* () {
       lockfilePresent: false,
       pipelinePackageInstalled: false,
       // Structurally dead in this branch — `classifyUnitySetup` returns
-      // S1/S2/S2' from the CLI-availability check (step 1) before ever
-      // reaching the field this gates (step 4), same reasoning
+      // S0/S1/S2/S2' from the project/CLI checks before ever reaching the
+      // field this gates, same reasoning
       // `justInstalledThisSession: false` above already documents for this
       // exact branch. Left `false` rather than reading manifest.json for a
       // value that can't affect the outcome.
@@ -173,26 +161,16 @@ export const make = Effect.gen(function* () {
   });
 
   const probe: UnitySetupProbe["Service"]["probe"] = Effect.fn("UnitySetupProbe.probe")(
-    function* () {
-      const workspaceRoot = serverConfig.cwd;
-
-      // Team-lead's ruling, 2026-08-04: this is a fact, not a classifier
-      // input — it exists so increment 3's settings panel can tell "not
-      // set up" apart from "not a Unity project" without the client
-      // reconstructing engine identity from a second, unrelated concept
-      // (`EngineType`, the project's server-DETECTED engine —
-      // `activeProject.engineType` in `ChatView.tsx` — not available where
-      // this panel lives; no client-side override exists anymore, per the
-      // owner's "detection, not a picker" ruling). Computed unconditionally,
-      // before the CLI-availability branch, so BOTH outcomes below report
-      // it — a project with no Unity CLI installed is not thereby
-      // "unknown" as to whether it's a Unity project at all; that's a
-      // filesystem fact, independent of whether the CLI is on PATH.
-      // Reuses `EngineTypeResolver` (same cached
-      // `ProjectSettings/ProjectVersion.txt` marker check every other
-      // engine-identity read in this codebase already uses) rather than a
-      // second, bespoke check.
-      const isUnityProject = (yield* engineTypeResolver.detect(workspaceRoot)) === "unity";
+    function* (workspaceRoot) {
+      // This exact marker is the fact carried by the contract. It is checked
+      // independently of CLI availability so a missing CLI cannot hide that
+      // the resolved root is not a Unity project.
+      const isUnityProject = yield* fileSystem
+        .stat(path.join(workspaceRoot, ...UNITY_PROJECT_VERSION_PATH))
+        .pipe(
+          Effect.map((info) => info.type === "File"),
+          Effect.orElseSucceed(() => false),
+        );
 
       const cliAvailable = yield* unityPipelineClient.isAvailable();
       if (!cliAvailable) {
@@ -276,6 +254,7 @@ export const make = Effect.gen(function* () {
       const withinPairingGraceWindow = nowMs - serverStartedAtMs < PAIRING_GRACE_WINDOW_MS;
 
       const classifierInput: UnitySetupClassifierInput = {
+        isUnityProject,
         cliAvailable: true,
         cliDiscoveredPath: null,
         justInstalledThisSession: false,

@@ -6,6 +6,7 @@
 // (the promise RESOLVED with `{ malformed: true }` reinterpreted as a
 // `UnityPipelineInstallResult`).
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
+import { ProjectId } from "@t3tools/contracts";
 
 import { postUnityPipelineInstall } from "./postPipelineInstall";
 
@@ -14,11 +15,32 @@ afterEach(() => {
 });
 
 describe("postUnityPipelineInstall", () => {
+  it("sends the opaque projectId in the request body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ _tag: "notReady" }));
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      projectId: ProjectId.make("project-unity"),
+      httpBaseUrl: "http://127.0.0.1:3000",
+      httpAuthorization: null,
+    };
+
+    await postUnityPipelineInstall(input);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    const request = new Request(url as URL, init as RequestInit);
+    expect(await request.json()).toEqual({ projectId: "project-unity" });
+  });
+
   it("rejects when the server response does not match UnityPipelineInstallResult", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ malformed: true })));
 
     await expect(
-      postUnityPipelineInstall({ httpBaseUrl: "http://127.0.0.1:3000", httpAuthorization: null }),
+      postUnityPipelineInstall({
+        projectId: ProjectId.make("project-unity"),
+        httpBaseUrl: "http://127.0.0.1:3000",
+        httpAuthorization: null,
+      }),
     ).rejects.toBeTruthy();
   });
 
@@ -26,6 +48,7 @@ describe("postUnityPipelineInstall", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ _tag: "notReady" })));
 
     const result = await postUnityPipelineInstall({
+      projectId: ProjectId.make("project-unity"),
       httpBaseUrl: "http://127.0.0.1:3000",
       httpAuthorization: null,
     });

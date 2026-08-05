@@ -16,16 +16,16 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
-import * as ServerConfig from "../config.ts";
 import * as EditorPresenceRegistry from "../editorPresence/EditorPresenceRegistry.ts";
-import * as EngineTypeResolver from "../project/EngineTypeResolver.ts";
-import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 import * as UnityPackageLock from "./UnityPackageLock.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 import * as UnitySetupProbe from "./UnitySetupProbe.ts";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const writeTextFile = Effect.fn("writeTextFile")(function* (
   cwd: string,
@@ -77,11 +77,12 @@ function stubPipelineClient(
  * Runs a full test BODY against a fresh temp directory (used as this
  * "project"'s workspace root) and the full `UnitySetupProbe` dependency
  * graph. The temp directory is created FIRST, with only `FileSystem`
- * available, because `ServerConfig.layerTest` and a test's own
- * `UnityPipelineClient` stub (which usually needs to echo `cwd` back as
- * `projectPath`) both need the resolved path as a plain string BEFORE they
- * can be constructed — `pipelineClient` and `body` are therefore both
- * FUNCTIONS of `cwd`, not pre-built values. `NodeServices.layer` is
+ * available, because a test's own `UnityPipelineClient` stub (which usually
+ * needs to echo `cwd` back as `projectPath`) needs the resolved path as a
+ * plain string BEFORE it can be constructed — `pipelineClient` and `body`
+ * are therefore both FUNCTIONS of `cwd`, not pre-built values. By default
+ * the helper writes Unity's marker file; the one non-Unity case opts out.
+ * `NodeServices.layer` is
  * provided ONCE at the very end, discharging `FileSystem`/`Path` for BOTH
  * the temp-dir creation below and everything `body` itself needs — this is
  * the fix for a real bug an earlier version of this file had: providing
@@ -102,28 +103,33 @@ const runProbeTest = <A>(
     | UnityPipelineClient.UnityPipelineClient
     | UnityPackageLock.UnityPackageLock
     | EditorPresenceRegistry.EditorPresenceRegistry
-    | EngineTypeResolver.EngineTypeResolver
-    | ServerConfig.ServerConfig
   >,
+  options?: { readonly isUnityProject?: boolean },
 ) =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const cwd = yield* fileSystem.makeTempDirectoryScoped({
       prefix: "t3code-unity-setup-project-",
     });
+    if (options?.isUnityProject !== false) {
+      yield* writeTextFile(
+        cwd,
+        "ProjectSettings/ProjectVersion.txt",
+        "m_EditorVersion: 6000.3.14f1\n",
+      );
+    }
     return yield* body(cwd).pipe(
-      Effect.provide(pipelineClient(cwd)),
-      Effect.provide(UnityPackageLock.layer),
-      Effect.provide(EditorPresenceRegistry.layer),
-      Effect.provide(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
-      Effect.provide(ServerConfig.layerTest(cwd, { prefix: "t3code-unity-setup-probe-" })),
+      Effect.provide(
+        Layer.mergeAll(pipelineClient(cwd), UnityPackageLock.layer, EditorPresenceRegistry.layer),
+      ),
     );
   }).pipe(Effect.provide(NodeServices.layer));
 
-const runProbe = Effect.gen(function* () {
-  const probe = yield* UnitySetupProbe.make;
-  return yield* probe.probe();
-});
+const runProbe = (cwd: string) =>
+  Effect.gen(function* () {
+    const probe = yield* UnitySetupProbe.make;
+    return yield* probe.probe(cwd);
+  });
 
 describe("UnitySetupProbe", () => {
   it.effect("CLI unavailable: S1, and pipeline list is never called", () => {
@@ -149,7 +155,7 @@ describe("UnitySetupProbe", () => {
         // instead of S1 until this override was added. `cwd` (this test's
         // own scoped temp dir) is guaranteed to have no `.unity/bin/unity`
         // under it.
-        runProbe.pipe(Effect.provideService(HostProcessEnvironment, { HOME: cwd })),
+        runProbe(cwd).pipe(Effect.provideService(HostProcessEnvironment, { HOME: cwd })),
     ).pipe(
       Effect.map((result) => {
         expect(result.primary.state).toBe("S1");
@@ -192,9 +198,9 @@ describe("UnitySetupProbe", () => {
             yield* writeTextFile(
               cwd,
               "Packages/packages-lock.json",
-              JSON.stringify({ dependencies: {} }),
+              encodeJson({ dependencies: {} }),
             );
-            return yield* runProbe;
+            return yield* runProbe(cwd);
           }),
       ).pipe(
         Effect.map((result) => {
@@ -242,13 +248,13 @@ describe("UnitySetupProbe", () => {
             yield* writeTextFile(
               cwd,
               "Packages/packages-lock.json",
-              JSON.stringify({
+              encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
                 },
               }),
             );
-            return yield* runProbe;
+            return yield* runProbe(cwd);
           }),
       ).pipe(
         Effect.map((result) => {
@@ -289,9 +295,9 @@ describe("UnitySetupProbe", () => {
           yield* writeTextFile(
             cwd,
             "Packages/packages-lock.json",
-            JSON.stringify({ dependencies: {} }),
+            encodeJson({ dependencies: {} }),
           );
-          return yield* runProbe;
+          return yield* runProbe(cwd);
         }),
     ).pipe(
       Effect.map((result) => {
@@ -335,7 +341,7 @@ describe("UnitySetupProbe", () => {
             yield* writeTextFile(
               cwd,
               "Packages/packages-lock.json",
-              JSON.stringify({
+              encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
                   "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
@@ -359,7 +365,7 @@ describe("UnitySetupProbe", () => {
               },
               { claimantSessionId: undefined },
             );
-            return yield* runProbe;
+            return yield* runProbe(cwd);
           }),
       ).pipe(
         Effect.map((result) => {
@@ -370,7 +376,7 @@ describe("UnitySetupProbe", () => {
   );
 
   it.effect(
-    "isUnityProject: false for a plain temp dir with no marker file — even though every other fact in this test reaches S11, the fully-green state",
+    "isUnityProject: false for a plain temp dir wins as S0 even though every other fact would reach S11",
     () =>
       runProbeTest(
         (cwd) =>
@@ -401,7 +407,7 @@ describe("UnitySetupProbe", () => {
             yield* writeTextFile(
               cwd,
               "Packages/packages-lock.json",
-              JSON.stringify({
+              encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
                   "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
@@ -419,18 +425,13 @@ describe("UnitySetupProbe", () => {
               },
               { claimantSessionId: undefined },
             );
-            return yield* runProbe;
+            return yield* runProbe(cwd);
           }),
+        { isUnityProject: false },
       ).pipe(
         Effect.map((result) => {
           expect(result.facts.isUnityProject).toBe(false);
-          // Not consulted by the classifier at all — S11 is still reached
-          // on otherwise fully-green facts, per this field's own doc
-          // comment in packages/contracts/src/unitySetup.ts. This is the
-          // strongest proof of that non-coupling: every OTHER fact is as
-          // green as `classifyUnitySetup` can require, and classification
-          // still doesn't budge on the missing Unity marker file.
-          expect(result.primary.state).toBe("S11");
+          expect(result.primary.state).toBe("S0");
         }),
       ),
   );
@@ -450,7 +451,7 @@ describe("UnitySetupProbe", () => {
             // Same real false-positive this file's first test guards
             // against: `~/.unity/bin/unity` genuinely exists on the
             // machine this suite runs on.
-            return yield* runProbe.pipe(
+            return yield* runProbe(cwd).pipe(
               Effect.provideService(HostProcessEnvironment, { HOME: cwd }),
             );
           }),
@@ -498,7 +499,7 @@ describe("UnitySetupProbe", () => {
             yield* writeTextFile(
               cwd,
               "Packages/packages-lock.json",
-              JSON.stringify({
+              encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
                   "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
@@ -513,9 +514,9 @@ describe("UnitySetupProbe", () => {
             // this test would have failed on the second assertion (still
             // S10', not S10) rather than hung.
             const probe = yield* UnitySetupProbe.make;
-            const immediate = yield* probe.probe();
+            const immediate = yield* probe.probe(cwd);
             yield* TestClock.adjust(Duration.seconds(16));
-            const afterWindow = yield* probe.probe();
+            const afterWindow = yield* probe.probe(cwd);
             return { immediate, afterWindow };
           }),
       ).pipe(

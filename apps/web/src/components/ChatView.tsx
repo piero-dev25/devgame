@@ -1564,7 +1564,9 @@ function ChatViewContent(props: ChatViewProps) {
   // `null` when `resolvedEngineType !== "unity"` so no probe is even
   // mounted for a non-Unity project.
   const unitySetupQuery = useEnvironmentQuery(
-    resolvedEngineType === "unity" ? unitySetupProbeAtom(environmentId) : null,
+    resolvedEngineType === "unity" && activeProjectRef
+      ? unitySetupProbeAtom(activeProjectRef)
+      : null,
   );
   const unitySetup = unitySetupQuery.data;
   const unitySetupError = unitySetupQuery.error;
@@ -5414,6 +5416,16 @@ function ChatViewContent(props: ChatViewProps) {
   // open — the install itself doesn't need that either (see
   // `shouldOfferUnityPipelineInstall`'s own doc comment).
   const handleSetupUnityIntegrations = useCallback(() => {
+    if (!activeProjectRef) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't find this project",
+          description: "The active project is no longer available. Select it again and retry.",
+        }),
+      );
+      return;
+    }
     const prepared = readPreparedConnection(environmentId);
     if (!prepared) {
       // Merge-gate review finding F2 on `e26534e1b`: this used to be a
@@ -5442,6 +5454,7 @@ function ChatViewContent(props: ChatViewProps) {
       return;
     }
     void postUnityPipelineInstall({
+      projectId: activeProjectRef.projectId,
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,
     })
@@ -5457,14 +5470,14 @@ function ChatViewContent(props: ChatViewProps) {
         if (report.type === "success") {
           // `unitySetupQuery.refresh()` alone is NOT enough:
           // `unitySetupProbeAtom` fetches through `fetchUnitySetupProbeCached`
-          // (setupProbeCache.ts), a 5s-TTL cache keyed by `environmentId` — a
-          // refresh inside that window would just re-read the STALE
+          // (setupProbeCache.ts), a 5s-TTL cache keyed by environment+project —
+          // a refresh inside that window would just re-read the STALE
           // pre-install entry. `invalidateUnitySetupProbeCache` first is the
           // same fix `UnitySetupClassifier.ts`'s S13 doc comment (193abfb89)
           // already describes for the identical defect class (a just-installed
           // package reported as still missing) and the exact precedent
           // `ConnectionsSettings.tsx`'s own `onInstalled` handler follows.
-          invalidateUnitySetupProbeCache(environmentId);
+          invalidateUnitySetupProbeCache(environmentId, activeProjectRef.projectId);
           void unitySetupQuery.refresh();
         }
       })
@@ -5491,7 +5504,13 @@ function ChatViewContent(props: ChatViewProps) {
     // part — the exact same fix `ConnectionsSettings.tsx`'s
     // `retryUnitySetupProbe` already applies to the identical shape
     // (`[primaryEnvironmentId, unitySetupQuery.refresh]`).
-  }, [environmentId, unitySetupQuery.refresh]);
+  }, [activeProjectRef, environmentId, unitySetupQuery.refresh]);
+
+  const handleRetryUnitySetup = useCallback(() => {
+    if (!activeProjectRef) return;
+    invalidateUnitySetupProbeCache(activeProjectRef.environmentId, activeProjectRef.projectId);
+    void unitySetupQuery.refresh();
+  }, [activeProjectRef, unitySetupQuery.refresh]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
@@ -5924,7 +5943,7 @@ function ChatViewContent(props: ChatViewProps) {
               : { onPlayThreeJs: handlePlayThreeJs })}
             hasPresenceCommandScope={hasPresenceCommandScope}
             onOpenConnectionsSettings={handleOpenConnectionsSettings}
-            onRetryUnitySetup={unitySetupQuery.refresh}
+            onRetryUnitySetup={handleRetryUnitySetup}
             onSetupUnityIntegrations={handleSetupUnityIntegrations}
           />
         </header>

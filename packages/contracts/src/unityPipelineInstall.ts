@@ -12,16 +12,14 @@
 // does NOT promise a computed lockfile diff.
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
+
 /**
- * Deliberately EMPTY, same reasoning as `UnitySetupProbeInput`
- * (unitySetup.ts): the project this installs into is SERVER-RESOLVED from
- * `ServerConfig.cwd`, never caller-supplied. There is only one project per
- * server process (plan §1's F6) — taking a caller-supplied path here would
- * reopen exactly the path-validation gap plan §8-6 flags for
- * `POST /unity/command`'s `workspaceRoot`; this route sidesteps that
- * structurally instead of reproducing it.
+ * The caller supplies only an opaque, server-issued project id. The server
+ * resolves the canonical workspace root from its own projection store, so
+ * this disk-writing route never accepts a filesystem path from the wire.
  */
-export const UnityPipelineInstallInput = Schema.Struct({});
+export const UnityPipelineInstallInput = Schema.Struct({ projectId: ProjectId });
 export type UnityPipelineInstallInput = typeof UnityPipelineInstallInput.Type;
 
 /** `unity pipeline install`'s own successful `data`, mirrored from

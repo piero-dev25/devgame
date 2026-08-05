@@ -6,6 +6,7 @@
 // schema-only unit test bypassing this file's own code would not have
 // proven that. See fetchSetupProbe.ts.
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
+import { ProjectId } from "@t3tools/contracts";
 
 import { fetchUnitySetupProbe } from "./fetchSetupProbe";
 
@@ -14,11 +15,54 @@ afterEach(() => {
 });
 
 describe("fetchUnitySetupProbe", () => {
+  it("sends the opaque projectId in the request body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      Response.json({
+        facts: {
+          isUnityProject: true,
+          cliAvailable: true,
+          cliDiscoveredPath: null,
+          lockfilePresent: true,
+          pipelinePackage: {
+            installed: true,
+            resolvedVersion: "1.0.0",
+            declaredInManifest: true,
+          },
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "1.0.0",
+            declaredInManifest: true,
+          },
+          selectionPublisherRegistered: true,
+          withinPairingGraceWindow: false,
+        },
+        primary: { state: "S11" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const input = {
+      projectId: ProjectId.make("project-unity"),
+      httpBaseUrl: "http://127.0.0.1:3000",
+      httpAuthorization: null,
+    };
+
+    await fetchUnitySetupProbe(input);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    const request = new Request(url as URL, init as RequestInit);
+    expect(await request.json()).toEqual({ projectId: "project-unity" });
+  });
+
   it("rejects when the server response does not match UnitySetupProbeResult", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ malformed: true })));
 
     await expect(
-      fetchUnitySetupProbe({ httpBaseUrl: "http://127.0.0.1:3000", httpAuthorization: null }),
+      fetchUnitySetupProbe({
+        projectId: ProjectId.make("project-unity"),
+        httpBaseUrl: "http://127.0.0.1:3000",
+        httpAuthorization: null,
+      }),
     ).rejects.toBeTruthy();
   });
 
@@ -51,6 +95,7 @@ describe("fetchUnitySetupProbe", () => {
     );
 
     const result = await fetchUnitySetupProbe({
+      projectId: ProjectId.make("project-unity"),
       httpBaseUrl: "http://127.0.0.1:3000",
       httpAuthorization: null,
     });

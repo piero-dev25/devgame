@@ -1,4 +1,4 @@
-import type { UnitySetupFacts, UnitySetupProbeResult } from "@t3tools/contracts";
+import type { UnitySetupFacts, UnitySetupProbeSuccess } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { EditorPresenceEntry } from "../editorPresence/protocol";
@@ -84,12 +84,12 @@ function factsWithNoListRun(
  * comment — so a test proving readiness never depends on `primary` at all). */
 function probeResult(
   facts: UnitySetupFacts,
-  primary: UnitySetupProbeResult["primary"],
-): UnitySetupProbeResult {
+  primary: UnitySetupProbeSuccess["primary"],
+): UnitySetupProbeSuccess {
   return { facts, primary };
 }
 
-const S11: UnitySetupProbeResult["primary"] = { state: "S11" };
+const S11: UnitySetupProbeSuccess["primary"] = { state: "S11" };
 
 describe("resolveEngineDispatchBackend", () => {
   it("routes Godot and Unreal to editor-presence", () => {
@@ -357,6 +357,32 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     });
     expect(view.availableActions).toEqual([]);
     expect(view.disabledReason).toContain("doesn't have Unity's Pipeline package");
+  });
+
+  it("non-Unity S0: withholds the install CTA and surfaces the classifier message as the exact disabled reason", () => {
+    const message =
+      "This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found.";
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: null,
+      unitySetup: probeResult(
+        readyFacts({
+          isUnityProject: false,
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          pipelineList: {
+            _tag: "ran",
+            matched: null,
+            latestVersion: null,
+            unparseableInstanceCount: 0,
+          },
+        }),
+        { state: "S0", message },
+      ),
+    });
+
+    expect(view.availableActions).toEqual([]);
+    expect(view.unityInstallOffered).toBe(false);
+    expect(view.disabledReason).toBe(message);
   });
 
   it("pipelineList never ran (S4' checking window): disabled, not a guessed-enabled state", () => {

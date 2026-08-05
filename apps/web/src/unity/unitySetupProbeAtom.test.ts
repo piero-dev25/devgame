@@ -32,8 +32,7 @@
 // nothing about reactivity, which is exactly why team-lead's note calls out
 // that "asserting `readPreparedConnection` was called proves nothing." Only
 // the first test's None→Some transition does that job.
-import type { UnitySetupProbeResult } from "@t3tools/contracts";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, type UnitySetupProbeSuccess } from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Cause from "effect/Cause";
 import * as Option from "effect/Option";
@@ -45,7 +44,9 @@ import {
   UnitySetupConnectionWaitTimeoutError,
 } from "./unitySetupProbeAtom";
 
-const environmentId = "env-1" as EnvironmentId;
+const environmentId = EnvironmentId.make("env-1");
+const projectId = ProjectId.make("project-1");
+const projectRef = { environmentId, projectId };
 
 const preparedConnection: PreparedConnection = {
   environmentId,
@@ -60,7 +61,7 @@ const preparedConnection: PreparedConnection = {
   } as PreparedConnection["target"],
 };
 
-const probeResult: UnitySetupProbeResult = {
+const probeResult: UnitySetupProbeSuccess = {
   facts: {
     isUnityProject: true,
     cliAvailable: true,
@@ -75,6 +76,48 @@ const probeResult: UnitySetupProbeResult = {
 };
 
 describe("createUnitySetupProbeAtom", () => {
+  it("scopes atom identity and fetch input by projectId within one environment", async () => {
+    const source = Atom.make(Option.some(preparedConnection));
+    const fetchProbe = vi.fn(async () => probeResult);
+    const probeAtom = createUnitySetupProbeAtom({
+      preparedConnectionAtom: () => source,
+      fetchProbe,
+    });
+    const projectOneRef = {
+      environmentId,
+      projectId: ProjectId.make("project-1"),
+    };
+    const projectTwoRef = {
+      environmentId,
+      projectId: ProjectId.make("project-2"),
+    };
+    const registry = AtomRegistry.make();
+    const projectOneAtom = probeAtom(projectOneRef);
+    const projectTwoAtom = probeAtom(projectTwoRef);
+    registry.mount(projectOneAtom);
+    registry.mount(projectTwoAtom);
+
+    await vi.waitFor(() => {
+      expect(AsyncResult.isSuccess(registry.get(projectOneAtom))).toBe(true);
+      expect(AsyncResult.isSuccess(registry.get(projectTwoAtom))).toBe(true);
+    });
+    expect(fetchProbe).toHaveBeenCalledTimes(2);
+    expect(fetchProbe).toHaveBeenCalledWith({
+      environmentId,
+      projectId: projectOneRef.projectId,
+      httpBaseUrl: preparedConnection.httpBaseUrl,
+      httpAuthorization: preparedConnection.httpAuthorization,
+    });
+    expect(fetchProbe).toHaveBeenCalledWith({
+      environmentId,
+      projectId: projectTwoRef.projectId,
+      httpBaseUrl: preparedConnection.httpBaseUrl,
+      httpAuthorization: preparedConnection.httpAuthorization,
+    });
+
+    registry.dispose();
+  });
+
   it("fires the probe fetch and leaves the Checking state once the connection becomes ready", async () => {
     // Starts at `Option.none()` — the SAME starting state
     // `preparedConnectionValueAtom` is documented to have
@@ -88,7 +131,7 @@ describe("createUnitySetupProbeAtom", () => {
     });
 
     const registry = AtomRegistry.make();
-    const atom = probeAtom(environmentId);
+    const atom = probeAtom(projectRef);
     registry.mount(atom);
 
     // Still "Checking…" — the connection hasn't resolved, so the fetch must
@@ -113,6 +156,7 @@ describe("createUnitySetupProbeAtom", () => {
     expect(fetchProbe).toHaveBeenCalledTimes(1);
     expect(fetchProbe).toHaveBeenCalledWith({
       environmentId,
+      projectId,
       httpBaseUrl: preparedConnection.httpBaseUrl,
       httpAuthorization: preparedConnection.httpAuthorization,
     });
@@ -133,7 +177,7 @@ describe("createUnitySetupProbeAtom", () => {
     });
 
     const registry = AtomRegistry.make();
-    const atom = probeAtom(environmentId);
+    const atom = probeAtom(projectRef);
     registry.mount(atom);
 
     // `source` is deliberately left at `Option.none()` for the whole test —

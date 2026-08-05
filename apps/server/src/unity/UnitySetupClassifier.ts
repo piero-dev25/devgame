@@ -11,8 +11,10 @@
  *
  * The priority order below is a design choice this file owns, not
  * something the plan's table states explicitly as a single ordered list
- * (the table gives each state its OWN detector column). CLI availability
- * gates everything (nothing else is knowable without it); Pipeline
+ * (the table gives each state its OWN detector column). Project identity
+ * gates everything (Unity setup is not a meaningful question for a root
+ * without Unity's marker file), then CLI availability gates the remaining
+ * checks (nothing else is knowable without it); Pipeline
  * package/liveness comes next (S1-S8, the toolbar's actual Play/Stop
  * concern); selection package/pairing comes last (S9-S10) — a project
  * that's otherwise fully ready for Pipeline but hasn't installed selection
@@ -61,6 +63,9 @@ export type UnitySetupClassifierPipelineList =
     };
 
 export interface UnitySetupClassifierInput {
+  /** Whether the resolved root contains
+   * `ProjectSettings/ProjectVersion.txt`. */
+  readonly isUnityProject: boolean;
   readonly cliAvailable: boolean;
   /** Populated only when `cliAvailable` is `false` and a candidate binary
    * was found off-PATH — plan §7's F11 fix. */
@@ -101,6 +106,7 @@ export interface UnitySetupClassifierInput {
 }
 
 export type UnitySetupPrimaryStateResult =
+  | { readonly state: "S0"; readonly message: string }
   | { readonly state: "S1"; readonly message: string }
   | { readonly state: "S2"; readonly message: string; readonly discoveredPath: string }
   | { readonly state: "S2'"; readonly message: string }
@@ -121,6 +127,8 @@ export type UnitySetupPrimaryStateResult =
 // Every sentence below is copied VERBATIM from plan §2's table — a reader
 // diffing this file against that table should find byte-identical text,
 // not a paraphrase.
+const S0_MESSAGE =
+  "This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found.";
 const S1_MESSAGE =
   "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor.";
 const S2_PRIME_MESSAGE = "The Unity CLI is installed. Finishing setup…";
@@ -159,7 +167,13 @@ function buildS8Message(latestVersion: string): string {
 }
 
 export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetupPrimaryStateResult {
-  // 1. CLI availability gates everything downstream — nothing past this
+  // 1. Project identity wins before every setup fact. CLI availability,
+  // package state, and Editor liveness are irrelevant for a non-Unity root.
+  if (!input.isUnityProject) {
+    return { state: "S0", message: S0_MESSAGE };
+  }
+
+  // 2. CLI availability gates everything downstream — nothing past this
   // point is knowable without a working `unity` binary.
   if (!input.cliAvailable) {
     if (input.justInstalledThisSession) {
@@ -175,7 +189,7 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
     return { state: "S1", message: S1_MESSAGE };
   }
 
-  // 2. `pipeline list` itself failed — plan §1: "when nothing matches,
+  // 3. `pipeline list` itself failed — plan §1: "when nothing matches,
   // show the CLI's own message verbatim." Nothing below this line can be
   // trusted once the one call everything else depends on has failed.
   if (input.pipelineList._tag === "cliError") {
@@ -186,7 +200,7 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
     };
   }
 
-  // 3. Liveness-uncertain window (F13): the lockfile fired, but
+  // 4. Liveness-uncertain window (F13): the lockfile fired, but
   // `pipeline list` — the AUTHORITATIVE liveness signal — hasn't actually
   // run this cycle. Never commit to a liveness-dependent classification
   // (S4/S6/S7a/S7b/S8) on the cheap ambient signal alone.
@@ -203,7 +217,7 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
   // scenario. Both fold into the same "not actually live" signal below.
   const liveMatch = matched !== null && matched.isRunning ? matched : null;
 
-  // 4. Pipeline package presence + liveness.
+  // 5. Pipeline package presence + liveness.
   if (!input.pipelinePackageInstalled) {
     // S13 wins over BOTH S4 and S5 — "we just wrote it and Unity hasn't
     // caught up" is a different world from "nobody ever added it," and
@@ -233,7 +247,7 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
   // whichever of S6/S11 otherwise applies," never asserted as its own
   // primary state. Continue to the selection-package checks below.
 
-  // 5. Selection package presence + pairing.
+  // 6. Selection package presence + pairing.
   if (!input.selectionPackageInstalled) {
     return { state: "S9", message: S9_MESSAGE };
   }
@@ -248,6 +262,6 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
       : { state: "S10", message: S10_MESSAGE };
   }
 
-  // 6. Everything checked is green.
+  // 7. Everything checked is green.
   return { state: "S11" };
 }

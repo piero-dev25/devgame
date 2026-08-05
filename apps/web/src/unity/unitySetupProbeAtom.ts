@@ -26,8 +26,14 @@
 // identical pattern) — which gives retry (`refresh`), a loading flag, and a
 // formatted error message for free, so neither call site needs to hand-roll
 // that plumbing again.
-import type { EnvironmentId, UnitySetupProbeResult } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ProjectId,
+  ScopedProjectRef,
+  UnitySetupProbeSuccess,
+} from "@t3tools/contracts";
 import type { PreparedConnection } from "@t3tools/client-runtime/connection";
+import { scopedProjectKey } from "@t3tools/client-runtime/environment";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -91,47 +97,54 @@ export function createUnitySetupProbeAtom(input: {
   ) => Atom.Atom<Option.Option<PreparedConnection>>;
   readonly fetchProbe: (input: {
     readonly environmentId: EnvironmentId;
+    readonly projectId: ProjectId;
     readonly httpBaseUrl: string;
     readonly httpAuthorization: PreparedConnection["httpAuthorization"];
-  }) => Promise<UnitySetupProbeResult>;
+  }) => Promise<UnitySetupProbeSuccess>;
   readonly connectionWaitTimeoutMs?: number;
 }) {
   const timeoutMs = input.connectionWaitTimeoutMs ?? UNITY_SETUP_CONNECTION_WAIT_TIMEOUT_MS;
 
-  return Atom.family((environmentId: EnvironmentId) =>
-    Atom.make((get) =>
-      Effect.gen(function* () {
-        // REACTIVE wait — `get.some` subscribes to the source atom and
-        // resolves the moment it becomes `Some`, unlike
-        // `readPreparedConnection`'s one-shot `appAtomRegistry.get(...)`
-        // snapshot (the exact mechanism #106 traced this defect to).
-        const prepared = yield* Effect.timeoutOrElse(
-          get.some(input.preparedConnectionAtom(environmentId)),
-          {
-            duration: Duration.millis(timeoutMs),
-            orElse: () => Effect.fail(new UnitySetupConnectionWaitTimeoutError()),
-          },
-        );
-        return yield* Effect.tryPromise({
-          try: () =>
-            input.fetchProbe({
-              environmentId,
-              httpBaseUrl: prepared.httpBaseUrl,
-              httpAuthorization: prepared.httpAuthorization,
-            }),
-          catch: (cause) => new UnitySetupProbeFetchError({ cause }),
-        });
-      }),
-    ).pipe(Atom.withLabel(`unity:setup-probe:${environmentId}`)),
+  const environmentFamily = Atom.family((environmentId: EnvironmentId) =>
+    Atom.family((projectId: ProjectId) => {
+      const projectRef: ScopedProjectRef = { environmentId, projectId };
+      return Atom.make((get) =>
+        Effect.gen(function* () {
+          // REACTIVE wait — `get.some` subscribes to the source atom and
+          // resolves the moment it becomes `Some`, unlike
+          // `readPreparedConnection`'s one-shot `appAtomRegistry.get(...)`
+          // snapshot (the exact mechanism #106 traced this defect to).
+          const prepared = yield* Effect.timeoutOrElse(
+            get.some(input.preparedConnectionAtom(environmentId)),
+            {
+              duration: Duration.millis(timeoutMs),
+              orElse: () => Effect.fail(new UnitySetupConnectionWaitTimeoutError()),
+            },
+          );
+          return yield* Effect.tryPromise({
+            try: () =>
+              input.fetchProbe({
+                environmentId,
+                projectId,
+                httpBaseUrl: prepared.httpBaseUrl,
+                httpAuthorization: prepared.httpAuthorization,
+              }),
+            catch: (cause) => new UnitySetupProbeFetchError({ cause }),
+          });
+        }),
+      ).pipe(Atom.withLabel(`unity:setup-probe:${scopedProjectKey(projectRef)}`));
+    }),
   );
+
+  return (projectRef: ScopedProjectRef) =>
+    environmentFamily(projectRef.environmentId)(projectRef.projectId);
 }
 
 /**
  * The live instance every real caller uses — `environmentSession` is this
  * app's one real `EnvironmentSupervisor`-backed atom family
  * (`state/session.ts`), `fetchUnitySetupProbeCached` is the existing
- * TTL-cached, in-flight-deduped HTTP call (#102) — both unchanged by this
- * fix, just consumed reactively instead of snapshotted.
+ * project-scoped, TTL-cached, in-flight-deduped HTTP call (#102).
  */
 export const unitySetupProbeAtom = createUnitySetupProbeAtom({
   preparedConnectionAtom: environmentSession.preparedConnectionValueAtom,

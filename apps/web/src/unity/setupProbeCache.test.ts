@@ -9,6 +9,7 @@
 // missing) fixed once already at 193abfb89, now reachable through the
 // cache instead of the classifier.
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
 import { fetchUnitySetupProbeCached, invalidateUnitySetupProbeCache } from "./setupProbeCache";
 
@@ -50,7 +51,8 @@ describe("fetchUnitySetupProbeCached", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const input = {
-      environmentId: "env-1",
+      environmentId: EnvironmentId.make("env-1"),
+      projectId: ProjectId.make("project-1"),
       httpBaseUrl: "http://127.0.0.1:3000",
       httpAuthorization: null,
     };
@@ -75,17 +77,47 @@ describe("fetchUnitySetupProbeCached", () => {
 
     await Promise.all([
       fetchUnitySetupProbeCached({
-        environmentId: "env-1",
+        environmentId: EnvironmentId.make("env-1"),
+        projectId: ProjectId.make("project-1"),
         httpBaseUrl: "http://127.0.0.1:3000",
         httpAuthorization: null,
       }),
       fetchUnitySetupProbeCached({
-        environmentId: "env-2",
+        environmentId: EnvironmentId.make("env-2"),
+        projectId: ProjectId.make("project-1"),
         httpBaseUrl: "http://127.0.0.1:3001",
         httpAuthorization: null,
       }),
     ]);
 
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("serves separate entries for two projects in the same environment", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(probeResponse({ pipelinePackageInstalled: false })))
+      .mockResolvedValueOnce(Response.json(probeResponse({ pipelinePackageInstalled: true })));
+    vi.stubGlobal("fetch", fetchMock);
+    const sharedConnection = {
+      environmentId: EnvironmentId.make("env-1"),
+      httpBaseUrl: "http://127.0.0.1:3000",
+      httpAuthorization: null,
+    };
+    const projectOneInput = {
+      ...sharedConnection,
+      projectId: ProjectId.make("project-1"),
+    };
+    const projectTwoInput = {
+      ...sharedConnection,
+      projectId: ProjectId.make("project-2"),
+    };
+
+    const projectOne = await fetchUnitySetupProbeCached(projectOneInput);
+    const projectTwo = await fetchUnitySetupProbeCached(projectTwoInput);
+
+    expect(projectOne.facts.pipelinePackage.installed).toBe(false);
+    expect(projectTwo.facts.pipelinePackage.installed).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
@@ -101,7 +133,8 @@ describe("fetchUnitySetupProbeCached", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const input = {
-      environmentId: "env-1",
+      environmentId: EnvironmentId.make("env-1"),
+      projectId: ProjectId.make("project-1"),
       httpBaseUrl: "http://127.0.0.1:3000",
       httpAuthorization: null,
     };
@@ -121,7 +154,7 @@ describe("fetchUnitySetupProbeCached", () => {
     // "not installed" answer despite the install having just succeeded.
     // This is the exact S13 defect class (193abfb89), now reachable
     // through the cache instead of the classifier.
-    invalidateUnitySetupProbeCache("env-1");
+    invalidateUnitySetupProbeCache(input.environmentId, input.projectId);
 
     const after = await fetchUnitySetupProbeCached(input);
     expect(after.facts.pipelinePackage.installed).toBe(true);
@@ -136,7 +169,8 @@ describe("fetchUnitySetupProbeCached", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const input = {
-      environmentId: "env-1",
+      environmentId: EnvironmentId.make("env-1"),
+      projectId: ProjectId.make("project-1"),
       httpBaseUrl: "http://127.0.0.1:3000",
       httpAuthorization: null,
     };

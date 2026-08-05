@@ -5,10 +5,15 @@
 // same `buildEnvironmentAuthHeaders`/`withEnvironmentCredentials` plumbing,
 // same `runtime.runPromise` boundary. Kept as its own file rather than added
 // to `dispatchCommand.ts` because the two calls have nothing in common
-// beyond the transport — this one takes no `workspaceRoot` (the server
-// resolves its own project, per plan §1's F6) and no `action`, and returns
-// the full classified taxonomy rather than a play/stop/pause outcome.
-import { UNITY_SETUP_PROBE_PATH, UnitySetupProbeResult } from "@t3tools/contracts";
+// beyond the transport — this one sends only an opaque `projectId` (the
+// server resolves the canonical root) and returns the full classified
+// taxonomy rather than a play/stop/pause outcome.
+import {
+  type ProjectId,
+  UNITY_SETUP_PROBE_PATH,
+  UnitySetupProbeResult,
+  type UnitySetupProbeSuccess,
+} from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -28,7 +33,13 @@ import { runtime } from "../lib/runtime";
 // wire data, not something a compile-time cast can vouch for (#100).
 const decodeUnitySetupProbeResult = Schema.decodeUnknownEffect(UnitySetupProbeResult);
 
+export class UnitySetupProbeServerError extends Schema.TaggedErrorClass<UnitySetupProbeServerError>()(
+  "UnitySetupProbeServerError",
+  { message: Schema.String },
+) {}
+
 function fetchEffect(input: {
+  readonly projectId: ProjectId;
   readonly httpBaseUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
 }) {
@@ -43,17 +54,18 @@ function fetchEffect(input: {
     );
     const request = HttpClientRequest.post(url).pipe(
       HttpClientRequest.setHeaders({ ...headers }),
-      // Deliberately empty body — `UnitySetupProbeInput` is `Schema.Struct({})`.
-      // There is nothing for a caller to supply; see that schema's own doc
-      // comment (plan §1's F6, second half).
-      HttpClientRequest.bodyJsonUnsafe({}),
+      HttpClientRequest.bodyJsonUnsafe({ projectId: input.projectId }),
     );
     const client = yield* HttpClient.HttpClient;
     const response = yield* withEnvironmentCredentials(
       input.httpAuthorization,
       client.execute(request),
     );
-    return yield* decodeUnitySetupProbeResult(yield* response.json);
+    const result = yield* decodeUnitySetupProbeResult(yield* response.json);
+    if ("_tag" in result) {
+      return yield* new UnitySetupProbeServerError({ message: result.message });
+    }
+    return result;
   }).pipe(
     // Bounded so a hung connection can never leave a caller's `.then`/
     // `.catch` both un-fired forever — found live (2026-08-04, team-lead +
@@ -70,17 +82,16 @@ function fetchEffect(input: {
 
 /**
  * Fetches the current classified Unity setup state (`facts` + one `primary`
- * S1–S12(+variants) state) for THIS server process's own project — see
- * `UnitySetupProbeResult`'s own doc comment. Rejects (a plain thrown value)
- * on a transport-level failure or a `presence:read`-scope refusal (HTTP 403,
- * plain text body — see `UnitySetupProbeRoute.ts`'s `dispatchUnitySetupProbe`)
- * only; there is no well-formed "error" tag in the success body to unwrap,
- * unlike `dispatchUnityCommand`'s four-tag result — a caller that gets a
- * resolved value always has a real classification to render.
+ * S0–S13(+variants) state) for the requested server-owned project — see
+ * `UnitySetupProbeResult`'s own doc comment. Rejects on transport failure,
+ * a `presence:read`-scope refusal, or the contract's typed project-resolution
+ * error; a caller that gets a resolved value always has a real classification
+ * to render.
  */
 export function fetchUnitySetupProbe(input: {
+  readonly projectId: ProjectId;
   readonly httpBaseUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
-}): Promise<UnitySetupProbeResult> {
+}): Promise<UnitySetupProbeSuccess> {
   return runtime.runPromise(fetchEffect(input));
 }

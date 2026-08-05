@@ -10,17 +10,18 @@
  *   dedicated, broadly-granted read scope precisely so the web app's own
  *   session (which never holds `presence:command`) can call its own
  *   settings panel's probe.
- * - Takes NO caller-supplied project path at all — see `UnitySetupProbe.ts`'s
- *   own module doc for why "server-resolved, never caller-supplied" needs
- *   no per-request validation here: there is nothing in the request body
- *   to validate in the first place.
+ * - Takes only an opaque `projectId`; the canonical filesystem root is
+ *   resolved from the server's projection store and never crosses the wire.
  */
 import {
   AuthPresenceReadScope,
+  UnitySetupProbeInput,
   type UnitySetupProbeResult,
   UNITY_SETUP_PROBE_PATH,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import {
   HttpRouter,
   HttpServerRequest,
@@ -30,6 +31,7 @@ import {
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "../auth/http.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import * as UnitySetupProbe from "./UnitySetupProbe.ts";
 
@@ -50,13 +52,41 @@ export type UnitySetupProbeDispatchOutcome =
  */
 export const dispatchUnitySetupProbe = (
   session: EnvironmentAuth.AuthenticatedSession,
-): Effect.Effect<UnitySetupProbeDispatchOutcome, never, UnitySetupProbe.UnitySetupProbe> =>
+  projectId: UnitySetupProbeInput["projectId"],
+): Effect.Effect<
+  UnitySetupProbeDispatchOutcome,
+  never,
+  UnitySetupProbe.UnitySetupProbe | ProjectionSnapshotQuery.ProjectionSnapshotQuery
+> =>
   Effect.gen(function* () {
     if (!session.scopes.includes(AuthPresenceReadScope)) {
       return { _tag: "insufficientScope" } as const;
     }
+    const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+    const lookup = yield* snapshotQuery.getProjectShellById(projectId).pipe(
+      Effect.map((project) => ({ _tag: "ok", project }) as const),
+      Effect.orElseSucceed(
+        () =>
+          ({
+            _tag: "error",
+            message: "Could not resolve project.",
+          }) as const,
+      ),
+    );
+    if (lookup._tag === "error") {
+      return { _tag: "ok", value: lookup } as const;
+    }
+    if (Option.isNone(lookup.project)) {
+      return {
+        _tag: "ok",
+        value: { _tag: "error", message: "Project not found." },
+      } as const;
+    }
     const service = yield* UnitySetupProbe.UnitySetupProbe;
-    const value = yield* service.probe();
+    // Unity Editor binds to the canonical project root. Deliberately do not
+    // substitute a thread worktree: installing/probing a copy no Editor has
+    // open would target the wrong project.
+    const value = yield* service.probe(lookup.project.value.workspaceRoot);
     return { _tag: "ok", value } as const;
   });
 
@@ -80,7 +110,15 @@ export const unitySetupProbeRouteLayer = HttpRouter.add(
       ),
     );
 
-    const outcome = yield* dispatchUnitySetupProbe(session);
+    const input = yield* request.json.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(UnitySetupProbeInput)),
+      Effect.orElseSucceed(() => null),
+    );
+    if (input === null) {
+      return HttpServerResponse.text("Bad Request: malformed setup probe", { status: 400 });
+    }
+
+    const outcome = yield* dispatchUnitySetupProbe(session, input.projectId);
     if (outcome._tag === "insufficientScope") {
       // `HttpServerResponse.text` returns a bare `HttpServerResponse`, NOT
       // an Effect — unlike `.json` below, which can fail with

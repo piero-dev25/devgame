@@ -2,7 +2,7 @@
 // Unity work" check. See docs/workbench/plan-setup-integration.md, §1 "New
 // route and auth scope (F6)" and §2 "Every distinguishable state and its
 // exact sentence" — this file is that table given a wire shape. State tags
-// (`S1`..`S12`, plus the primed variants `S2'`/`S4'`/`S8'`/`S10'`) are named
+// (`S0`..`S13`, plus the primed variants `S2'`/`S4'`/`S8'`/`S10'`) are named
 // identically to the plan's own table so a reader can go from a state on
 // the wire straight back to the row that explains it, with no renaming
 // layer to translate through.
@@ -14,6 +14,8 @@
 // install actions (§5, increments 4a-4c) are a deliberately separate,
 // later contract.
 import * as Schema from "effect/Schema";
+
+import { ProjectId } from "./baseSchemas.ts";
 
 /**
  * `packages-lock.json`'s (or the equivalent embedded-package check's) own
@@ -76,7 +78,7 @@ export type UnitySetupPipelineInstance = typeof UnitySetupPipelineInstance.Type;
 /**
  * The outcome of actually RUNNING `unity pipeline list --json` this probe
  * cycle — distinct from "haven't run it yet," which is represented by this
- * field being entirely ABSENT from `UnitySetupProbeResult.pipelineList`
+ * field being entirely ABSENT from `UnitySetupFacts.pipelineList`
  * (plan §2's F13: the lockfile is only ever the cheap ambient pre-check
  * that decides whether this ~400ms call is worth paying for at all).
  */
@@ -129,23 +131,10 @@ export type UnitySetupPipelineListOutcome = typeof UnitySetupPipelineListOutcome
  * pick the single sentence a toolbar would.
  */
 export const UnitySetupFacts = Schema.Struct({
-  /** Whether this project looks like a Unity project at all — detected via
-   * `EngineTypeResolver`'s own marker check
-   * (`ProjectSettings/ProjectVersion.txt`), the SAME signal used elsewhere
-   * in this codebase to distinguish engines, not a bespoke second check.
-   * Deliberately NOT consulted by `classifyUnitySetup` — every state below
-   * answers "is Unity set up correctly," a question that only makes sense
-   * for a project that IS Unity in the first place; this fact exists
-   * purely for a client that doesn't otherwise know. Increment 3's
-   * per-item settings panel reads this to render full per-item status for
-   * a Unity project versus a single honest "this isn't a Unity project"
-   * line for anything else — team-lead's ruling (2026-08-04): the signal
-   * belongs here, on the probe's own facts (server-side, where the
-   * project already lives), not reconstructed client-side from a second,
-   * unrelated concept (`EngineType`, the project's server-DETECTED engine
-   * — `activeProject.engineType` in `ChatView.tsx` — not available where
-   * this panel lives; there is no client-side override anymore, per the
-   * owner's "detection, not a picker" ruling). */
+  /** Whether the resolved project root contains
+   * `ProjectSettings/ProjectVersion.txt`. This server-side filesystem fact
+   * is the classifier's first gate: setup/package state is irrelevant when
+   * the requested project is not a Unity project. */
   isUnityProject: Schema.Boolean,
   cliAvailable: Schema.Boolean,
   /** Populated only when `cliAvailable` is `false` and a candidate binary
@@ -185,6 +174,7 @@ export type UnitySetupFacts = typeof UnitySetupFacts.Type;
  * increment 3's per-item reporting, just never becomes `primary`.
  */
 export const UnitySetupPrimaryState = Schema.Union([
+  Schema.Struct({ state: Schema.Literal("S0"), message: Schema.String }),
   Schema.Struct({ state: Schema.Literal("S1"), message: Schema.String }),
   Schema.Struct({
     state: Schema.Literal("S2"),
@@ -215,27 +205,27 @@ export const UnitySetupPrimaryState = Schema.Union([
 ]);
 export type UnitySetupPrimaryState = typeof UnitySetupPrimaryState.Type;
 
-export const UnitySetupProbeResult = Schema.Struct({
+export const UnitySetupProbeSuccess = Schema.Struct({
   facts: UnitySetupFacts,
   primary: UnitySetupPrimaryState,
 });
+export type UnitySetupProbeSuccess = typeof UnitySetupProbeSuccess.Type;
+
+/** A successful classification, or an honest typed failure to resolve the
+ * opaque project id. Successful payloads intentionally keep their existing
+ * wire shape; only the error variant is tagged. */
+export const UnitySetupProbeResult = Schema.Union([
+  UnitySetupProbeSuccess,
+  Schema.TaggedStruct("error", { message: Schema.String }),
+]);
 export type UnitySetupProbeResult = typeof UnitySetupProbeResult.Type;
 
 /**
- * Deliberately EMPTY input — see plan §1's second half of F6: the probe's
- * project path is resolved server-side from this server process's own
- * `ServerConfig.cwd` (the same value every T3 server process is already
- * scoped to, one project per process — confirmed at
- * `apps/server/src/serverRuntimeStartup.ts:211`), never accepted from the
- * caller. `POST /unity/command`'s existing `workspaceRoot` field is only
- * acceptable there because `presence:command` is desktop-owner-only,
- * already running locally with full filesystem access regardless of what
- * path it names (plan §1's own words) — this route is
- * `presence:read`-scoped and broadly reachable, so it does not mirror that
- * pattern. There is nothing for a caller to supply, by construction, not
- * by a validation check that could be forgotten.
+ * The client supplies only the opaque, server-issued project id it already
+ * holds. The server resolves the canonical workspace root from its own
+ * projection store; no filesystem path crosses this wire boundary.
  */
-export const UnitySetupProbeInput = Schema.Struct({});
+export const UnitySetupProbeInput = Schema.Struct({ projectId: ProjectId });
 export type UnitySetupProbeInput = typeof UnitySetupProbeInput.Type;
 
 /** Kept alongside the schema so the one client call site and the one

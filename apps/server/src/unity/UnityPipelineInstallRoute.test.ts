@@ -18,21 +18,84 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import {
+  AuthSessionId,
   AuthOrchestrationOperateScope,
   AuthPresenceCommandScope,
   AuthPresenceReadScope,
+  OrchestrationProjectShell,
+  ProjectId,
+  UnityPipelineInstallResult,
 } from "@t3tools/contracts";
 
-import * as ServerConfig from "../config.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 import { dispatchUnityPipelineInstall } from "./UnityPipelineInstallRoute.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 
-const PROJECT = "/Users/piero/Projects/Deepmind";
+const PROJECT_ID = ProjectId.make("project-unity");
+const PROJECT_ROOT = "/Users/piero/Projects/Deepmind";
+
+const PROJECT = Schema.decodeUnknownSync(OrchestrationProjectShell)({
+  id: PROJECT_ID,
+  title: "Deepmind",
+  workspaceRoot: PROJECT_ROOT,
+  defaultModelSelection: null,
+  scripts: [],
+  createdAt: "2026-08-05T00:00:00.000Z",
+  updatedAt: "2026-08-05T00:00:00.000Z",
+});
+
+function makeSession(
+  scopes: EnvironmentAuth.AuthenticatedSession["scopes"],
+): EnvironmentAuth.AuthenticatedSession {
+  return {
+    sessionId: AuthSessionId.make("test-session"),
+    subject: "test-subject",
+    method: "bearer-access-token",
+    scopes,
+  };
+}
+
+function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null): {
+  readonly layer: Layer.Layer<ProjectionSnapshotQuery.ProjectionSnapshotQuery>;
+  readonly requestedProjectIds: ReadonlyArray<string>;
+} {
+  const requestedProjectIds: Array<string> = [];
+  const service: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"] = {
+    getCommandReadModel: () => Effect.die("unexpected getCommandReadModel call"),
+    getSnapshot: () => Effect.die("unexpected getSnapshot call"),
+    getShellSnapshot: () => Effect.die("unexpected getShellSnapshot call"),
+    getArchivedShellSnapshot: () => Effect.die("unexpected getArchivedShellSnapshot call"),
+    searchThreads: () => Effect.die("unexpected searchThreads call"),
+    getSnapshotSequence: () => Effect.die("unexpected getSnapshotSequence call"),
+    getCounts: () => Effect.die("unexpected getCounts call"),
+    getActiveProjectByWorkspaceRoot: () =>
+      Effect.die("unexpected getActiveProjectByWorkspaceRoot call"),
+    getProjectShellById: (projectId) =>
+      Effect.sync(() => {
+        requestedProjectIds.push(projectId);
+        return project === null ? Option.none() : Option.some(project);
+      }),
+    getFirstActiveThreadIdByProjectId: () =>
+      Effect.die("unexpected getFirstActiveThreadIdByProjectId call"),
+    getActiveSpacesForProject: () => Effect.die("unexpected getActiveSpacesForProject call"),
+    getSpaceProjectId: () => Effect.die("unexpected getSpaceProjectId call"),
+    getThreadCheckpointContext: () => Effect.die("unexpected getThreadCheckpointContext call"),
+    getFullThreadDiffContext: () => Effect.die("unexpected getFullThreadDiffContext call"),
+    getThreadShellById: () => Effect.die("unexpected getThreadShellById call"),
+    getThreadDetailById: () => Effect.die("unexpected getThreadDetailById call"),
+    getThreadDetailSnapshot: () => Effect.die("unexpected getThreadDetailSnapshot call"),
+  };
+  return {
+    layer: Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, service),
+    requestedProjectIds,
+  };
+}
 
 /** A `UnityPipelineClient` double that records which `workspaceRoot`
  * `install` was called with, and returns a fixed outcome — this suite is
@@ -67,25 +130,15 @@ function makeUnityPipelineClientSpy(): {
   return { layer, calls };
 }
 
-/** Provides `UnityPipelineClient` and `ServerConfig` around a dispatch
- * call, mirroring `UnitySetupProbe.test.ts`'s exact composition order
- * (`Effect.provide` chained per-layer on the EFFECT, `NodeServices.layer`
- * provided outermost) — `layerTest` is the established convenience layer
- * for a fixed `cwd` in this file family, even though
- * `dispatchUnityPipelineInstall` itself only ever reads `serverConfig.cwd`,
- * never touches the filesystem `layerTest` sets up. */
+/** Provides the CLI double and projection-store double around one dispatch. */
 const runDispatchTest = (
   spy: ReturnType<typeof makeUnityPipelineClientSpy>,
   session: EnvironmentAuth.AuthenticatedSession,
+  projection: ReturnType<typeof makeProjectionSnapshotQuerySpy>,
 ) =>
-  dispatchUnityPipelineInstall(session)
-    .pipe(
-      Effect.provide(spy.layer),
-      Effect.provide(
-        ServerConfig.layerTest(PROJECT, { prefix: "t3code-unity-pipeline-install-route-" }),
-      ),
-    )
-    .pipe(Effect.provide(NodeServices.layer));
+  dispatchUnityPipelineInstall(session, PROJECT_ID).pipe(
+    Effect.provide(Layer.mergeAll(spy.layer, projection.layer)),
+  );
 
 describe("dispatchUnityPipelineInstall", () => {
   it.effect(
@@ -93,15 +146,12 @@ describe("dispatchUnityPipelineInstall", () => {
     () =>
       Effect.gen(function* () {
         const spy = makeUnityPipelineClientSpy();
-        const session: EnvironmentAuth.AuthenticatedSession = {
-          sessionId: "test-session" as EnvironmentAuth.AuthenticatedSession["sessionId"],
-          subject: "test-subject",
-          method: "bearer-access-token",
-          scopes: [AuthOrchestrationOperateScope],
-        };
-        const outcome = yield* runDispatchTest(spy, session);
+        const projection = makeProjectionSnapshotQuerySpy(PROJECT);
+        const session = makeSession([AuthOrchestrationOperateScope]);
+        const outcome = yield* runDispatchTest(spy, session, projection);
         expect(outcome).toEqual({ _tag: "insufficientScope" });
         expect(spy.calls).toEqual([]);
+        expect(projection.requestedProjectIds).toEqual([]);
       }),
   );
 
@@ -110,30 +160,23 @@ describe("dispatchUnityPipelineInstall", () => {
     () =>
       Effect.gen(function* () {
         const spy = makeUnityPipelineClientSpy();
-        const session: EnvironmentAuth.AuthenticatedSession = {
-          sessionId: "test-session" as EnvironmentAuth.AuthenticatedSession["sessionId"],
-          subject: "test-subject",
-          method: "bearer-access-token",
-          scopes: [AuthPresenceReadScope],
-        };
-        const outcome = yield* runDispatchTest(spy, session);
+        const projection = makeProjectionSnapshotQuerySpy(PROJECT);
+        const session = makeSession([AuthPresenceReadScope]);
+        const outcome = yield* runDispatchTest(spy, session, projection);
         expect(outcome).toEqual({ _tag: "insufficientScope" });
         expect(spy.calls).toEqual([]);
+        expect(projection.requestedProjectIds).toEqual([]);
       }),
   );
 
   it.effect(
-    "with presence:command, calls UnityPipelineClient.install with ServerConfig.cwd — never a caller-supplied path",
+    "known projectId resolves through the projection store and installs into its canonical root",
     () =>
       Effect.gen(function* () {
         const spy = makeUnityPipelineClientSpy();
-        const session: EnvironmentAuth.AuthenticatedSession = {
-          sessionId: "test-session" as EnvironmentAuth.AuthenticatedSession["sessionId"],
-          subject: "test-subject",
-          method: "bearer-access-token",
-          scopes: [AuthPresenceCommandScope],
-        };
-        const outcome = yield* runDispatchTest(spy, session);
+        const projection = makeProjectionSnapshotQuerySpy(PROJECT);
+        const session = makeSession([AuthPresenceCommandScope]);
+        const outcome = yield* runDispatchTest(spy, session, projection);
         expect(outcome._tag).toBe("ok");
         if (outcome._tag !== "ok") return;
         expect(outcome.value).toEqual({
@@ -144,7 +187,34 @@ describe("dispatchUnityPipelineInstall", () => {
             alreadyInstalled: false,
           },
         });
-        expect(spy.calls).toEqual([{ method: "install", workspaceRoot: PROJECT }]);
+        expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
+        expect(spy.calls).toEqual([{ method: "install", workspaceRoot: PROJECT_ROOT }]);
+      }),
+  );
+
+  it.effect(
+    "unknown projectId returns a contract-decodable error without installing anywhere",
+    () =>
+      Effect.gen(function* () {
+        const spy = makeUnityPipelineClientSpy();
+        const projection = makeProjectionSnapshotQuerySpy(null);
+        const session = makeSession([AuthPresenceCommandScope]);
+        const outcome = yield* runDispatchTest(spy, session, projection);
+
+        expect(outcome).toEqual({
+          _tag: "ok",
+          value: { _tag: "error", message: "Project not found." },
+        });
+        if (outcome._tag !== "ok") return;
+        const decoded = yield* Schema.decodeUnknownEffect(UnityPipelineInstallResult)(
+          outcome.value,
+        );
+        expect(decoded).toEqual({
+          _tag: "error",
+          message: "Project not found.",
+        });
+        expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
+        expect(spy.calls).toEqual([]);
       }),
   );
 });

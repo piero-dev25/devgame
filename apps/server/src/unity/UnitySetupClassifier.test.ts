@@ -40,8 +40,31 @@ function ranList(
 }
 
 describe("classifyUnitySetup", () => {
+  it("S0: a non-Unity root reports that fact before the missing Pipeline package fallback", () => {
+    const input: UnitySetupClassifierInput & { readonly isUnityProject: boolean } = {
+      isUnityProject: false,
+      cliAvailable: true,
+      cliDiscoveredPath: null,
+      justInstalledThisSession: false,
+      lockfilePresent: false,
+      pipelinePackageInstalled: false,
+      pipelinePackageDeclaredInManifest: false,
+      selectionPackageInstalled: false,
+      pipelineList: ranList(null),
+      selectionPublisherRegistered: false,
+      withinPairingGraceWindow: false,
+    };
+
+    expect(classifyUnitySetup(input)).toEqual({
+      state: "S0",
+      message:
+        "This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found.",
+    });
+  });
+
   it("S1: CLI unavailable, no candidate found off-PATH", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: false,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -62,6 +85,7 @@ describe("classifyUnitySetup", () => {
 
   it("S2: CLI unavailable, a candidate WAS found off-PATH — names the discovered path", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: false,
       cliDiscoveredPath: "/opt/homebrew/bin/unity",
       justInstalledThisSession: false,
@@ -83,6 +107,7 @@ describe("classifyUnitySetup", () => {
 
   it("S2': justInstalledThisSession WINS over a discovered path — never shown alongside S2's 'DevGame bug' copy", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: false,
       cliDiscoveredPath: "/opt/homebrew/bin/unity",
       justInstalledThisSession: true,
@@ -102,6 +127,7 @@ describe("classifyUnitySetup", () => {
 
   it("CLI unavailable OUTRANKS every other fact — a project that's otherwise fully green still reports S1", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: false,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -118,6 +144,7 @@ describe("classifyUnitySetup", () => {
 
   it("S12: pipeline list itself failed — the CLI's own message and command pass through VERBATIM", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -142,6 +169,7 @@ describe("classifyUnitySetup", () => {
 
   it("S12 outranks the lockfile/package checks — a failed pipeline list is reported even when the lockfile looks fine", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -158,6 +186,7 @@ describe("classifyUnitySetup", () => {
 
   it("S4': lockfile present but pipeline list hasn't run this cycle — never commits to S4 or S6", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -177,6 +206,7 @@ describe("classifyUnitySetup", () => {
 
   it("S4' also fires when the package IS installed — the checking window applies regardless of package state", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -193,6 +223,7 @@ describe("classifyUnitySetup", () => {
 
   it("S4: package missing, lockfile absent but pipeline list confirms a live matched instance — THE defect", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -213,6 +244,7 @@ describe("classifyUnitySetup", () => {
 
   it("S5: package missing, lockfile absent, pipeline list ran and found no match at all", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -229,6 +261,7 @@ describe("classifyUnitySetup", () => {
 
   it("S5, not S4: package missing, a match WAS found but its own isRunning is false (stale lock, F13)", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -245,6 +278,7 @@ describe("classifyUnitySetup", () => {
 
   it("S13: package declared in manifest but not yet in the lock, Unity NOT live — wins over S5", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -265,6 +299,7 @@ describe("classifyUnitySetup", () => {
 
   it("S13, not S4: package declared in manifest but not yet in the lock, Unity IS live — still wins, never offers 'add it' again", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -281,6 +316,7 @@ describe("classifyUnitySetup", () => {
 
   it("S6: package installed, lockfile absent (never called pipeline list at all)", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -300,6 +336,7 @@ describe("classifyUnitySetup", () => {
 
   it("S6, not S4: package installed, pipeline list ran and found no LIVE matching instance (stale lock)", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -316,6 +353,7 @@ describe("classifyUnitySetup", () => {
 
   it("S7a: installed, live, unreachable, safeMode TRUE — the distinct non-auto-clearing message (F2)", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -336,6 +374,7 @@ describe("classifyUnitySetup", () => {
 
   it("S7b: installed, live, unreachable, safeMode FALSE — the bounded-retry 'waiting' message, not S7a's", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -355,6 +394,7 @@ describe("classifyUnitySetup", () => {
 
   it("S7b, not S7a: safeMode NULL (unresolvable) is treated the same as false, never as true", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -371,6 +411,7 @@ describe("classifyUnitySetup", () => {
 
   it("S8: installed, live, reachable, updateAvailable true AND a real latestVersion — names the version", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -391,6 +432,7 @@ describe("classifyUnitySetup", () => {
 
   it("S8′ fix (F10): updateAvailable true but latestVersion NULL never reports S8 — falls through instead", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -409,6 +451,7 @@ describe("classifyUnitySetup", () => {
 
   it("S8′ fix (F10): updateAvailable false with latestVersion null is NEVER read as 'up to date' — same fall-through, not S11", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -425,6 +468,7 @@ describe("classifyUnitySetup", () => {
 
   it("S9: everything Pipeline-related is green, but the selection package is missing", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -445,6 +489,7 @@ describe("classifyUnitySetup", () => {
 
   it("S10: selection package present, no publisher registered, OUTSIDE the grace window", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -465,6 +510,7 @@ describe("classifyUnitySetup", () => {
 
   it("S10': the SAME facts as S10, but INSIDE the grace window — a 'checking', not 'pair it' yet (F3)", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -484,6 +530,7 @@ describe("classifyUnitySetup", () => {
 
   it("S11: every check green, publisher registered — no message, controls enabled", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -500,6 +547,7 @@ describe("classifyUnitySetup", () => {
 
   it("S11 even inside the grace window, once a publisher IS actually registered — the window only matters while absence is ambiguous", () => {
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,
@@ -519,6 +567,7 @@ describe("classifyUnitySetup", () => {
     // package present AND paired should not somehow surface instead: the
     // toolbar's real priority is Play/Stop readiness first.
     const input: UnitySetupClassifierInput = {
+      isUnityProject: true,
       cliAvailable: true,
       cliDiscoveredPath: null,
       justInstalledThisSession: false,

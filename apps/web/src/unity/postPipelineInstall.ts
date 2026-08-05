@@ -3,14 +3,18 @@
 // `unityPipelineInstallRouteLayer`) — plan §5's increment 4a, the consented
 // `unity pipeline install`. Modeled closely on `./fetchSetupProbe.ts`: same
 // `buildEnvironmentAuthHeaders`/`withEnvironmentCredentials` plumbing, same
-// `runtime.runPromise` boundary, same empty-body convention (the project is
-// server-resolved, never caller-supplied — see
+// `runtime.runPromise` boundary. The body carries only the opaque project id;
+// the canonical root is server-resolved, never caller-supplied — see
 // `UnityPipelineInstallInput`'s own doc comment). Kept as its own file for
 // the same reason `fetchSetupProbe.ts` is: this call has nothing in common
 // with the read-only probe beyond the transport, and it is the one call in
 // this whole feature that WRITES to the user's project — worth being able
 // to find, read, and reason about on its own.
-import { UNITY_PIPELINE_INSTALL_PATH, UnityPipelineInstallResult } from "@t3tools/contracts";
+import {
+  type ProjectId,
+  UNITY_PIPELINE_INSTALL_PATH,
+  UnityPipelineInstallResult,
+} from "@t3tools/contracts";
 import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
@@ -29,6 +33,7 @@ import { runtime } from "../lib/runtime";
 const decodeUnityPipelineInstallResult = Schema.decodeUnknownEffect(UnityPipelineInstallResult);
 
 function postEffect(input: {
+  readonly projectId: ProjectId;
   readonly httpBaseUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
 }) {
@@ -43,10 +48,7 @@ function postEffect(input: {
     );
     const request = HttpClientRequest.post(url).pipe(
       HttpClientRequest.setHeaders({ ...headers }),
-      // Deliberately empty body — `UnityPipelineInstallInput` is
-      // `Schema.Struct({})`. There is nothing for a caller to supply; see
-      // that schema's own doc comment.
-      HttpClientRequest.bodyJsonUnsafe({}),
+      HttpClientRequest.bodyJsonUnsafe({ projectId: input.projectId }),
     );
     const client = yield* HttpClient.HttpClient;
     const response = yield* withEnvironmentCredentials(
@@ -61,9 +63,9 @@ function postEffect(input: {
 }
 
 /**
- * Fires the consented `unity pipeline install` for THIS server process's
- * own project (`ServerConfig.cwd` server-side — see
- * `UnityPipelineInstallInput`'s own doc comment). There is no server-side
+ * Fires the consented `unity pipeline install` for the requested project.
+ * The server resolves its canonical root from the opaque `projectId`; no
+ * path crosses the wire. There is no server-side
  * "did the user consent" flag for this function to check — every caller is
  * responsible for treating its own click as the consent, by construction.
  * Two callers today, two different but equally valid consent shapes:
@@ -78,6 +80,7 @@ function postEffect(input: {
  * documents for its own 403 case.
  */
 export function postUnityPipelineInstall(input: {
+  readonly projectId: ProjectId;
   readonly httpBaseUrl: string;
   readonly httpAuthorization: PreparedHttpAuthorization | null;
 }): Promise<UnityPipelineInstallResult> {

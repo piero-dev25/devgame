@@ -2,7 +2,7 @@
 // — every input is a plain value the component (or a test) hands in, so the
 // actual decision of "what does this toolbar show right now" is checkable
 // without mounting anything or faking a WebSocket.
-import type { EngineType, UnitySetupFacts, UnitySetupProbeResult } from "@t3tools/contracts";
+import type { EngineType, UnitySetupFacts, UnitySetupProbeSuccess } from "@t3tools/contracts";
 
 import type {
   EditorPresenceCapability,
@@ -123,6 +123,7 @@ const UNITY_CLI_ACTIONS: ReadonlyArray<EngineToolbarAction> = ["play", "pause", 
  */
 export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
   return (
+    facts.isUnityProject &&
     facts.cliAvailable &&
     facts.pipelinePackage.installed &&
     facts.pipelineList?._tag === "ran" &&
@@ -160,7 +161,8 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * missing) identically — the classifier's own S4-vs-S5 split is entirely
  * about `liveMatch`, which this function has no reason to consult.
  *
- * Only three facts matter, all independent of Unity's live state:
+ * Only four facts matter, all independent of Unity's live state:
+ *  - `isUnityProject` — S0 is never an installation opportunity.
  *  - `cliAvailable` — no working `unity` binary, no install to run (S1/S2).
  *  - `!pipelinePackage.installed` — nothing missing means nothing to add.
  *  - `!pipelinePackage.declaredInManifest` — already added, just awaiting
@@ -176,6 +178,7 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  */
 export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean {
   return (
+    facts.isUnityProject &&
     facts.cliAvailable &&
     !facts.pipelinePackage.installed &&
     !facts.pipelinePackage.declaredInManifest
@@ -204,7 +207,7 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
  * resolve to success or a stated reason, never an indefinite loading
  * message. */
 function unityDisabledReason(
-  setup: UnitySetupProbeResult | null,
+  setup: UnitySetupProbeSuccess | null,
   error: string | null,
 ): string | null {
   if (setup === null) {
@@ -339,7 +342,7 @@ export function resolveEngineToolbarView(input: {
    * way a user learned Unity was unreachable was clicking Play and getting
    * a generic toast.
    */
-  readonly unitySetup?: UnitySetupProbeResult | null;
+  readonly unitySetup?: UnitySetupProbeSuccess | null;
   /**
    * Only consulted for the `"unity-cli"` backend, and only when `unitySetup`
    * is still `null` — the real reason the fetch never resolved to a value
@@ -411,8 +414,8 @@ export function resolveEngineToolbarView(input: {
       // A failed CHECK, not a confirmed classifier state — see this field's
       // own doc comment. Only possible while `setup` is still `null`
       // (`unityDisabledReason` only reads `error` in that branch); once a
-      // real `UnitySetupProbeResult` has arrived, `disabledReason` (if any)
-      // is always a classified S1-S13 sentence, never a failure.
+      // real probe result has arrived, `disabledReason` (if any) is always
+      // a classified S0-S13 sentence, never a failure.
       unitySetupCheckFailed: !playReady && setup === null && unitySetupError !== null,
       // `setup !== null` guards the same "unknown treated as not-ready" way
       // `playReady` itself does — no probe result yet means no CTA, not a
