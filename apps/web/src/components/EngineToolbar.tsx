@@ -23,10 +23,13 @@ import {
 
 import {
   isPlayEngaged,
+  isUnityPauseAvailable,
+  isUnityPauseEngaged,
   resolveUnityPlayToggleAction,
   type EngineToolbarAction,
   type EngineToolbarView,
 } from "./EngineToolbar.logic";
+import { UnityIcon } from "./icons/UnityIcon";
 import { MenuGroup, MenuItem } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
@@ -137,11 +140,14 @@ export function EngineToolbar(props: EngineToolbarProps) {
         Menu/MenuTrigger dropdown that used to live here. `size="lg"` is the
         closest `Badge` size to the removed button's height (`Button`'s
         `xs`), so this control's neighbours in the header row don't visibly
-        reflow.
+        reflow. Unity replaces this badge with its merged icon-led control;
+        every other engine and the no-engine case retain it.
       */}
-      <Badge variant="outline" size="lg" className="max-w-24 truncate px-2 font-medium">
-        {engineLabel}
-      </Badge>
+      {view.backend !== "unity-cli" ? (
+        <Badge variant="outline" size="lg" className="max-w-24 truncate px-2 font-medium">
+          {engineLabel}
+        </Badge>
+      ) : null}
 
       {view.backend === "threejs-script" ? (
         <ThreeJsPlayButton
@@ -198,9 +204,8 @@ function ThreeJsPlayButton(props: {
   // the base button's `disabled:opacity-64` Tailwind variant no longer
   // applies without the native attribute. No separate click guard needed
   // here — `props.onPlay?.()` was already a no-op when `onPlay` is absent.
-  // Same fix applied at every other disabled+Tooltip instance in this file
-  // (`disabledPlayButton`, "Bring Unity to the front", Stop) — see those
-  // call sites for the one variant that DOES need an explicit guard.
+  // Same fix applies to the disabled Unity identity/transport controls and
+  // the generic editor-presence fallback below.
   const disabled = !props.onPlay;
   const button = (
     <Button
@@ -224,14 +229,192 @@ function ThreeJsPlayButton(props: {
   );
 }
 
+const UNITY_BRING_TO_FRONT_REASON = "Bringing the Unity Editor to the front isn't wired up yet.";
+const UNITY_PAUSE_UNAVAILABLE_REASON = "Nothing is playing to pause.";
+const UNITY_PERMISSION_REASON =
+  'This session can\'t send engine commands yet. Grant "Control connected editors" in Settings → Connections.';
+
+function UnityControlCluster(props: {
+  readonly view: EngineToolbarView;
+  readonly hasPresenceCommandScope: boolean;
+  readonly onAction: (action: EngineToolbarAction) => void;
+  readonly onOpenConnectionsSettings?: () => void;
+  readonly onRetryUnitySetup?: () => void;
+  readonly onSetupUnityIntegrations?: () => void;
+}) {
+  const { view } = props;
+  const ready = view.availableActions.length > 0;
+  const unavailableReason =
+    view.disabledReason ??
+    (view.hasConnectedEditor
+      ? "The connected editor hasn't advertised any commands yet."
+      : "No editor is connected for this project.");
+  const setupOffered =
+    props.hasPresenceCommandScope &&
+    view.unityInstallOffered &&
+    props.onSetupUnityIntegrations !== undefined;
+  const unityLabel = ready ? UNITY_BRING_TO_FRONT_REASON : unavailableReason;
+  const unityControl = setupOffered ? (
+    <Button size="xs" variant="default" onClick={() => props.onSetupUnityIntegrations?.()}>
+      <UnityIcon className="size-3.5" />
+      <span className="ml-0.5">Setup Integrations</span>
+    </Button>
+  ) : (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            size="xs"
+            variant="outline"
+            aria-disabled="true"
+            className="cursor-not-allowed opacity-64"
+            aria-label={unityLabel}
+          >
+            <UnityIcon className="size-3.5" />
+            <span className="ml-0.5">Unity</span>
+          </Button>
+        }
+      />
+      <TooltipPopup side="bottom">{unityLabel}</TooltipPopup>
+    </Tooltip>
+  );
+
+  const transportBlockedReason = !props.hasPresenceCommandScope
+    ? UNITY_PERMISSION_REASON
+    : ready
+      ? null
+      : unavailableReason;
+  const retryLabel = "Retry checking Unity's status";
+  const retryButton =
+    !ready && view.unitySetupCheckFailed && props.onRetryUnitySetup ? (
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant="outline"
+              aria-label={retryLabel}
+              onClick={() => props.onRetryUnitySetup?.()}
+            />
+          }
+        >
+          <RotateCcwIcon className="size-3.5" aria-hidden />
+        </TooltipTrigger>
+        <TooltipPopup side="bottom">{retryLabel}</TooltipPopup>
+      </Tooltip>
+    ) : null;
+  const pendingIndicator =
+    !ready && view.unitySetupPending ? (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-1.5 text-xs text-muted-foreground"
+      >
+        <Spinner className="size-3 shrink-0" aria-hidden />
+        <span>Checking Unity's status…</span>
+      </div>
+    ) : null;
+
+  return (
+    <div className="flex shrink-0 items-center gap-1">
+      {unityControl}
+      <UnityTransportGroup
+        playState={view.playState}
+        blockedReason={transportBlockedReason}
+        onAction={props.onAction}
+        {...(!props.hasPresenceCommandScope && props.onOpenConnectionsSettings
+          ? { onBlockedClick: props.onOpenConnectionsSettings }
+          : {})}
+      />
+      {retryButton}
+      {pendingIndicator}
+    </div>
+  );
+}
+
+function UnityTransportGroup(props: {
+  readonly playState: EngineToolbarView["playState"];
+  readonly blockedReason: string | null;
+  readonly onAction: (action: EngineToolbarAction) => void;
+  readonly onBlockedClick?: () => void;
+}) {
+  const blocked = props.blockedReason !== null;
+  const toggleAction = resolveUnityPlayToggleAction(props.playState);
+  const toggleEngaged = !blocked && toggleAction === "stop";
+  const ToggleIcon = toggleEngaged ? SquareIcon : PlayIcon;
+  const toggleLabel = blocked
+    ? `Play — ${props.blockedReason}`
+    : toggleAction === "stop"
+      ? "Stop"
+      : "Play";
+  const pauseAvailable = !blocked && isUnityPauseAvailable(props.playState);
+  const pauseEngaged = !blocked && isUnityPauseEngaged(props.playState);
+  const pauseLabel = blocked
+    ? `Pause — ${props.blockedReason}`
+    : pauseAvailable
+      ? "Pause"
+      : UNITY_PAUSE_UNAVAILABLE_REASON;
+  const blockedOpensSettings = blocked && props.onBlockedClick !== undefined;
+
+  return (
+    <Group aria-label="Unity transport controls" className="shrink-0">
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant={toggleEngaged ? "default" : "outline"}
+              aria-label={toggleLabel}
+              aria-pressed={toggleEngaged}
+              aria-disabled={blocked && !blockedOpensSettings ? "true" : undefined}
+              className="aria-disabled:cursor-not-allowed aria-disabled:opacity-64"
+              onClick={() => {
+                if (blocked) {
+                  props.onBlockedClick?.();
+                  return;
+                }
+                props.onAction(toggleAction);
+              }}
+            />
+          }
+        >
+          <ToggleIcon className="size-3.5" aria-hidden />
+        </TooltipTrigger>
+        <TooltipPopup side="bottom">{toggleLabel}</TooltipPopup>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              size="icon-xs"
+              variant={pauseEngaged ? "default" : "outline"}
+              aria-label={pauseLabel}
+              aria-pressed={pauseEngaged}
+              aria-disabled={(!pauseAvailable && !blockedOpensSettings) || undefined}
+              className="aria-disabled:cursor-not-allowed aria-disabled:opacity-64"
+              onClick={() => {
+                if (blocked) {
+                  props.onBlockedClick?.();
+                  return;
+                }
+                if (pauseAvailable) props.onAction("pause");
+              }}
+            />
+          }
+        >
+          <PauseIcon className="size-3.5" aria-hidden />
+        </TooltipTrigger>
+        <TooltipPopup side="bottom">{pauseLabel}</TooltipPopup>
+      </Tooltip>
+    </Group>
+  );
+}
+
 function ControlCluster(props: {
   readonly view: EngineToolbarView;
-  /** Whether THIS session currently holds `presence:command` — irrelevant
-   * unless `view.requiresPresenceCommandScope` is true. Unity's `"unity-cli"`
-   * backend and three.js's `"threejs-script"` backend never gate on this;
-   * only `"editor-presence"` (Godot today) does — see
-   * `EngineToolbar.logic.ts`'s `EngineDispatchBackend` doc comment for why
-   * the scope check moved from a toolbar-wide flag to a per-view field. */
+  /** Whether THIS session currently holds `presence:command`. Unity is
+   * handled by `UnityControlCluster` above; the remaining generic path gates
+   * editor-presence backends here. */
   readonly hasPresenceCommandScope: boolean;
   readonly onAction: (action: EngineToolbarAction) => void;
   readonly onOpenConnectionsSettings?: () => void;
@@ -242,6 +425,10 @@ function ControlCluster(props: {
 }) {
   const { view } = props;
   const isUnity = view.backend === "unity-cli";
+
+  if (isUnity) {
+    return <UnityControlCluster {...props} />;
+  }
 
   if (view.requiresPresenceCommandScope && !props.hasPresenceCommandScope) {
     return (
@@ -268,12 +455,8 @@ function ControlCluster(props: {
   }
 
   if (view.availableActions.length === 0) {
-    // `view.disabledReason` is the specific, backend-supplied reason
-    // (Unity's `UnitySetupProbe`-classified sentence today) — the fallback
-    // ternary below is `"editor-presence"`'s own generic copy, kept for
-    // when nothing more specific is available rather than replaced, since
-    // `disabledReason` is `null` there by design (see `EngineToolbarView`'s
-    // doc comment).
+    // `view.disabledReason` is the specific, backend-supplied reason; the
+    // fallback is editor-presence's generic copy when none is available.
     const reason =
       view.disabledReason ??
       (view.hasConnectedEditor
@@ -311,239 +494,7 @@ function ControlCluster(props: {
         <TooltipPopup side="bottom">{reason}</TooltipPopup>
       </Tooltip>
     );
-    // Retry only ever offered for a FAILED status check (a rejected fetch,
-    // or the probe atom's own bounded wait for the connection giving up —
-    // #106), never for a confirmed classifier state: retrying "Pipeline
-    // package missing" wouldn't produce a different answer, so no control
-    // is shown there — see `unitySetupCheckFailed`'s own doc comment.
-    const retryButton =
-      view.unitySetupCheckFailed && props.onRetryUnitySetup ? (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="outline"
-                aria-label="Retry checking Unity's status"
-                onClick={() => props.onRetryUnitySetup?.()}
-              />
-            }
-          >
-            <RotateCcwIcon className="size-3.5" aria-hidden />
-          </TooltipTrigger>
-          <TooltipPopup side="bottom">Retry checking Unity's status</TooltipPopup>
-        </Tooltip>
-      ) : null;
-
-    // F13 (merge-gate review, low): the connection-wait + HTTP fetch behind
-    // `reason` can run up to ~35s (`UNITY_SETUP_CONNECTION_WAIT_TIMEOUT_MS`
-    // + `fetchSetupProbe.ts`'s own 20s bound), and until this existed
-    // nothing here distinguished "still checking" from "confirmed not
-    // ready" — same static text and disabled button either way, no visual
-    // sense of progress, and the reason only ever reached a screen reader
-    // as the button's `aria-label` (heard once, on focus — never again if
-    // it changes without a refocus). `role="status"`/`aria-live="polite"`
-    // is the SAME pattern `GitActionsControl.tsx`'s publish-in-progress
-    // state already uses (this file's own styling model — see the top doc
-    // comment) — a live region independent of focus, plus a visible
-    // spinner for sighted users. Purely ADDITIVE: it never changes
-    // `reason`, `disabledPlayButton`, or whether Retry/the CTA render —
-    // those stay governed entirely by `unitySetupCheckFailed`/
-    // `unityInstallOffered`, unchanged.
-    const pendingIndicator = view.unitySetupPending ? (
-      <div
-        role="status"
-        aria-live="polite"
-        className="flex items-center gap-1.5 text-xs text-muted-foreground"
-      >
-        <Spinner className="size-3 shrink-0" aria-hidden />
-        <span>Checking Unity's status…</span>
-      </div>
-    ) : null;
-
-    // The owner's mock: not-ready Unity gets a loud CTA (the header saying
-    // what to do next) beside the same disabled Play a sighted user would
-    // otherwise stare at with no obvious next step — but ONLY when
-    // `view.unityInstallOffered` says an install would actually fix THIS
-    // project's specific not-ready reason (see
-    // `shouldOfferUnityPipelineInstall`'s own doc comment in
-    // EngineToolbar.logic.ts for the exact facts it's gated on — package
-    // missing and CLI available is all it needs; Unity's own live state is
-    // deliberately irrelevant, since the install works with Unity closed).
-    // Every OTHER not-ready reason (no CLI, package already declared and
-    // just awaiting Unity's resolver) falls through to the plain
-    // disabledPlayButton below — showing an "install" CTA next to a problem
-    // installing can't fix would be a control that looks like it helps but
-    // doesn't.
-    //
-    // `variant="default"` is the SAME filled/`--primary` vocabulary
-    // `ComposerPrimaryActions.tsx`'s own "Implement" button and the
-    // plan-sidebar submit button already use elsewhere in this codebase —
-    // reusing that existing variant rather than hand-rolling bespoke classes
-    // matching the composer send button's exact (differently-directioned)
-    // hover state, so this doesn't become a THIRD subtly-different "filled
-    // button" convention. This is the first `variant="default"` control in
-    // this header row — every neighbour (`Add action`, `Open`, `Commit`,
-    // and every other control in THIS toolbar) is `variant="outline"`;
-    // deliberate, per the mock, not an oversight.
-    if (view.unityInstallOffered && props.onSetupUnityIntegrations) {
-      const onSetupUnityIntegrations = props.onSetupUnityIntegrations;
-      return (
-        <div className="flex shrink-0 items-center gap-1">
-          <Button size="xs" variant="default" onClick={() => onSetupUnityIntegrations()}>
-            Setup Unity Integrations
-          </Button>
-          {disabledPlayButton}
-          {retryButton}
-          {pendingIndicator}
-        </div>
-      );
-    }
-
-    if (!retryButton && !pendingIndicator) {
-      return disabledPlayButton;
-    }
-    return (
-      <div className="flex shrink-0 items-center gap-1">
-        {disabledPlayButton}
-        {retryButton}
-        {pendingIndicator}
-      </div>
-    );
-  }
-
-  // Owner's mock, ready state, ORIGINALLY: "collapses to two quiet outline
-  // buttons — Unity (bring the Editor to the front) and Play (bring to
-  // front AND play)." Deliberately Unity-only — every OTHER engine (Godot/
-  // Unreal today, both `"editor-presence"`) keeps the existing multi-action
-  // Group below untouched; that toolbar path isn't part of this change
-  // (owner, separately: sharing this structure across engines is explicitly
-  // "later," not this change — see `resolveUnityPlayToggleAction`'s own
-  // comment about that Group staying at four separate buttons).
-  //
-  // The Play button is now a Play/Pause TOGGLE — owner ruling, 2026-08-05,
-  // verbatim: "play and stop are the main ones for now, same area (toggle
-  // essentially) when unity is on play, shows pause there, and vice verse
-  // etc." `resolveUnityPlayToggleAction` (EngineToolbar.logic.ts) is the
-  // pure derivation of what the toggle's next click sends; this component
-  // only renders its answer.
-  //
-  // Where Stop lives (this build's own design call, since the owner's
-  // instruction named the toggle's two faces but not Stop's placement):
-  // a THIRD, always-visible button next to the toggle, disabled with a
-  // stated reason while nothing is playing — not folded into the toggle
-  // (a play/pause/stop three-way cycle on one button is a worse click
-  // model than Unity's own editor toolbar, which the owner's mock is
-  // modeled on: Play and Stop are separate controls there too), and not a
-  // control that only APPEARS once something is playing (this file's own
-  // "disabled-with-a-reason, never hidden-or-silently-broken" principle —
-  // see `ThreeJsPlayButton`'s doc comment — applies here exactly as it does
-  // to every other control in this file; an appearing/disappearing button
-  // is a worse discoverability story than one that's honestly disabled,
-  // and the owner named Stop as one of "the main ones," not a conditional
-  // extra).
-  //
-  // Still deliberately NOT attempted, per the owner not having ruled on it:
-  //  - Bring-to-front. `open -a "Unity"` via `ExternalLauncher` is a
-  //    separate task. The `Unity` button below is PRESENT but DISABLED with
-  //    a stated reason, not omitted and not a silent no-op — same principle
-  //    as Stop's disabled state above: a control that LOOKS clickable but
-  //    does nothing on click would be worse than one that's honestly
-  //    disabled, and omitting it entirely would leave the ready state
-  //    showing only two buttons, not the trio this change now renders.
-  if (isUnity) {
-    const engaged = isPlayEngaged(view.playState);
-    const toggleAction = resolveUnityPlayToggleAction(view.playState);
-    const ToggleIcon = toggleAction === "pause" ? PauseIcon : PlayIcon;
-    const toggleLabel = toggleAction === "pause" ? "Pause" : "Play";
-    // Same single-expression-drives-both-aria-label-and-tooltip discipline
-    // #111 established (see `ThreeJsPlayButton`'s doc comment) — a disabled
-    // Stop that a screen reader announces as just "Stop," with no hint that
-    // clicking does nothing, is the same class of bug #107 fixed for the
-    // ready-state Play button.
-    const stopLabel = engaged ? "Stop" : "Nothing is playing to stop.";
-    return (
-      <div className="flex shrink-0 items-center gap-1">
-        {/* S9 (#129): Play works but the SELECTION package is missing —
-            chips are silently off, which the owner hit live. The one click
-            installs both packages now (f95c1731c), so the ready trio
-            offers the same filled CTA the not-ready branch does whenever
-            `unityInstallOffered` says a click would fix something. Gated on
-            the same facts predicate; disappears as soon as the embedded
-            copy lands (the probe reads the embedded package.json without
-            waiting for Unity's resolver). Pairing recovery (S10) offers it
-            only while a live Editor makes the missing publisher trustworthy. */}
-        {view.unityInstallOffered && props.onSetupUnityIntegrations ? (
-          <Button size="xs" variant="default" onClick={() => props.onSetupUnityIntegrations?.()}>
-            Setup Unity Integrations
-          </Button>
-        ) : null}
-        {/* QA round 2 (#124): `aria-disabled`, not `disabled` — see
-            `ThreeJsPlayButton`'s doc comment for why. No onClick to guard;
-            this control never had one. */}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="xs"
-                variant="outline"
-                aria-disabled="true"
-                className="cursor-not-allowed opacity-64"
-                aria-label="Bring Unity to the front"
-              >
-                Unity
-              </Button>
-            }
-          />
-          <TooltipPopup side="bottom">
-            Bringing the Unity Editor to the front isn't wired up yet.
-          </TooltipPopup>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="xs"
-                variant={engaged ? "default" : "outline"}
-                aria-label={toggleLabel}
-                aria-pressed={engaged}
-                onClick={() => props.onAction(toggleAction)}
-              >
-                <ToggleIcon className="size-3.5" aria-hidden />
-                <span className="ml-0.5">{toggleLabel}</span>
-              </Button>
-            }
-          />
-          <TooltipPopup side="bottom">{toggleLabel}</TooltipPopup>
-        </Tooltip>
-        {/* QA round 2 (#124): `aria-disabled`, not `disabled` — see
-            `ThreeJsPlayButton`'s doc comment for why. Unlike the other three
-            instances, this one's onClick is unconditional, so removing the
-            native attribute needs an explicit no-op guard — a keyboard user
-            can now focus and "activate" this control while nothing is
-            playing, and it must genuinely do nothing when they do. */}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="xs"
-                variant="outline"
-                aria-disabled={!engaged || undefined}
-                className="aria-disabled:cursor-not-allowed aria-disabled:opacity-64"
-                aria-label={stopLabel}
-                onClick={() => {
-                  if (engaged) props.onAction("stop");
-                }}
-              >
-                <SquareIcon className="size-3.5" aria-hidden />
-                <span className="ml-0.5">Stop</span>
-              </Button>
-            }
-          />
-          <TooltipPopup side="bottom">{stopLabel}</TooltipPopup>
-        </Tooltip>
-      </div>
-    );
+    return disabledPlayButton;
   }
 
   return (

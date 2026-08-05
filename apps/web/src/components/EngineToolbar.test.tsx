@@ -49,8 +49,40 @@ function htmlEncodeAttributeValue(value: string): string {
   return value.replaceAll("'", "&#x27;").replaceAll('"', "&quot;");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function hasAriaLabel(html: string, label: string): boolean {
-  return html.includes(`aria-label="${htmlEncodeAttributeValue(label)}"`);
+  const encodedLabel = escapeRegExp(htmlEncodeAttributeValue(label));
+  return new RegExp(`(?:^|\\s)aria-label="${encodedLabel}"(?:\\s|>)`).test(html);
+}
+
+function hasExactText(html: string, text: string): boolean {
+  return new RegExp(`>${escapeRegExp(htmlEncodeAttributeValue(text))}<`).test(html);
+}
+
+function getButtons(html: string): ReadonlyArray<string> {
+  return html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+}
+
+function findButtonByAriaLabel(html: string, label: string): string | undefined {
+  return getButtons(html).find((button) => hasAriaLabel(button, label));
+}
+
+function findButtonByExactText(html: string, text: string): string | undefined {
+  const exactText = new RegExp(`>${escapeRegExp(htmlEncodeAttributeValue(text))}<`);
+  return getButtons(html).find((button) => exactText.test(button));
+}
+
+function hasClass(html: string, className: string): boolean {
+  const exactClass = escapeRegExp(className);
+  return new RegExp(`class="(?:[^"]* )?${exactClass}(?: [^"]*)?"`).test(html);
+}
+
+function getUnityTransportGroup(html: string): string | undefined {
+  const groups = html.match(/<div[^>]*role="group"[^>]*>[\s\S]*?<\/div>/g) ?? [];
+  return groups.find((group) => hasAriaLabel(group, "Unity transport controls"));
 }
 
 // Whether `text` appears as descendant content of ANY `<button>...</button>`
@@ -61,7 +93,8 @@ function hasAriaLabel(html: string, label: string): boolean {
 // one — this doesn't, which is why it's the one worth keeping.
 function isInsideButton(html: string, text: string): boolean {
   const buttonBlocks = html.match(/<button[^>]*>.*?<\/button>/gs) ?? [];
-  return buttonBlocks.some((block) => block.includes(text));
+  const exactText = new RegExp(`>${escapeRegExp(text)}<`);
+  return buttonBlocks.some((block) => exactText.test(block));
 }
 
 // React's static renderer emits a true boolean `disabled` prop as the
@@ -104,8 +137,9 @@ describe("EngineToolbar three.js Play button accessible name (#111)", () => {
     // real reason IS the accessible name once the control is disabled.
     expect(hasAriaLabel(html, "Run preview")).toBe(false);
     expect(hasAriaLabel(html, reason)).toBe(true);
-    // The tooltip body must be the SAME string, not an independent copy.
-    expect(html).toContain(reason);
+    // `renderToStaticMarkup` omits a closed TooltipPopup, so this suite can
+    // assert the exact accessible name but not duplicate the component's
+    // shared `label` expression as observable tooltip text.
   });
 });
 
@@ -125,20 +159,20 @@ describe("EngineToolbar engine label is a static badge, not a picker", () => {
     expect(hasAriaLabel(html, "Select engine")).toBe(false);
   });
 
-  it("renders the detected engine as plain text content, not inside a <button>", () => {
-    const html = renderToolbar({ resolvedEngineType: "unity" });
+  it("keeps a non-Unity detected engine as plain text content, not inside a <button>", () => {
+    const html = renderToolbar();
 
-    expect(html).toContain(">Unity<");
+    expect(hasExactText(html, "three.js")).toBe(true);
     // A `Badge` with no `render` override is a plain `<span>` — this is the
-    // structural proof that "Unity" isn't sitting inside a clickable
+    // structural proof that "three.js" isn't sitting inside a clickable
     // control of any kind, not just that its own click handler is gone.
-    expect(isInsideButton(html, "Unity")).toBe(false);
+    expect(isInsideButton(html, "three.js")).toBe(false);
   });
 
   it("still renders 'No engine' for the null case", () => {
     const html = renderToolbar({ resolvedEngineType: null });
 
-    expect(html).toContain(">No engine<");
+    expect(hasExactText(html, "No engine")).toBe(true);
   });
 });
 
@@ -214,20 +248,30 @@ function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineTo
 }
 
 describe("EngineToolbar — Unity not-ready state renders the Setup CTA when an install would help", () => {
-  it("renders the filled CTA and a disabled Play beside it", () => {
+  it("renders one filled icon-led 'Setup Integrations' control and a two-button disabled icon-only transport Group", () => {
     const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW, {
       onSetupUnityIntegrations: () => {},
     });
 
-    expect(html).toContain(">Setup Unity Integrations<");
-    // Disabled is asserted structurally (the real `disabled=""` attribute,
-    // via `isDisabled` — see its own doc comment for why a bare
-    // `.includes("disabled")` is NOT safe here), not just "a Play-labelled
-    // button exists somewhere" — a CTA next to an ENABLED Play would be a
-    // materially different (and wrong) state.
-    const playButtons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
-    const disabledPlay = playButtons.find((block) => block.includes(">Play<") && isDisabled(block));
-    expect(disabledPlay).toBeDefined();
+    const setupButton = findButtonByExactText(html, "Setup Integrations");
+    expect(setupButton).toBeDefined();
+    expect(hasClass(setupButton ?? "", "bg-primary")).toBe(true);
+    expect(setupButton ?? "").toMatch(
+      /<svg(?=[^>]*fill="currentColor")(?=[^>]*aria-hidden="true")[^>]*>/,
+    );
+    expect(hasExactText(html, "Setup Unity Integrations")).toBe(false);
+
+    const transport = getUnityTransportGroup(html);
+    expect(transport).toBeDefined();
+    expect(getButtons(transport ?? "")).toHaveLength(2);
+    const reason = UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? "";
+    const playButton = findButtonByAriaLabel(transport ?? "", `Play — ${reason}`);
+    const pauseButton = findButtonByAriaLabel(transport ?? "", `Pause — ${reason}`);
+    expect(playButton).toBeDefined();
+    expect(pauseButton).toBeDefined();
+    expect(isDisabled(playButton ?? "")).toBe(true);
+    expect(isDisabled(pauseButton ?? "")).toBe(true);
+    expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 
   it("does NOT render the CTA when the caller supplies no onSetupUnityIntegrations handler", () => {
@@ -236,33 +280,41 @@ describe("EngineToolbar — Unity not-ready state renders the Setup CTA when an 
     // handler is absent must not render as if it were wired.
     const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW);
 
-    expect(html).not.toContain("Setup Unity Integrations");
+    expect(hasExactText(html, "Setup Integrations")).toBe(false);
+    const unityButton = findButtonByExactText(html, "Unity");
+    expect(unityButton).toBeDefined();
+    expect(
+      hasAriaLabel(unityButton ?? "", UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? ""),
+    ).toBe(true);
   });
 
   it("does NOT render the CTA once Unity is FULLY ready (nothing offered)", () => {
     const html = renderUnityToolbar(UNITY_READY_VIEW, { onSetupUnityIntegrations: () => {} });
 
-    expect(html).not.toContain("Setup Unity Integrations");
+    expect(hasExactText(html, "Setup Integrations")).toBe(false);
   });
 
-  it("S9 (#129): renders the CTA INSIDE the ready trio when the view still offers an install — Play works, chips are off, the click fixes it", () => {
+  it("S9 (#129): replaces the quiet Unity control with the CTA while retaining the ready two-button transport Group", () => {
     const html = renderUnityToolbar(
       { ...UNITY_READY_VIEW, unityInstallOffered: true },
       { onSetupUnityIntegrations: () => {} },
     );
 
-    expect(html).toContain("Setup Unity Integrations");
-    // Still the ready trio around it — offering setup must not demote the
-    // working controls back to the not-ready branch.
-    expect(html).toContain(">Play<");
-    expect(html).toContain(">Stop<");
+    expect(hasExactText(html, "Setup Integrations")).toBe(true);
+    expect(hasExactText(html, "Unity")).toBe(false);
+    const transport = getUnityTransportGroup(html);
+    expect(transport).toBeDefined();
+    expect(getButtons(transport ?? "")).toHaveLength(2);
+    expect(hasAriaLabel(transport ?? "", "Play")).toBe(true);
+    expect(hasAriaLabel(transport ?? "", "Nothing is playing to pause.")).toBe(true);
   });
 
-  it("S9 render is handler-gated like the not-ready CTA: no handler, no CTA, trio intact", () => {
+  it("S9 render is handler-gated: without a handler the quiet Unity control and transport Group remain", () => {
     const html = renderUnityToolbar({ ...UNITY_READY_VIEW, unityInstallOffered: true });
 
-    expect(html).not.toContain("Setup Unity Integrations");
-    expect(html).toContain(">Play<");
+    expect(hasExactText(html, "Setup Integrations")).toBe(false);
+    expect(html.match(/>Unity</g) ?? []).toHaveLength(1);
+    expect(getButtons(getUnityTransportGroup(html) ?? "")).toHaveLength(2);
   });
 });
 
@@ -279,11 +331,12 @@ describe("EngineToolbar — Unity not-ready state withholds the CTA when an inst
       onSetupUnityIntegrations: () => {},
     });
 
-    expect(html).not.toContain("Setup Unity Integrations");
-    // "Show the classifier's own sentence instead" — the disabled Play's
-    // accessible name (already fixed for #107 below) is where that
-    // sentence lands; still present and unchanged by the CTA's absence.
-    expect(hasAriaLabel(html, UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? "")).toBe(true);
+    expect(hasExactText(html, "Setup Integrations")).toBe(false);
+    const unityButton = findButtonByExactText(html, "Unity");
+    expect(unityButton).toBeDefined();
+    expect(
+      hasAriaLabel(unityButton ?? "", UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? ""),
+    ).toBe(true);
   });
 });
 
@@ -301,9 +354,9 @@ describe("EngineToolbar — Unity not-ready state shows a live 'still checking' 
       unitySetupPending: true,
     });
 
-    expect(html).toContain('role="status"');
-    expect(html).toContain('aria-live="polite"');
-    expect(html).toContain("Checking Unity&#x27;s status…");
+    expect(html).toMatch(/(?:^|\s)role="status"(?:\s|>)/);
+    expect(html).toMatch(/(?:^|\s)aria-live="polite"(?:\s|>)/);
+    expect(hasExactText(html, "Checking Unity's status…")).toBe(true);
   });
 
   it("renders nothing extra while NOT pending — purely additive, not a replacement for the existing disabled button/CTA", () => {
@@ -312,11 +365,11 @@ describe("EngineToolbar — Unity not-ready state shows a live 'still checking' 
       unitySetupPending: false,
     });
 
-    expect(html).not.toContain('role="status"');
-    expect(html).not.toContain("Checking Unity&#x27;s status…");
+    expect(html).not.toMatch(/(?:^|\s)role="status"(?:\s|>)/);
+    expect(hasExactText(html, "Checking Unity's status…")).toBe(false);
   });
 
-  it("does not change the disabled Play's own accessible name or tooltip — the pending indicator is a SEPARATE region, not a substitute for the classifier's own reason", () => {
+  it("does not change the disabled Unity control's accessible name or tooltip — the pending indicator is a SEPARATE region, not a substitute for the classifier's own reason", () => {
     const html = renderUnityToolbar({
       ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
       unitySetupPending: true,
@@ -333,87 +386,111 @@ describe("EngineToolbar — Unity not-ready state shows a live 'still checking' 
       { onSetupUnityIntegrations: () => {} },
     );
 
-    expect(html).toContain(">Setup Unity Integrations<");
-    expect(html).toContain('role="status"');
+    expect(hasExactText(html, "Setup Integrations")).toBe(true);
+    expect(html).toMatch(/(?:^|\s)role="status"(?:\s|>)/);
   });
 });
 
-describe("EngineToolbar — Unity ready state renders 'Unity' + the Play/Pause toggle + Stop", () => {
-  it("renders 'Unity' (disabled, bring-to-front not wired up yet) and the toggle reading 'Play' when playState is unknown (null)", () => {
+describe("EngineToolbar — Unity ready state renders one Unity control + a two-button icon transport", () => {
+  it("renders exactly one element carrying the exact Unity label", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW);
+
+    expect(html.match(/>Unity</g) ?? []).toHaveLength(1);
+  });
+
+  it("unknown: renders the quiet disabled Unity control, Play, and disabled Pause with no visible transport words", () => {
     const html = renderUnityToolbar(UNITY_READY_VIEW); // playState: null
 
-    expect(html).toContain(">Unity<");
-    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
-    const unityButton = buttons.find((block) => block.includes(">Unity<"));
+    const unityReason = "Bringing the Unity Editor to the front isn't wired up yet.";
+    const unityButton = findButtonByExactText(html, "Unity");
     expect(unityButton).toBeDefined();
     expect(isDisabled(unityButton ?? "")).toBe(true);
+    expect(hasAriaLabel(unityButton ?? "", unityReason)).toBe(true);
 
-    const playButton = buttons.find((block) => block.includes(">Play<"));
+    const transport = getUnityTransportGroup(html);
+    expect(transport).toBeDefined();
+    expect(getButtons(transport ?? "")).toHaveLength(2);
+    const playButton = findButtonByAriaLabel(transport ?? "", "Play");
     expect(playButton).toBeDefined();
-    // Unlike the not-ready state's Play, THIS Play must be clickable.
     expect(isDisabled(playButton ?? "")).toBe(false);
-    expect(hasAriaLabel(html, "Pause")).toBe(false);
+    expect(hasClass(playButton ?? "", "lucide-play")).toBe(true);
+    const pauseButton = findButtonByAriaLabel(transport ?? "", "Nothing is playing to pause.");
+    expect(pauseButton).toBeDefined();
+    expect(isDisabled(pauseButton ?? "")).toBe(true);
+    expect(hasClass(pauseButton ?? "", "lucide-pause")).toBe(true);
+    expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 
   it("does NOT render the old multi-action Group's play-target chevron for Unity — that stays editor-presence-only", () => {
-    // The mock's pair collapses to a trio with this change (toggle + Stop),
-    // still not the generic editor-presence Group with its trailing
+    // The Unity transport is still not the generic editor-presence Group
+    // with its trailing
     // play-target menu — that control has no Unity equivalent.
     const html = renderUnityToolbar(UNITY_READY_VIEW);
 
     expect(hasAriaLabel(html, "Play target options")).toBe(false);
   });
 
-  // Task: Play/Stop toggle in one slot (owner ruling, 2026-08-05) + Stop as
-  // its own always-visible, disabled-with-a-reason button — proves the
+  // Task: Play/Stop toggle in one slot (owner ruling, 2026-08-05) + Pause as
+  // its own always-visible latch — proves the
   // RENDERED markup for all three `EditorPresencePlayState` values, the
   // half `EngineToolbar.test.ts`'s `resolveUnityPlayToggleAction` suite
   // can't see (that suite proves the pure derivation; this proves the
   // component actually renders what it derives).
-  it("playing: toggle reads 'Pause' and is pressed/engaged; Stop is enabled with no 'nothing to stop' reason", () => {
+  it("playing: the first button is an engaged square labelled Stop and Pause is enabled but not latched", () => {
     const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "playing" });
-    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const transport = getUnityTransportGroup(html) ?? "";
 
-    // No plain "Play" button while playing — the SAME slot now says Pause,
-    // not an ADDITIONAL button alongside it.
-    expect(hasAriaLabel(html, "Play")).toBe(false);
-    const pauseButton = buttons.find((block) => block.includes(">Pause<"));
+    expect(getButtons(transport)).toHaveLength(2);
+    const stopButton = findButtonByAriaLabel(transport, "Stop");
+    expect(stopButton).toBeDefined();
+    expect(isDisabled(stopButton ?? "")).toBe(false);
+    expect(stopButton ?? "").toMatch(/(?:^|\s)aria-pressed="true"(?:\s|>)/);
+    expect(hasClass(stopButton ?? "", "bg-primary")).toBe(true);
+    expect(hasClass(stopButton ?? "", "lucide-square")).toBe(true);
+
+    const pauseButton = findButtonByAriaLabel(transport, "Pause");
     expect(pauseButton).toBeDefined();
     expect(isDisabled(pauseButton ?? "")).toBe(false);
-    expect((pauseButton ?? "").includes('aria-pressed="true"')).toBe(true);
-
-    const stopButton = buttons.find((block) => block.includes(">Stop<"));
-    expect(stopButton).toBeDefined();
-    expect(isDisabled(stopButton ?? "")).toBe(false);
-    expect(hasAriaLabel(html, "Nothing is playing to stop.")).toBe(false);
+    expect(pauseButton ?? "").toMatch(/(?:^|\s)aria-pressed="false"(?:\s|>)/);
+    expect(hasClass(pauseButton ?? "", "lucide-pause")).toBe(true);
+    expect(hasAriaLabel(transport, "Play")).toBe(false);
+    expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 
-  it("paused: toggle reads 'Play' again (resuming is the same wire action as starting) but stays pressed/engaged; Stop stays enabled", () => {
+  it("paused: Play resumes in the first slot and the Pause button alone is visually latched", () => {
     const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "paused" });
-    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const transport = getUnityTransportGroup(html) ?? "";
 
-    expect(hasAriaLabel(html, "Pause")).toBe(false);
-    const playButton = buttons.find((block) => block.includes(">Play<"));
+    expect(getButtons(transport)).toHaveLength(2);
+    const playButton = findButtonByAriaLabel(transport, "Play");
     expect(playButton).toBeDefined();
     expect(isDisabled(playButton ?? "")).toBe(false);
-    expect((playButton ?? "").includes('aria-pressed="true"')).toBe(true);
+    expect(playButton ?? "").toMatch(/(?:^|\s)aria-pressed="false"(?:\s|>)/);
+    expect(hasClass(playButton ?? "", "lucide-play")).toBe(true);
 
-    const stopButton = buttons.find((block) => block.includes(">Stop<"));
-    expect(stopButton).toBeDefined();
-    expect(isDisabled(stopButton ?? "")).toBe(false);
+    const pauseButton = findButtonByAriaLabel(transport, "Pause");
+    expect(pauseButton).toBeDefined();
+    expect(isDisabled(pauseButton ?? "")).toBe(false);
+    expect(pauseButton ?? "").toMatch(/(?:^|\s)aria-pressed="true"(?:\s|>)/);
+    expect(hasClass(pauseButton ?? "", "bg-primary")).toBe(true);
+    expect(hasAriaLabel(transport, "Stop")).toBe(false);
+    expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 
-  it("stopped explicitly (playState: \"stopped\"): Stop is present but disabled, with the stated 'nothing to stop' reason as its accessible name", () => {
+  it("stopped: Play is enabled and Pause is aria-disabled with its exact reason", () => {
     const html = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "stopped" });
-    const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
+    const transport = getUnityTransportGroup(html) ?? "";
 
-    const stopButton = buttons.find((block) => block.includes(">Stop<"));
-    expect(stopButton).toBeDefined();
-    expect(isDisabled(stopButton ?? "")).toBe(true);
-    // Same #107/#111 discipline: the disabled reason IS the accessible name,
-    // not a generic "Stop" a screen reader can't distinguish from working.
-    expect(hasAriaLabel(html, "Nothing is playing to stop.")).toBe(true);
-    expect((stopButton ?? "").includes('aria-label="Stop"')).toBe(false);
+    expect(getButtons(transport)).toHaveLength(2);
+    const playButton = findButtonByAriaLabel(transport, "Play");
+    expect(playButton).toBeDefined();
+    expect(isDisabled(playButton ?? "")).toBe(false);
+    const pauseButton = findButtonByAriaLabel(transport, "Nothing is playing to pause.");
+    expect(pauseButton).toBeDefined();
+    expect(hasNativeDisabled(pauseButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(pauseButton ?? "")).toBe(true);
+    expect(hasAriaLabel(transport, "Pause")).toBe(false);
+    expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 });
 
@@ -446,23 +523,27 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
     expect(hasAriaLabel(html, "Stop")).toBe(true);
     expect(hasAriaLabel(html, "Play target options")).toBe(true);
     // And no Unity-only affordances leak into this path.
-    expect(html).not.toContain("Setup Unity Integrations");
+    expect(hasExactText(html, "Setup Integrations")).toBe(false);
   });
 });
 
-// #107: Play's accessible name used to be the hard-coded literal
+// #107: a disabled control's accessible name used to be the hard-coded literal
 // "No editor connected" regardless of the REAL reason — so a screen reader
 // (and a computer-use QA driver, which reads the accessible name, not the
 // visible tooltip) always heard that generic sentence even when a specific
 // classified reason (Unity's, or editor-presence's) was available.
-describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
-  it("uses Unity's specific classified reason as the accessible name, not the generic literal", () => {
+describe("EngineToolbar — disabled Unity controls' accessible names (#107)", () => {
+  it("uses Unity's specific classified reason on the Unity control and action-prefixed versions on both transport buttons", () => {
     const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW);
+    const reason = UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? "";
 
     expect(hasAriaLabel(html, "No editor connected")).toBe(false);
-    expect(hasAriaLabel(html, UNITY_NOT_READY_INSTALL_OFFERED_VIEW.disabledReason ?? "")).toBe(
-      true,
-    );
+    const unityButton = findButtonByExactText(html, "Unity");
+    expect(unityButton).toBeDefined();
+    expect(hasAriaLabel(unityButton ?? "", reason)).toBe(true);
+    const transport = getUnityTransportGroup(html) ?? "";
+    expect(hasAriaLabel(transport, `Play — ${reason}`)).toBe(true);
+    expect(hasAriaLabel(transport, `Pause — ${reason}`)).toBe(true);
   });
 
   it("still falls back to a stated generic reason for editor-presence with nothing connected (never the old literal)", () => {
@@ -492,7 +573,7 @@ describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
   });
 });
 
-// QA round 2 (#124): a live computer-use pass hovered the disabled Play
+// QA round 2 (#124): a live computer-use pass hovered a disabled control
 // button in the chat header for ~1.8s — the accessible name read correctly
 // on focus, but no visible tooltip ever appeared. Root cause: a browser
 // skips a natively `disabled` element during hit-testing, so it never
@@ -510,7 +591,7 @@ describe("EngineToolbar — disabled Play's accessible name (#107)", () => {
 // These tests can only prove the STRUCTURAL precondition for hover to work
 // — the native `disabled` attribute is genuinely gone, `aria-disabled`
 // genuinely present — not that hovering actually opens the tooltip, and
-// not that the Stop button's click guard actually no-ops on a real click.
+// not that a disabled transport button's click guard no-ops on a real click.
 // Both remain open until the next live QA pass.
 function hasNativeDisabled(buttonHtml: string): boolean {
   return /\sdisabled=""/.test(buttonHtml);
@@ -520,60 +601,65 @@ function hasAriaDisabledTrue(buttonHtml: string): boolean {
   return /\saria-disabled="true"/.test(buttonHtml);
 }
 
-function findButtonByContent(html: string, marker: string): string | undefined {
-  const buttons = html.match(/<button[^>]*>[\s\S]*?<\/button>/g) ?? [];
-  return buttons.find((block) => block.includes(marker));
-}
-
 describe("EngineToolbar — disabled-with-tooltip controls stay hoverable/focusable (#124)", () => {
-  it("the disabled Play button (Unity not-ready, no install offered) uses aria-disabled, never the native attribute", () => {
+  it("all three Unity controls in the not-ready/no-install state use aria-disabled, never the native attribute", () => {
     const html = renderUnityToolbar(UNITY_NOT_READY_NO_INSTALL_VIEW);
-    const playButton = findButtonByContent(html, ">Play<");
+    const reason = UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? "";
+    const unityButton = findButtonByExactText(html, "Unity");
+    const transport = getUnityTransportGroup(html) ?? "";
+    const playButton = findButtonByAriaLabel(transport, `Play — ${reason}`);
+    const pauseButton = findButtonByAriaLabel(transport, `Pause — ${reason}`);
 
+    expect(unityButton).toBeDefined();
     expect(playButton).toBeDefined();
+    expect(pauseButton).toBeDefined();
+    expect(hasNativeDisabled(unityButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(unityButton ?? "")).toBe(true);
     expect(hasNativeDisabled(playButton ?? "")).toBe(false);
     expect(hasAriaDisabledTrue(playButton ?? "")).toBe(true);
+    expect(hasNativeDisabled(pauseButton ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(pauseButton ?? "")).toBe(true);
   });
 
   it("the 'Bring Unity to the front' button uses aria-disabled, never the native attribute", () => {
     const html = renderUnityToolbar(UNITY_READY_VIEW);
-    const unityButton = findButtonByContent(html, ">Unity<");
+    const unityButton = findButtonByExactText(html, "Unity");
 
     expect(unityButton).toBeDefined();
     expect(hasNativeDisabled(unityButton ?? "")).toBe(false);
     expect(hasAriaDisabledTrue(unityButton ?? "")).toBe(true);
   });
 
-  it("Stop uses aria-disabled (never native) while nothing is playing, and carries no disabled marker at all once engaged", () => {
+  it("Pause uses aria-disabled (never native) while stopped, and carries no disabled marker while playing", () => {
     const stoppedHtml = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "stopped" });
-    const stopButtonStopped = findButtonByContent(stoppedHtml, ">Stop<");
-    expect(stopButtonStopped).toBeDefined();
-    expect(hasNativeDisabled(stopButtonStopped ?? "")).toBe(false);
-    expect(hasAriaDisabledTrue(stopButtonStopped ?? "")).toBe(true);
+    const pauseButtonStopped = findButtonByAriaLabel(stoppedHtml, "Nothing is playing to pause.");
+    expect(pauseButtonStopped).toBeDefined();
+    expect(hasNativeDisabled(pauseButtonStopped ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(pauseButtonStopped ?? "")).toBe(true);
 
     const playingHtml = renderUnityToolbar({ ...UNITY_READY_VIEW, playState: "playing" });
-    const stopButtonPlaying = findButtonByContent(playingHtml, ">Stop<");
-    expect(stopButtonPlaying).toBeDefined();
-    expect(hasNativeDisabled(stopButtonPlaying ?? "")).toBe(false);
-    expect(hasAriaDisabledTrue(stopButtonPlaying ?? "")).toBe(false);
+    const pauseButtonPlaying = findButtonByAriaLabel(playingHtml, "Pause");
+    expect(pauseButtonPlaying).toBeDefined();
+    expect(hasNativeDisabled(pauseButtonPlaying ?? "")).toBe(false);
+    expect(hasAriaDisabledTrue(pauseButtonPlaying ?? "")).toBe(false);
   });
 
   it("the disabled three.js Play button uses aria-disabled, never the native attribute, and stays wrapped in its Tooltip", () => {
     const reason = "Preview only runs in the DevGame desktop app, not a browser tab.";
     const html = renderToolbar({ threeJsUnavailableReason: reason });
-    const playButton = findButtonByContent(html, ">Play<");
+    const playButton = findButtonByExactText(html, "Play");
 
     expect(playButton).toBeDefined();
     expect(hasNativeDisabled(playButton ?? "")).toBe(false);
     expect(hasAriaDisabledTrue(playButton ?? "")).toBe(true);
     // The tooltip body is still present — the fix touches the attribute
     // mechanism, not whether the Tooltip wrapper is there at all.
-    expect(html).toContain(reason);
+    expect(html).toMatch(new RegExp(escapeRegExp(reason)));
   });
 
   it("the enabled three.js Play button carries no aria-disabled marker at all", () => {
     const html = renderToolbar({ onPlayThreeJs: () => {} });
-    const playButton = findButtonByContent(html, ">Play<");
+    const playButton = findButtonByExactText(html, "Play");
 
     expect(playButton).toBeDefined();
     expect(hasAriaDisabledTrue(playButton ?? "")).toBe(false);

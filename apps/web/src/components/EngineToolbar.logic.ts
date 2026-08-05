@@ -18,8 +18,8 @@ import type {
  *
  * What DID change (owner ruling, 2026-08-05, verbatim: "play and stop are
  * the main ones for now, same area (toggle essentially) when unity is on
- * play, shows pause there, and vice verse etc."): Unity's PRESENTATION only
- * now shows a single button in the slot that used to be Play-only, and
+ * play, shows pause there, and vice verse etc."): Unity's PRESENTATION now
+ * uses a Play/Stop toggle followed by a separate Pause latch, and
  * picks which of these values to send by reading the current `playState` —
  * never by counting clicks or flipping local UI state, which is exactly the
  * risk an earlier version of this comment warned against ("collapsing them
@@ -29,7 +29,7 @@ import type {
  * derives its answer from `playState`, the same presence/re-read
  * `UnityEditorStatus` source `isPlayEngaged` already reads — never "I
  * clicked this recently." See `EngineToolbar.tsx`'s Unity ready-state doc
- * comment for the toggle's exact behaviour and where Stop lives. Godot/
+ * comment for the transport's exact behaviour. Godot/
  * Unreal's `editor-presence` backend is UNCHANGED by this — still four
  * separate buttons, still exactly this type's four literals, one each.
  */
@@ -489,14 +489,12 @@ export function isPlayEngaged(playState: EditorPresencePlayState | null): boolea
 }
 
 /**
- * What the Unity ready-state's Play/Pause toggle (`EngineToolbar.tsx`, one
- * button in the slot that used to be Play-only) should send on its next
- * click — owner ruling, 2026-08-05, verbatim: "play and stop are the main
- * ones for now, same area (toggle essentially) when unity is on play, shows
- * pause there, and vice verse etc."
+ * What the first button in Unity's Play/Stop transport segment should send
+ * on its next click. It ends a playing session and starts or resumes every
+ * other known state.
  *
  * Only two of the three `EditorPresencePlayState` values get their own
- * face here — `"playing"` ⇒ `"pause"`, everything else ⇒ `"play"` — which
+ * face here — `"playing"` ⇒ `"stop"`, everything else ⇒ `"play"` — which
  * means `"stopped"` AND `"paused"` share the `"play"` face. That's a
  * deliberate reading of "vice verse etc.," not an oversight: `"play"` is
  * literally the correct wire action to RESUME a paused session (there is
@@ -510,15 +508,20 @@ export function isPlayEngaged(playState: EditorPresencePlayState | null): boolea
  * into the same `"play"` face — showing Pause would claim knowledge of a
  * playing session this client has no evidence for.
  *
- * Stop is DELIBERATELY not a value this function can return — see
- * `EngineToolbar.tsx`'s Unity ready-state doc comment for where Stop lives
- * instead (its own always-visible button, not folded into this toggle) and
- * why: the owner's "play and stop are the main ones" names Stop as a real,
- * present control in its own right, not a state this one button cycles
- * through.
+ * Pause remains a separate latch and always dispatches `"pause"`.
  */
 export function resolveUnityPlayToggleAction(
   playState: EditorPresencePlayState | null,
-): "play" | "pause" {
-  return playState === "playing" ? "pause" : "play";
+): "play" | "stop" {
+  return playState === "playing" ? "stop" : "play";
+}
+
+/** Whether Unity's separate Pause button should use its engaged visual. */
+export function isUnityPauseEngaged(playState: EditorPresencePlayState | null): boolean {
+  return playState === "paused";
+}
+
+/** A running or paused session can be paused; stopped and unknown cannot. */
+export function isUnityPauseAvailable(playState: EditorPresencePlayState | null): boolean {
+  return playState === "playing" || playState === "paused";
 }

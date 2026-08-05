@@ -4,6 +4,8 @@ import { describe, expect, it } from "vite-plus/test";
 import type { EditorPresenceEntry } from "../editorPresence/protocol";
 import {
   isPlayEngaged,
+  isUnityPauseAvailable,
+  isUnityPauseEngaged,
   isUnityPlayReady,
   resolveEngineDispatchBackend,
   resolveEngineToolbarView,
@@ -942,14 +944,14 @@ describe("resolveEngineToolbarView — editor-presence backend (Godot today)", (
   });
 });
 
-// Task: Unity's ready-state Play/Pause toggle collapses into ONE button —
+// Task: Unity's ready-state Play/Stop toggle collapses into ONE button —
 // owner ruling, 2026-08-05. Every `EditorPresencePlayState` value gets its
 // own case, same one-explicit-case-per-value discipline the rest of this
 // file uses, so a state that silently stops mapping correctly shows up as
 // a specific failing case rather than an unrelated one drifting quietly.
 describe("resolveUnityPlayToggleAction", () => {
-  it('returns "pause" while playing — clicking the toggle should pause a running session', () => {
-    expect(resolveUnityPlayToggleAction("playing")).toBe("pause");
+  it('returns "stop" while playing — the engaged square ends the running session', () => {
+    expect(resolveUnityPlayToggleAction("playing")).toBe("stop");
   });
 
   it('returns "play" while stopped — clicking the toggle should start a stopped session', () => {
@@ -977,5 +979,23 @@ describe("isPlayEngaged", () => {
   });
   it("is not engaged when unknown", () => {
     expect(isPlayEngaged(null)).toBe(false);
+  });
+});
+
+describe("isUnityPauseEngaged", () => {
+  it("is engaged only while paused", () => {
+    expect(isUnityPauseEngaged("paused")).toBe(true);
+    expect(isUnityPauseEngaged("playing")).toBe(false);
+    expect(isUnityPauseEngaged("stopped")).toBe(false);
+    expect(isUnityPauseEngaged(null)).toBe(false);
+  });
+});
+
+describe("isUnityPauseAvailable", () => {
+  it("is available while playing or paused, but not while stopped or unknown", () => {
+    expect(isUnityPauseAvailable("playing")).toBe(true);
+    expect(isUnityPauseAvailable("paused")).toBe(true);
+    expect(isUnityPauseAvailable("stopped")).toBe(false);
+    expect(isUnityPauseAvailable(null)).toBe(false);
   });
 });
