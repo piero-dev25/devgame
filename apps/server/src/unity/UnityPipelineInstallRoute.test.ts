@@ -61,6 +61,7 @@ function makeUnityPipelineClientSpy(): {
         calls.push({ method: "install", workspaceRoot });
         return Effect.succeed(outcome);
       },
+      open: () => Effect.die("unexpected open call"),
     }),
   );
   return { layer, calls };

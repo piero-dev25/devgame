@@ -43,14 +43,28 @@
  * "Choose by probing the lockfile, not by remembering what we launched."
  *
  * SCOPE: this module builds the decision and the launch plan (argv) only —
- * it does not itself spawn a process. No caller wires either path to a real
- * process-spawn or an RPC/toolbar trigger yet, mirroring
- * `EditorPresenceRoute.ts`'s `dispatchEditorCommand`, which shipped in task
- * #47 with zero RPC callers for the identical reason ("build the capability,
- * the caller comes later"). A future caller (the toolbar's dispatch, task
- * #52, or a CLI command) composes `resolveUnityLaunchPlan` with its own
- * process-spawn mechanism — `ProcessRunner` (`../processRunner.ts`), the
- * same one `UnityPipelineClient.ts` already uses for the warm path.
+ * it does not itself spawn a process. For roughly a day after task #49
+ * shipped, `resolveUnityLaunchPlan`/`buildUnityColdStartArgs` had zero
+ * callers anywhere in the codebase despite being tested and VERIFIED live
+ * — found live by task #92's own cost analysis of the Unity setup flow's
+ * "open Unity" not-ready states (S5/S6), which turned out to already have
+ * a built, unwired fix rather than needing new engineering.
+ *
+ * `UnityPipelineClient.ts`'s `open` method is the first real caller: it
+ * imports `buildUnityColdStartArgs` directly (this module stays the sole
+ * source of truth for the argv) and spawns it via `ProcessRunner`
+ * (`../processRunner.ts`) with `detached: true` — see that method's own
+ * doc comment. `resolveUnityLaunchPlan`/`resolveUnityLaunchPlanForProject`'s
+ * warm/cold BRANCHING decision is not what gates that caller, though —
+ * `UnityColdStartRoute.ts` (this directory) uses `unity pipeline list
+ * --json`'s live instance state for that instead (the same authoritative
+ * signal `UnitySetupClassifier.ts` trusts, not this module's cheaper but
+ * staleness-prone lockfile probe — a crashed Editor can leave
+ * `Temp/UnityLockfile` behind with nothing actually running). This
+ * module's exports remain available for a future caller that specifically
+ * wants the cheap pre-flight lockfile check (e.g. the toolbar's own
+ * Play/Stop dispatch, task #52, still unwired to either path as of this
+ * writing) rather than paying for a `pipeline list` round trip up front.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";

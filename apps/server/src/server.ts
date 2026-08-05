@@ -32,6 +32,7 @@ import { unityPipelineInstallRouteLayer } from "./unity/UnityPipelineInstallRout
 import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
 import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
 import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
+import { unityColdStartRouteLayer } from "./editorPresence/UnityColdStartRoute.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -541,6 +542,7 @@ export const makeRoutesLayer = Layer.mergeAll(
     editorPresenceCommandRouteLayer,
     unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unityPipelineInstallRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityColdStartRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
   ),

@@ -32,6 +32,20 @@ export interface ProcessRunInput {
    * Partial stdout/stderr are not preserved.
    */
   readonly timeoutBehavior?: "error" | "timedOutResult" | undefined;
+  /**
+   * Passed straight through to the spawned `ChildProcess`'s own `detached`
+   * option (`effect/unstable/process/ChildProcess`). Every existing caller
+   * leaves this unset (a normal foreground run-to-completion process); it
+   * exists for the one case this repo has so far
+   * (`UnityPipelineClient.ts`'s `open`, task #92's cold-start wiring) where
+   * the spawned command's eventual EFFECT is a separate, long-lived process
+   * (a GUI Editor) the server should never be tied to the lifetime of —
+   * mirrors `externalLauncher.ts`'s own `DETACHED_IGNORE_STDIO_OPTIONS.detached`
+   * for the identical reason, just inside `ProcessRunner`'s run-and-collect
+   * model (which still waits for and returns THIS invocation's own stdout/
+   * exit code) instead of that module's fire-and-forget one.
+   */
+  readonly detached?: boolean | undefined;
 }
 
 export interface ProcessRunOutput {
@@ -307,6 +321,7 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
               extendEnv,
             }
           : {}),
+        ...(input.detached !== undefined ? { detached: input.detached } : {}),
         shell: spawnCommand.shell,
       }),
     )

@@ -795,3 +795,95 @@ describe("install", () => {
       }),
   );
 });
+
+function unityOpenEnvelope(
+  fields: { readonly success?: boolean; readonly data?: unknown } = {},
+): string {
+  return JSON.stringify({
+    success: fields.success ?? true,
+    command: "open",
+    data: fields.data ?? null,
+    errors: [],
+    warnings: [],
+  });
+}
+
+describe("open (task #92's cold-start wiring — UnityColdStart.ts had zero callers before this)", () => {
+  it.effect("a successful envelope maps to { _tag: 'ok', value: { launched: true } }", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([unityOpenEnvelope()]);
+      const result = yield* withClient(runner.run, (client) => client.open(PROJECT));
+      expect(result).toEqual({ _tag: "ok", value: { launched: true } });
+    }),
+  );
+
+  it.effect(
+    "invokes exactly `unity open <workspaceRoot> --json`, pins cwd to workspaceRoot, spawns detached, and never reconstructs the argv independently of UnityColdStart.ts's buildUnityColdStartArgs",
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ProcessRunner.ProcessRunInput> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seen.push(input);
+          return okOutput(unityOpenEnvelope());
+        };
+        yield* withClient(runner, (client) => client.open(PROJECT));
+        expect(seen).toHaveLength(1);
+        const input = seen[0]!;
+        expect(input.command).toBe("unity");
+        expect(input.args).toEqual(["open", PROJECT, "--json"]);
+        expect(input.cwd).toBe(PROJECT);
+        // The defensive spawn choice this method exists to make — see its
+        // own doc comment: the effect of a successful call is a new,
+        // long-lived GUI process, not something that exits when this call
+        // returns, unlike every other method in this file.
+        expect(input.detached).toBe(true);
+      }),
+  );
+
+  it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([
+        JSON.stringify({
+          success: false,
+          command: "open",
+          data: null,
+          errors: [{ code: "COMMAND_FAILED", message: "Not a Unity project: /tmp/not-a-project" }],
+          warnings: [],
+        }),
+      ]);
+      const result = yield* withClient(runner.run, (client) => client.open(PROJECT));
+      expect(result).toEqual({
+        _tag: "error",
+        message: "Not a Unity project: /tmp/not-a-project",
+      });
+    }),
+  );
+
+  it.effect("unparseable stdout folds into { _tag: 'error' }, never throws", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner(["not json at all"]);
+      const result = yield* withClient(runner.run, (client) => client.open(PROJECT));
+      expect(result._tag).toBe("error");
+    }),
+  );
+
+  it.effect(
+    "a ProcessRunner-level failure (spawn error, timeout, ...) folds into { _tag: 'error' } via the same processRunErrorToResult every other method uses",
+    () =>
+      Effect.gen(function* () {
+        const runner = (
+          _input: ProcessRunner.ProcessRunInput,
+        ): Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError> =>
+          Effect.fail(
+            new ProcessRunner.ProcessTimeoutError({
+              command: "unity",
+              argumentCount: 3,
+              cwd: PROJECT,
+              timeoutMs: 90_000,
+            }),
+          );
+        const result = yield* withClient(runner, (client) => client.open(PROJECT));
+        expect(result._tag).toBe("error");
+      }),
+  );
+});

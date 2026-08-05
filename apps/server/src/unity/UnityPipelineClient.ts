@@ -54,6 +54,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 
+import { buildUnityColdStartArgs } from "../editorPresence/UnityColdStart.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
 const UNITY_CLI_COMMAND = "unity";
@@ -70,6 +71,14 @@ const COMMAND_TIMEOUT_SEC = "35 seconds";
  * not tuned to the smallest project that happened to be measured. */
 const POST_ACTION_STATUS_RETRY_ATTEMPTS = 15;
 const POST_ACTION_STATUS_RETRY_DELAY_MS = 1000;
+
+/** Bounds `open`'s own `unity open ... --json` CLI invocation — a separate,
+ * more generous constant than `COMMAND_TIMEOUT_SEC` because there is no
+ * live-measured number for THIS subcommand yet (see `open`'s own doc
+ * comment: this round's task explicitly forbids launching a real Editor to
+ * get one). Generous because of that uncertainty, not because a real
+ * measurement demanded it — tighten once one exists. */
+const COLD_START_TIMEOUT_SEC = "90 seconds";
 
 /** What the toolbar (#52) may offer for a Unity project reached via this
  * CLI path — deliberately NOT `"step"`: Pipeline has no scriptable
@@ -266,6 +275,18 @@ export interface UnityPipelineInstallResult {
   readonly packageId: string;
   readonly version: string;
   readonly alreadyInstalled: boolean;
+}
+
+/** `unity open <workspaceRoot> --json`'s successful outcome — see `open`'s
+ * own doc comment for why this carries NO fields read from the CLI's own
+ * `data`, unlike every other result type in this file: no live-captured
+ * `unity open --json` success sample exists yet to build a real parser
+ * against (this round's task explicitly forbids launching a real Editor to
+ * get one). `launched: true` asserts only what the envelope's own
+ * `success` flag honestly supports — that the invocation was accepted, NOT
+ * that Unity has finished opening, or even that it will. */
+export interface UnityPipelineOpenResult {
+  readonly launched: true;
 }
 
 function isNullOr<A>(value: unknown, check: (value: unknown) => value is A): value is A | null {
@@ -467,6 +488,43 @@ export class UnityPipelineClient extends Context.Service<
     readonly install: (
       workspaceRoot: string,
     ) => Effect.Effect<UnityPipelineResult<UnityPipelineInstallResult>>;
+    /** `unity open <workspaceRoot> --json` — task #92's cost analysis found
+     * this CAPABILITY already built and VERIFIED live in
+     * `../editorPresence/UnityColdStart.ts` (`buildUnityColdStartArgs`),
+     * with zero callers anywhere in the codebase; this method is the first
+     * one. Builds its argv via that function — the single source of truth
+     * for the invocation shape — rather than reconstructing it here.
+     *
+     * Spawned with `detached: true` (see `ProcessRunner.ts`'s own doc
+     * comment on that option), unlike every other method in this file:
+     * the EFFECT of a successful call is a new, long-lived GUI process
+     * (the Unity Editor itself), not something that exits when this call
+     * returns. `UnityColdStart.ts`'s own doc says the CLI invocation
+     * "return[s] once the launch itself is confirmed (not once the Editor
+     * finishes loading)" — but unlike every other parser in this file,
+     * that has never been measured against a live `unity open --json`
+     * round trip (this round's task explicitly forbids launching a real
+     * Editor to get one). Detaching is the safe choice either way: costs
+     * nothing if the CLI really does return promptly, and is what keeps
+     * this server request from hanging on a full Editor boot if it
+     * doesn't.
+     *
+     * DOES NOT PARSE `data` — see `UnityPipelineOpenResult`'s own doc
+     * comment for why. Only the envelope's own `success`/`errors` fields
+     * are asserted, matching every captured sample this file DOES have
+     * for what's common across subcommands (`parseUnityCliEnvelope`'s doc
+     * comment).
+     *
+     * This method does NOT itself check whether an Editor already has
+     * `workspaceRoot` open — same division of responsibility `install`
+     * already has with the classifier: the CALLER
+     * (`../editorPresence/UnityColdStartRoute.ts`) decides WHETHER to
+     * call this, by checking `list`'s live instance state first, so a
+     * second Editor is never attempted against a project one already
+     * has open. */
+    readonly open: (
+      workspaceRoot: string,
+    ) => Effect.Effect<UnityPipelineResult<UnityPipelineOpenResult>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -659,6 +717,54 @@ export const make = Effect.gen(function* () {
       Effect.catch(processRunErrorToResult<UnityPipelineInstallResult>),
     );
 
+  /** `unity open <workspaceRoot> --json` — see the service interface's own
+   * doc comment above for the full reasoning (capability already existed,
+   * unwired, in `UnityColdStart.ts`; `detached: true`; no `data` parse).
+   * Deliberately does NOT go through `runUnityCommand` — that helper always
+   * prepends `UNITY_CLI_COMMAND` and appends `--json` itself, assuming its
+   * caller supplies only the subcommand-specific args in between
+   * (`["pipeline", "list"]`, etc.). `buildUnityColdStartArgs` already
+   * returns the COMPLETE argv (command name included — see its own doc
+   * comment: "matching how every other spawn site in this repo builds an
+   * argv", written for `externalLauncher.ts`'s convention, not
+   * `runUnityCommand`'s), so reusing it through `runUnityCommand` would
+   * mean re-splitting an already-complete argv apart just to let
+   * `runUnityCommand` reassemble an equivalent one — two places asserting
+   * "this is how you invoke `unity open`" instead of one. Calling
+   * `processRunner.run` directly keeps `UnityColdStart.ts` the SOLE source
+   * of truth for the argv, with this method only responsible for how to
+   * run it and parse the response envelope. */
+  const open: UnityPipelineClient["Service"]["open"] = (workspaceRoot) => {
+    const args = buildUnityColdStartArgs(workspaceRoot);
+    // `args[0]` is always `UNITY_CLI_COMMAND` per `buildUnityColdStartArgs`'s
+    // own contract (asserted by its test suite) — the fallback below exists
+    // only to satisfy the type system's `string | undefined` from indexing
+    // a `ReadonlyArray`, never expected to trigger in practice.
+    const command = args[0] ?? UNITY_CLI_COMMAND;
+    return processRunner
+      .run({
+        command,
+        args: args.slice(1),
+        cwd: workspaceRoot,
+        timeout: COLD_START_TIMEOUT_SEC,
+        detached: true,
+      })
+      .pipe(
+        Effect.map((output): UnityPipelineResult<UnityPipelineOpenResult> => {
+          const envelope = parseUnityCliEnvelope(output.stdout);
+          if (envelope === null) {
+            return { _tag: "error", message: "unparseable response from 'unity open'" };
+          }
+          if (!envelope.success) {
+            const message = envelope.errors[0]?.message ?? "unknown Pipeline error";
+            return { _tag: "error", message };
+          }
+          return { _tag: "ok", value: { launched: true } };
+        }),
+        Effect.catch(processRunErrorToResult<UnityPipelineOpenResult>),
+      );
+  };
+
   return UnityPipelineClient.of({
     isAvailable: () =>
       isCommandAvailable(UNITY_CLI_COMMAND).pipe(
@@ -672,6 +778,7 @@ export const make = Effect.gen(function* () {
     pause: (workspaceRoot) => dispatchAndConfirm("editor_pause", workspaceRoot),
     list,
     install,
+    open,
   });
 });
 
