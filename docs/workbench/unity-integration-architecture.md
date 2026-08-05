@@ -365,12 +365,12 @@ not cached. The rationale at `:43-47` is explicit — without the cache "every r
   was computed, batched, cached, put on the wire, and rendered by nothing. Commit
   `da0d5d247` landed the first consumer while I was working:
 
-  | file                                                  | role                                                                                                                                                                                                            |
-  | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-  | `apps/web/src/engineSelectorStore.ts`                 | zustand store, localStorage-persisted, `overrideByProjectKey` keyed by `scopedProjectKey(ref)`; `selectProjectEngineType(overrides, ref, detectedEngineType)` at `:73-80` resolves override → detected → `null` |
-  | `apps/web/src/components/EngineToolbar.logic.ts`      | pure `resolveEngineToolbarView({engineType, connectedEditor})` at `:64-87` → `{engineType, isThreeJs, hasConnectedEditor, availableActions, playState}`; `isPlayEngaged` at `:94-96`                            |
-  | `apps/web/src/components/EngineToolbar.tsx`           | the rendered toolbar                                                                                                                                                                                            |
-  | `apps/web/src/editorPresence/resolveProjectEditor.ts` | matches a connected editor to a project                                                                                                                                                                         |
+  | file                                                  | role                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+  | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | ~~`apps/web/src/engineSelectorStore.ts`~~             | **DELETED in `c49beccb3`** — kept in this table only so the reference below still parses. Was a localStorage-persisted zustand store whose `overrideByProjectKey` let a client-side choice beat detection. The owner ruled the engine is **detected, never chosen**, so the store and its dropdown went in one change: deleting only the UI would have stranded overrides that still won, with nothing left to correct them. `ChatView.tsx` now reads `activeProject?.engineType` directly. |
+  | `apps/web/src/components/EngineToolbar.logic.ts`      | pure `resolveEngineToolbarView({engineType, connectedEditor})` at `:64-87` → `{engineType, isThreeJs, hasConnectedEditor, availableActions, playState}`; `isPlayEngaged` at `:94-96`                                                                                                                                                                                                                                                                                                        |
+  | `apps/web/src/components/EngineToolbar.tsx`           | the rendered toolbar                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+  | `apps/web/src/editorPresence/resolveProjectEditor.ts` | matches a connected editor to a project                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
   This **strengthens** the recommendation rather than weakening it: the consumer that would
   render a Unity status badge now exists, is per-project, and already joins detected
@@ -1650,13 +1650,18 @@ render at `:2259` → `apps/web/src/components/ProjectFavicon.tsx:12-24`. Data h
   `ProjectScriptsControl` (`apps/web/src/components/ProjectScriptsControl.tsx:129`), saved
   via `project.meta.update` (`decider.ts:263-297`) into the `scripts_json` / `default_model`
   columns.
-- **Client-local, per user** — the engine override in
-  `apps/web/src/engineSelectorStore.ts`, zustand + localStorage, keyed by
-  `scopedProjectKey(ref)`. Landed in `da0d5d247`.
+- **Client-local, per user** — ~~the engine override in
+  `apps/web/src/engineSelectorStore.ts`~~. **This option no longer exists.** The store
+  landed in `da0d5d247` and was deleted in `c49beccb3` when the owner ruled the engine is
+  **detected, never chosen**.
 
-That gives a **third** attachment option beyond §1.5's two, and it is the right one for a
-_user preference_ about Unity (e.g. "which editor version this project should use") as
-opposed to a _derived fact_ about it.
+That would have given a **third** attachment option beyond §1.5's two, and the reasoning
+below still holds for a genuine _user preference_ about Unity (e.g. "which editor version
+this project should use") as opposed to a _derived fact_ about it. But note what the
+deletion taught: engine type looked like a preference and was not — it is derived from the
+project on disk, and letting a client-side choice beat detection only created a way for the
+two to disagree with no way to reconcile them. **Check that a candidate is really a
+preference before reaching for this pattern.**
 
 **Lifecycle / status state: none exists.** `VERIFIED` — no project lifecycle state anywhere.
 The nearest analogue is the thread-activity dot: `resolveProjectStatusIndicator`
