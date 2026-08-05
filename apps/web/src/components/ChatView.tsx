@@ -5409,7 +5409,32 @@ function ChatViewContent(props: ChatViewProps) {
   // `shouldOfferUnityPipelineInstall`'s own doc comment).
   const handleSetupUnityIntegrations = useCallback(() => {
     const prepared = readPreparedConnection(environmentId);
-    if (!prepared) return;
+    if (!prepared) {
+      // Merge-gate review finding F2 on `e26534e1b`: this used to be a
+      // silent `if (!prepared) return;` — the exact bail #106 already
+      // proved is a defect (`readPreparedConnection` is the synchronous
+      // one-shot snapshot #106's root cause; see `unitySetupProbeAtom.ts`'s
+      // own doc comment), now caught here on a CLICKED PRIMARY CTA instead
+      // of a background probe. This handler's own governing rule is "the
+      // click IS the consent" — a click that produces literally nothing
+      // (no install, no toast, no console line) breaks that promise worse
+      // than a silent no-op anywhere else in this file, since every OTHER
+      // outcome below already produces a toast. `handleEngineAction`'s two
+      // branches have the identical bail for the SAME reason (a dropped/
+      // re-preparing connection between probe-resolve and click) but stay
+      // silent by design there — Play/Pause/Stop are driven by presence,
+      // which self-corrects on the next state update; this CTA has no such
+      // self-correction, so leaving the user with zero feedback here is a
+      // materially worse dead end.
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't reach this project's connection",
+          description: "The connection isn't ready yet — wait a moment and try again.",
+        }),
+      );
+      return;
+    }
     void postUnityPipelineInstall({
       httpBaseUrl: prepared.httpBaseUrl,
       httpAuthorization: prepared.httpAuthorization,

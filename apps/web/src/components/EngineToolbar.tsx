@@ -100,11 +100,18 @@ export interface EngineToolbarProps {
    */
   readonly onRetryUnitySetup?: () => void;
   /**
-   * Seeds a new chat turn asking the agent to diagnose and fix this
-   * project's Unity setup — the CTA's whole job (see
-   * `unitySetupPrompt.ts`'s doc comment: the click IS the consent,
-   * `.agents/skills/unity-setup/SKILL.md` doesn't ask again). Only ever
-   * rendered/called for the `"unity-cli"` backend's not-ready state.
+   * Installs Unity's Pipeline package directly — no chat turn, no agent, no
+   * second confirmation dialog (owner ruling, mid-build revision: the click
+   * IS the consent). Calls `postUnityPipelineInstall` (see
+   * `ChatView.tsx`'s `handleSetupUnityIntegrations`, the sole implementation
+   * of this prop). Only ever rendered/called for the `"unity-cli"`
+   * backend's not-ready state, and only while `EngineToolbarView.unityInstallOffered`
+   * is true — see that field's own doc comment in `EngineToolbar.logic.ts`
+   * for exactly which not-ready reasons an install can fix.
+   *
+   * `unitySetupPrompt.ts` — the chat-turn prompt builder this doc comment
+   * used to point at — was deleted with the CTA's install-direct revision;
+   * do not resurrect that reference for a second caller of this prop.
    */
   readonly onSetupUnityIntegrations?: () => void;
 }
