@@ -1,5 +1,19 @@
 # Final QA pass — DevGame, all three features
 
+> **This is the QA SPECIFICATION — the source of truth for WHAT to verify.
+> It is NOT the runnable Codex handoff.** The operational handoff adds the
+> Item 0 preflight (`get_app_state` access check), the sandbox's writable
+> paths, and the `REPORT.md` output contract this document doesn't define.
+> It lives in the dispatch workspace at
+> `/Users/pieroherrera/Projects/gamedev-workbench/.claude/worktrees/substrate-research/evidence/qa-final-pass/HANDOFF.md`,
+> alongside the `REPORT.md`/`screenshots/` it already writes to.
+>
+> **Do not dispatch a Codex computer-use run against this file.**
+>
+> After the QA pass completes, the full evidence bundle (operational
+> handoff + REPORT.md + screenshots) moves into this directory as the
+> permanent record.
+
 Live UI verification with **computer use**, on a running packaged app. Screenshots
 throughout, with direct UI/UX critique. This is the pass that closes the goal.
 
