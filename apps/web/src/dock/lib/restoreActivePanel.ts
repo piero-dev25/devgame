@@ -1,5 +1,7 @@
 import type { DockviewApi } from "dockview";
 
+import { selectActivePanelForKey } from "~/dockActiveSelectionStore";
+
 /**
  * The core decision behind restoring a thread's remembered dock selection
  * (task #108, "dock tab selection leaks across chats") — extracted the same
@@ -42,4 +44,48 @@ export function restoreActivePanelForKey(
   if (fallbackPanelId !== undefined) {
     api.getPanel(fallbackPanelId)?.api.setActive();
   }
+}
+
+/**
+ * Combines `selectActivePanelForKey` (dockActiveSelectionStore.ts) with
+ * `restoreActivePanelForKey` above into the ONE decision `DockviewLayout.tsx`
+ * needs at BOTH of its call sites — the activation-key-change effect (a
+ * thread switch on an already-mounted dock) and `loadInitialLayout`'s own
+ * post-mount correction (F3, 2026-08-05 merge-gate review: neither
+ * `api.fromJSON(...)` nor `applyPreset`'s own `fromJSON` know about
+ * per-thread selection — they apply whatever `activeGroup`/`activeView` the
+ * shared layout blob or the static preset happened to carry — so the dock's
+ * initial mount needs the identical correction a later thread switch
+ * already gets, or the very first thread shown after a reload never has its
+ * remembered selection applied).
+ *
+ * Extracted here (not left as a component-local closure) specifically so
+ * BOTH the `String(activationKey)` conversion and the `undefined` guard —
+ * neither previously exercised by a test, since the pre-F3 test suite only
+ * ever called `restoreActivePanelForKey` with an already-computed
+ * `rememberedPanelId` — have one tested home instead of two untested
+ * inline copies.
+ *
+ * `activationKey === undefined` (no thread yet) is a silent no-op, matching
+ * `DockviewLayout.tsx`'s own `onDidActivePanelChange` write-side guard for
+ * the identical case.
+ */
+export function restoreActivePanelForThread(
+  api: DockviewApi,
+  {
+    byActivationKey,
+    activationKey,
+    fallbackPanelId,
+  }: {
+    byActivationKey: Record<string, string>;
+    activationKey: string | number | undefined;
+    fallbackPanelId?: string;
+  },
+): void {
+  if (activationKey === undefined) return;
+  const rememberedPanelId = selectActivePanelForKey(byActivationKey, String(activationKey));
+  restoreActivePanelForKey(api, {
+    rememberedPanelId,
+    ...(fallbackPanelId !== undefined ? { fallbackPanelId } : {}),
+  });
 }

@@ -50,7 +50,7 @@ export { openPanelInDock, togglePanelInDock } from "./openPanel";
 // Task #108: the core decision behind restoring a thread's remembered
 // active-panel selection — same "no jsdom to drive the ref" extraction
 // reason as openPanelInDock/togglePanelInDock above.
-export { restoreActivePanelForKey } from "./restoreActivePanel";
+export { restoreActivePanelForKey, restoreActivePanelForThread } from "./restoreActivePanel";
 // Task #109: which groups should be hidden from assistive tech while
 // another group is maximized — same extraction reason as the others above.
 export {

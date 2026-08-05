@@ -39,7 +39,7 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "~/components/ui/button";
-import { selectActivePanelForKey, useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
+import { useDockActiveSelectionStore } from "~/dockActiveSelectionStore";
 import { cn } from "~/lib/utils";
 
 import {
@@ -53,7 +53,7 @@ import {
   migrateLoadedLayout,
   openPanelInDock,
   parseLayoutFile,
-  restoreActivePanelForKey,
+  restoreActivePanelForThread,
   syncFloatingConstraints,
   togglePanelInDock,
   type LayoutPresetFactory,
@@ -349,18 +349,47 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     }, [storage]);
 
     // Fix round, finding #5, EXTENDED for task #108 ("dock tab selection
-    // leaks across chats"): whenever `activationKey` (that route's thread
-    // identity) changes — including on this component's OWN first render,
-    // which naturally no-ops harmlessly if `apiRef.current` isn't populated
-    // yet (nothing has loaded to activate) — this brings the RIGHT panel to
-    // the front of its group. "Right" now means: this thread's OWN
-    // remembered selection (`dockActiveSelectionStore.ts`, written by the
-    // mount effect's `onDidActivePanelChange` subscription below) if it has
-    // one and that panel is still open; otherwise `activateOnChangeId`'s
-    // panel (Chat), the original fix-round #5 behaviour, unchanged for a
-    // thread with no remembered selection yet (e.g. never visited before) —
-    // see `restoreActivePanelForKey`'s own doc comment for why that
-    // precedence, not a flag, is what keeps #5's original guarantee true.
+    // leaks across chats") and F3 (2026-08-05, merge-gate review): brings
+    // THIS thread's own remembered selection (`dockActiveSelectionStore.ts`,
+    // written by the mount effect's `onDidActivePanelChange` subscription
+    // below) to the front of its group if it has one and that panel is
+    // still open; otherwise `activateOnChangeId`'s panel (Chat), the
+    // original fix-round #5 behaviour, unchanged for a thread with no
+    // remembered selection yet (never visited before) — see
+    // `restoreActivePanelForKey`'s own doc comment for why that precedence,
+    // not a flag, is what keeps #5's original guarantee true. Takes `api`
+    // directly (not read from `apiRef.current` internally) so the SAME
+    // function serves two call sites with different timing: the
+    // activation-key-change effect below (`api` already lives in
+    // `apiRef.current` there) AND `loadInitialLayout`'s own correction
+    // inside the mount effect further down (`api` is a fresh local variable
+    // there — `apiRef.current` isn't assigned until AFTER `createDockview`
+    // returns, later in that same effect).
+    //
+    // F3 root cause this closes: `activationKeyRef.current` is what makes
+    // this safe to call from `loadInitialLayout` — it's set by the
+    // activation-key effect below, which (by React's declaration-order
+    // effect execution) always runs BEFORE the mount effect within the same
+    // commit, even on this component's very first render, when the mount
+    // effect hasn't assigned `apiRef.current` yet and that effect's own
+    // `api`-dependent branch below no-ops for exactly that reason.
+    const restoreActivePanelForCurrentThread = useCallback(
+      (api: DockviewApi) => {
+        restoreActivePanelForThread(api, {
+          byActivationKey: useDockActiveSelectionStore.getState().byActivationKey,
+          activationKey: activationKeyRef.current,
+          ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
+        });
+      },
+      [activateOnChangeId],
+    );
+
+    // Whenever `activationKey` (that route's thread identity) changes —
+    // including on this component's OWN first render, which naturally
+    // no-ops harmlessly if `apiRef.current` isn't populated yet (nothing
+    // has loaded to activate; `loadInitialLayout`'s own correction below
+    // covers that first-mount case instead, once the dock actually
+    // exists) — restore this thread's own panel selection.
     //
     // Deliberately NOT part of the main mount effect below: that effect
     // intentionally does NOT re-run on a thread switch (see ChatDock.tsx's
@@ -371,16 +400,10 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       activationKeyRef.current = activationKey;
       const api = apiRef.current;
       if (!api || activationKey === undefined) return;
-      const rememberedPanelId = selectActivePanelForKey(
-        useDockActiveSelectionStore.getState().byActivationKey,
-        String(activationKey),
-      );
-      restoreActivePanelForKey(api, {
-        rememberedPanelId,
-        ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
-      });
-      // Deliberately `activateOnChangeId`-less deps — it's a caller-supplied
-      // constant (ChatDock.tsx passes the same panel id every render); only
+      restoreActivePanelForCurrentThread(api);
+      // Deliberately `restoreActivePanelForCurrentThread`-less deps — same
+      // "stable caller-supplied identity" reasoning that function's own
+      // `useCallback` already applies to `activateOnChangeId`; only
       // `activationKey`'s IDENTITY is meant to retrigger this.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activationKey]);
@@ -726,6 +749,25 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         }
 
         for (const group of api.groups) syncFloatingConstraints(group, panelRegistry);
+
+        // F3 (2026-08-05, merge-gate review): every branch above —
+        // `api.fromJSON(migration.tree)` on the success path, or
+        // `applyPreset`'s own `api.fromJSON(...)` on every fallback path —
+        // applies a tree whose `activeGroup`/`activeView` came from the
+        // SHARED, per-workspace blob (or the preset's own static default),
+        // neither of which knows about the CURRENT thread. That is exactly
+        // the global-selection leak task #108 removed everywhere else;
+        // this was the one path (the dock's OWN initial mount) it never
+        // reached, because the activation-key effect above only fires on a
+        // CHANGE to `activationKey`, and this component's first mount does
+        // not produce one. Correcting here — using
+        // `activationKeyRef.current`, already set by that effect earlier in
+        // this same commit, before `apiRef.current` even existed — closes
+        // that gap. Must run BEFORE the auto-save subscriptions just below:
+        // `restoreActivePanelForKey`'s `panel.api.setActive()` fires
+        // `onDidLayoutChange`, and this correction is not itself a change
+        // worth persisting.
+        restoreActivePanelForCurrentThread(api);
 
         // Two subscriptions, not one: `onDidLayoutChange` is buffered onto a
         // microtask and covers general layout changes (resize, move, add,
