@@ -11,10 +11,12 @@
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as TestClock from "effect/testing/TestClock";
 
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as ServerConfig from "../config.ts";
@@ -451,6 +453,73 @@ describe("UnitySetupProbe", () => {
         Effect.map((result) => {
           expect(result.primary.state).toBe("S1");
           expect(result.facts.isUnityProject).toBe(true);
+        }),
+      ),
+  );
+
+  it.effect(
+    "pairing grace window: S10' right after boot, S10 once TestClock crosses it — same probe instance, same serverStartedAtMs capture (#118)",
+    () =>
+      runProbeTest(
+        (cwd) =>
+          stubPipelineClient({
+            list: () =>
+              Effect.succeed({
+                _tag: "ok",
+                value: {
+                  instances: [
+                    {
+                      projectPath: cwd,
+                      pid: 555,
+                      isRunning: true,
+                      hasPipelinePackage: true,
+                      isReachable: true,
+                      pipelineVersion: "0.4.0",
+                      updateAvailable: false,
+                      safeMode: false,
+                    },
+                  ],
+                  latestVersion: null,
+                  unparseableInstanceCount: 0,
+                },
+              }),
+          }),
+        (cwd) =>
+          Effect.gen(function* () {
+            // Pipeline fully green, selection package installed, publisher
+            // deliberately NOT registered — the S9/S10/S10' branch
+            // `UnitySetupProbe.ts`'s own `serverStartedAtMs` doc comment
+            // names as the reason this value needs to be `Clock`-driven.
+            yield* writeTextFile(
+              cwd,
+              "Packages/packages-lock.json",
+              JSON.stringify({
+                dependencies: {
+                  "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
+                  "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                },
+              }),
+            );
+            // ONE probe instance -> ONE `serverStartedAtMs` capture, probed
+            // TWICE against the SAME virtual clock. This is exactly what a
+            // `Date.now()` implementation could never let a test drive
+            // deterministically — before #118's fix, `TestClock.adjust`
+            // below would have had no effect on either result at all, and
+            // this test would have failed on the second assertion (still
+            // S10', not S10) rather than hung.
+            const probe = yield* UnitySetupProbe.make;
+            const immediate = yield* probe.probe();
+            yield* TestClock.adjust(Duration.seconds(16));
+            const afterWindow = yield* probe.probe();
+            return { immediate, afterWindow };
+          }),
+      ).pipe(
+        Effect.provide(TestClock.layer()),
+        Effect.map(({ immediate, afterWindow }) => {
+          expect(immediate.primary.state).toBe("S10'");
+          expect(immediate.facts.withinPairingGraceWindow).toBe(true);
+          expect(afterWindow.primary.state).toBe("S10");
+          expect(afterWindow.facts.withinPairingGraceWindow).toBe(false);
         }),
       ),
   );

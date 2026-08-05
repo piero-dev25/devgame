@@ -22,6 +22,7 @@
  * service is reachable via the broadly-granted `presence:read` and must
  * not mirror that pattern.
  */
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -97,7 +98,15 @@ export const make = Effect.gen(function* () {
   // "the server process's own start time" plan §2's F3 asks for; no
   // separate lifecycle event or persisted timestamp is needed for a value
   // that only ever needs to survive for the life of this one process.
-  const serverStartedAtMs = yield* Effect.sync(() => Date.now());
+  //
+  // `Clock.currentTimeMillis`, not `Date.now()` — this codebase's own
+  // `globalDateInEffect` rule (`tsconfig.base.json`) exists precisely so
+  // time-dependent Effect code stays swappable for `TestClock` in tests.
+  // This particular branch computes the S10/S10′ pairing-grace-window
+  // split below, which a wall-clock read cannot exercise deterministically
+  // — `TestClock.adjust` can. Found live (#118) as two real, unnoticed
+  // `Date.now()` violations from tonight's own Unity-setup-detection work.
+  const serverStartedAtMs = yield* Clock.currentTimeMillis;
 
   /** Not found (S1) is the SAFE default when the discovered-path check
    * itself can't run (permission error, no HOME, etc.) — degrading to "I
@@ -263,7 +272,8 @@ export const make = Effect.gen(function* () {
 
       const selectionPublisherRegistered =
         yield* editorPresenceRegistry.hasPublisherForWorkspace(workspaceRoot);
-      const withinPairingGraceWindow = Date.now() - serverStartedAtMs < PAIRING_GRACE_WINDOW_MS;
+      const nowMs = yield* Clock.currentTimeMillis;
+      const withinPairingGraceWindow = nowMs - serverStartedAtMs < PAIRING_GRACE_WINDOW_MS;
 
       const classifierInput: UnitySetupClassifierInput = {
         cliAvailable: true,
