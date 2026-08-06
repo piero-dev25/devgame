@@ -44,10 +44,10 @@ import { resolveStorage } from "./lib/storage";
 // "restore"). The persisted-data side of each retired kind still exists —
 // see migratePersistedRightPanelState's own comment on why those spots are
 // exempt.
-export const RIGHT_PANEL_KINDS = ["plan"] as const;
+export const RIGHT_PANEL_KINDS = ["plan", "agents"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
-export type RightPanelSurface = { id: "plan"; kind: "plan" };
+export type RightPanelSurface = { id: "plan"; kind: "plan" } | { id: "agents"; kind: "agents" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 const RIGHT_PANEL_STORAGE_VERSION = 11;
@@ -83,6 +83,8 @@ const singletonSurface = (kind: RightPanelKind): RightPanelSurface => {
   switch (kind) {
     case "plan":
       return { id: "plan", kind };
+    case "agents":
+      return { id: "agents", kind };
   }
 };
 

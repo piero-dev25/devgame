@@ -27,7 +27,7 @@ interface ParsedPresenceFrame {
   }>;
 }
 
-const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const parseFrame = (raw: string) => decodeUnknownJson(raw) as ParsedPresenceFrame;
 const parseCommandFrame = (raw: string) =>
   decodeUnknownJson(raw) as {

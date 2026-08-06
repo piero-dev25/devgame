@@ -47,7 +47,7 @@ import {
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 import * as UnityPairingHandoff from "./UnityPairingHandoff.ts";
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const decodeProjectShell = Schema.decodeUnknownSync(OrchestrationProjectShell);
 const decodePairingFile = Schema.decodeUnknownEffect(
   Schema.fromJsonString(UnityEditorPresencePairingFile),

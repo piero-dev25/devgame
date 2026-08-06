@@ -54,7 +54,7 @@ import {
   EDITOR_PRESENCE_CLOSE_CODE,
 } from "./protocol.ts";
 
-const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const makeEnvironmentAuthLayer = () =>
   EnvironmentAuth.layer.pipe(

@@ -206,8 +206,13 @@ describe("dispatchUnitySetupProbe", () => {
           }
         });
         const outcome = yield* dispatchUnitySetupProbe(session, PROJECT_ID).pipe(
-          Effect.provide(Layer.mergeAll(spy.layer, projection.layer)),
-          Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          Effect.provide(
+            Layer.mergeAll(
+              spy.layer,
+              projection.layer,
+              Logger.layer([logger], { mergeWithExisting: false }),
+            ),
+          ),
         );
 
         // Merge-gate F2: this branch existed with zero coverage — a locked

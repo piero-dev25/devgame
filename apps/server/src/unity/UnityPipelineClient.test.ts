@@ -14,6 +14,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -24,9 +25,10 @@ import {
 } from "./UnityPipelineClient.ts";
 
 const PROJECT = "/Users/piero/scratch/project";
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 function statusEnvelope(playMode: "stopped" | "playing" | "paused"): string {
-  return JSON.stringify({
+  return encodeJson({
     success: true,
     command: "command editor_status",
     data: {
@@ -53,7 +55,7 @@ function actionEnvelope(
   command: "editor_play" | "editor_stop" | "editor_pause",
   resultText: string,
 ): string {
-  return JSON.stringify({
+  return encodeJson({
     success: true,
     command: `command ${command}`,
     data: {
@@ -69,7 +71,7 @@ function actionEnvelope(
 }
 
 function commandFailedEnvelope(command: string, message: string): string {
-  return JSON.stringify({
+  return encodeJson({
     success: false,
     command: `unity command ${command}`,
     data: null,
@@ -382,7 +384,7 @@ function pipelineListEnvelope(
   }>,
   latestVersion: string | null = null,
 ): string {
-  return JSON.stringify({
+  return encodeJson({
     success: true,
     command: "pipeline list",
     data: {
@@ -544,7 +546,7 @@ describe("list", () => {
   it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
     Effect.gen(function* () {
       const runner = callCountingRunner([
-        JSON.stringify({
+        encodeJson({
           success: false,
           command: "pipeline list",
           data: null,
@@ -574,7 +576,7 @@ describe("list", () => {
       () =>
         Effect.gen(function* () {
           const runner = callCountingRunner([
-            JSON.stringify({
+            encodeJson({
               success: true,
               command: "pipeline list",
               data: { instances: [{ projectPath: PROJECT }], latestVersion: null }, // missing every other instance field
@@ -595,7 +597,7 @@ describe("list", () => {
       () =>
         Effect.gen(function* () {
           const runner = callCountingRunner([
-            JSON.stringify({
+            encodeJson({
               success: true,
               command: "pipeline list",
               data: {
@@ -663,7 +665,7 @@ describe("list", () => {
     () =>
       Effect.gen(function* () {
         const runner = callCountingRunner([
-          JSON.stringify({
+          encodeJson({
             success: true,
             command: "pipeline list",
             data: { instances: [] }, // no latestVersion key at all
@@ -682,7 +684,7 @@ function pipelineInstallEnvelope(fields: {
   readonly version?: string;
   readonly alreadyInstalled?: boolean;
 }): string {
-  return JSON.stringify({
+  return encodeJson({
     success: true,
     command: "pipeline install",
     data: {
@@ -746,7 +748,7 @@ describe("install", () => {
   it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
     Effect.gen(function* () {
       const runner = callCountingRunner([
-        JSON.stringify({
+        encodeJson({
           success: false,
           command: "pipeline install",
           data: null,
@@ -782,7 +784,7 @@ describe("install", () => {
     () =>
       Effect.gen(function* () {
         const runner = callCountingRunner([
-          JSON.stringify({
+          encodeJson({
             success: true,
             command: "pipeline install",
             data: { packageId: "com.unity.pipeline" }, // missing version, alreadyInstalled
@@ -799,7 +801,7 @@ describe("install", () => {
 function unityOpenEnvelope(
   fields: { readonly success?: boolean; readonly data?: unknown } = {},
 ): string {
-  return JSON.stringify({
+  return encodeJson({
     success: fields.success ?? true,
     command: "open",
     data: fields.data ?? null,
@@ -909,7 +911,7 @@ describe("open (task #92's cold-start wiring — UnityColdStart.ts had zero call
   it.effect("a non-zero CLI exit folds into { _tag: 'error' } with the CLI's own message", () =>
     Effect.gen(function* () {
       const runner = callCountingRunner([
-        JSON.stringify({
+        encodeJson({
           success: false,
           command: "open",
           data: null,

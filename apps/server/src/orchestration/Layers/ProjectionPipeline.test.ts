@@ -34,6 +34,7 @@ import {
   OrchestrationProjectionPipelineLive,
 } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ServerConfig } from "../../config.ts";
@@ -2672,6 +2673,7 @@ const engineLayer = it.layer(
     // bootstrap replay from within a test.
     Layer.provideMerge(OrchestrationProjectionPipelineLive),
     Layer.provideMerge(OrchestrationEventStoreLive),
+    Layer.provide(ThreadBackgroundLiveness.layer),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
     Layer.provide(RepositoryIdentityResolver.layer),
     Layer.provide(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),

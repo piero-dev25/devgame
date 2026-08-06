@@ -25,7 +25,7 @@ import * as UnityPackageLock from "./UnityPackageLock.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 import * as UnitySetupProbe from "./UnitySetupProbe.ts";
 
-const encodeJson = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const writeTextFile = Effect.fn("writeTextFile")(function* (
   cwd: string,

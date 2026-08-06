@@ -4,8 +4,11 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 
 import * as UnityPackageLock from "./UnityPackageLock.ts";
+
+const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const TestLayer = Layer.empty.pipe(
   Layer.provideMerge(UnityPackageLock.layer),
@@ -56,7 +59,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
         yield* writeTextFile(
           cwd,
           "Packages/packages-lock.json",
-          JSON.stringify({
+          encodeJson({
             dependencies: {
               "com.elringus.naninovel": {
                 version: "file:com.elringus.naninovel",
@@ -84,7 +87,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
         yield* writeTextFile(
           cwd,
           "Packages/packages-lock.json",
-          JSON.stringify({
+          encodeJson({
             dependencies: {
               "com.unity.pipeline": { version: "0.4.0-exp.1", depth: 0, source: "registry" },
             },
@@ -104,7 +107,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
         yield* writeTextFile(
           cwd,
           "Packages/packages-lock.json",
-          JSON.stringify({ dependencies: { "com.unity.pipeline": { version: "0.4.0-exp.1" } } }),
+          encodeJson({ dependencies: { "com.unity.pipeline": { version: "0.4.0-exp.1" } } }),
         );
 
         const dependencies = yield* lock.readDependencies(cwd);
@@ -131,11 +134,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
       Effect.gen(function* () {
         const lock = yield* UnityPackageLock.UnityPackageLock;
         const cwd = yield* makeTempDir;
-        yield* writeTextFile(
-          cwd,
-          "Packages/packages-lock.json",
-          JSON.stringify({ notes: "empty" }),
-        );
+        yield* writeTextFile(cwd, "Packages/packages-lock.json", encodeJson({ notes: "empty" }));
 
         const dependencies = yield* lock.readDependencies(cwd);
 
@@ -152,7 +151,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
         yield* writeTextFile(
           cwd,
           "Packages/manifest.json",
-          JSON.stringify({
+          encodeJson({
             dependencies: { "com.unity.pipeline": "0.4.0-exp.1" },
             devDependencies: { "com.unity.test-framework": "1.4.6" },
           }),
@@ -187,11 +186,11 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
         Effect.gen(function* () {
           const lock = yield* UnityPackageLock.UnityPackageLock;
           const cwd = yield* makeTempDir;
-          yield* writeTextFile(cwd, "Packages/manifest.json", JSON.stringify({ dependencies: {} }));
+          yield* writeTextFile(cwd, "Packages/manifest.json", encodeJson({ dependencies: {} }));
           yield* writeTextFile(
             cwd,
             "Packages/packages-lock.json",
-            JSON.stringify({
+            encodeJson({
               dependencies: {
                 "com.elringus.naninovel": {
                   version: "file:com.elringus.naninovel",

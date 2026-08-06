@@ -96,12 +96,14 @@ const runDispatchTest = (
   spy: ReturnType<typeof makeUnityPipelineClientSpy>,
   session: EnvironmentAuth.AuthenticatedSession,
 ) =>
-  dispatchUnityColdStartLaunch(session)
-    .pipe(
-      Effect.provide(spy.layer),
-      Effect.provide(ServerConfig.layerTest(PROJECT, { prefix: "t3code-unity-cold-start-route-" })),
-    )
-    .pipe(Effect.provide(NodeServices.layer));
+  dispatchUnityColdStartLaunch(session).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        spy.layer,
+        ServerConfig.layerTest(PROJECT, { prefix: "t3code-unity-cold-start-route-" }),
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
+  );
 
 const COMMAND_SESSION: EnvironmentAuth.AuthenticatedSession = {
   sessionId: "test-session" as EnvironmentAuth.AuthenticatedSession["sessionId"],
