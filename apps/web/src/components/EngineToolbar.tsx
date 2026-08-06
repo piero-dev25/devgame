@@ -25,6 +25,7 @@ import {
   isPlayEngaged,
   isUnityPauseAvailable,
   isUnityPauseEngaged,
+  invokeUnityToolbarAction,
   resolveUnityPlayToggleAction,
   type EngineToolbarAction,
   type EngineToolbarView,
@@ -122,6 +123,8 @@ export interface EngineToolbarProps {
    * do not resurrect that reference for a second caller of this prop.
    */
   readonly onSetupUnityIntegrations?: () => void;
+  /** Raises a running Unity Editor, or cold-starts it for this project. */
+  readonly onBringUnityToFront?: () => void;
 }
 
 export function EngineToolbar(props: EngineToolbarProps) {
@@ -168,6 +171,7 @@ export function EngineToolbar(props: EngineToolbarProps) {
           {...(props.onSetupUnityIntegrations
             ? { onSetupUnityIntegrations: props.onSetupUnityIntegrations }
             : {})}
+          {...(props.onBringUnityToFront ? { onBringUnityToFront: props.onBringUnityToFront } : {})}
         />
       ) : null}
     </div>
@@ -241,6 +245,7 @@ function UnityControlCluster(props: {
   readonly onOpenConnectionsSettings?: () => void;
   readonly onRetryUnitySetup?: () => void;
   readonly onSetupUnityIntegrations?: () => void;
+  readonly onBringUnityToFront?: () => void;
 }) {
   const { view } = props;
   const ready = view.availableActions.length > 0;
@@ -253,7 +258,12 @@ function UnityControlCluster(props: {
     props.hasPresenceCommandScope &&
     view.unityInstallOffered &&
     props.onSetupUnityIntegrations !== undefined;
-  const unityLabel = ready ? UNITY_BRING_TO_FRONT_REASON : unavailableReason;
+  const unityEnabled = props.onBringUnityToFront !== undefined;
+  const unityLabel = unityEnabled
+    ? "Bring the Unity Editor to the front"
+    : ready
+      ? UNITY_BRING_TO_FRONT_REASON
+      : unavailableReason;
   const unityControl = setupOffered ? (
     <Button size="xs" variant="default" onClick={() => props.onSetupUnityIntegrations?.()}>
       <UnityIcon className="size-3.5" />
@@ -266,9 +276,10 @@ function UnityControlCluster(props: {
           <Button
             size="xs"
             variant="outline"
-            aria-disabled="true"
-            className="cursor-not-allowed opacity-64"
+            aria-disabled={!unityEnabled || undefined}
+            className={!unityEnabled ? "cursor-not-allowed opacity-64" : undefined}
             aria-label={unityLabel}
+            onClick={() => props.onBringUnityToFront?.()}
           >
             <UnityIcon className="size-3.5" />
             <span className="ml-0.5">Unity</span>
@@ -322,6 +333,7 @@ function UnityControlCluster(props: {
         playState={view.playState}
         blockedReason={transportBlockedReason}
         onAction={props.onAction}
+        {...(props.onBringUnityToFront ? { onBringUnityToFront: props.onBringUnityToFront } : {})}
         {...(!props.hasPresenceCommandScope && props.onOpenConnectionsSettings
           ? { onBlockedClick: props.onOpenConnectionsSettings }
           : {})}
@@ -337,6 +349,7 @@ function UnityTransportGroup(props: {
   readonly blockedReason: string | null;
   readonly onAction: (action: EngineToolbarAction) => void;
   readonly onBlockedClick?: () => void;
+  readonly onBringUnityToFront?: () => void;
 }) {
   const blocked = props.blockedReason !== null;
   const toggleAction = resolveUnityPlayToggleAction(props.playState);
@@ -373,7 +386,13 @@ function UnityTransportGroup(props: {
                   props.onBlockedClick?.();
                   return;
                 }
-                props.onAction(toggleAction);
+                invokeUnityToolbarAction({
+                  action: toggleAction,
+                  onAction: props.onAction,
+                  ...(props.onBringUnityToFront
+                    ? { onBringUnityToFront: props.onBringUnityToFront }
+                    : {}),
+                });
               }}
             />
           }
@@ -422,6 +441,7 @@ function ControlCluster(props: {
   readonly onRetryUnitySetup?: () => void;
   /** See `EngineToolbarProps.onSetupUnityIntegrations`'s own doc comment. */
   readonly onSetupUnityIntegrations?: () => void;
+  readonly onBringUnityToFront?: () => void;
 }) {
   const { view } = props;
   const isUnity = view.backend === "unity-cli";

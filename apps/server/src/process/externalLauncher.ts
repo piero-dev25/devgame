@@ -260,6 +260,22 @@ function buildBrowserLaunch(
   };
 }
 
+function buildApplicationLaunch(
+  applicationName: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = {},
+): ProcessLaunch {
+  if (platform === "darwin") {
+    return {
+      command: "open",
+      args: ["-a", applicationName],
+      options: DETACHED_IGNORE_STDIO_OPTIONS,
+    };
+  }
+
+  return buildBrowserLaunch(applicationName, platform, env);
+}
+
 const buildAvailableEditors = Effect.fn("externalLauncher.buildAvailableEditors")(function* (
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
@@ -292,6 +308,14 @@ const resolveBrowserLaunch = Effect.fn("externalLauncher.resolveBrowserLaunch")(
   return buildBrowserLaunch(target, platform, env);
 });
 
+const resolveApplicationLaunch = Effect.fn("externalLauncher.resolveApplicationLaunch")(function* (
+  applicationName: string,
+) {
+  const platform = yield* HostProcessPlatform;
+  const env = yield* readBrowserLaunchEnv;
+  return buildApplicationLaunch(applicationName, platform, env);
+});
+
 const resolveAvailableEditors = Effect.fn("externalLauncher.resolveAvailableEditors")(function* () {
   const platform = yield* HostProcessPlatform;
   const env = yield* readCommandLookupEnv;
@@ -307,6 +331,10 @@ export class ExternalLauncher extends Context.Service<
     readonly resolveAvailableEditors: () => Effect.Effect<ReadonlyArray<EditorId>>;
     /** Launch a URL target in the default browser. */
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
+    /** Raise or launch an OS application by its registered application name. */
+    readonly launchApplication: (
+      applicationName: string,
+    ) => Effect.Effect<void, ExternalLauncherError>;
     /**
      * Launch a workspace path in a selected editor integration.
      *
@@ -391,6 +419,22 @@ const launchBrowser = Effect.fn("externalLauncher.launchBrowser")(function* (
   );
 });
 
+const launchApplication = Effect.fn("externalLauncher.launchApplication")(function* (
+  applicationName: string,
+): Effect.fn.Return<void, ExternalLauncherError, ChildProcessSpawner.ChildProcessSpawner> {
+  const launch = yield* resolveApplicationLaunch(applicationName);
+  return yield* launchAndUnref(
+    launch,
+    (cause) =>
+      new ExternalLauncherBrowserSpawnError({
+        target: applicationName,
+        command: launch.command,
+        args: launch.args,
+        cause,
+      }),
+  );
+});
+
 const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(function* (
   launch: EditorLaunch,
 ): Effect.fn.Return<
@@ -447,6 +491,10 @@ export const make = Effect.gen(function* () {
     resolveAvailableEditors: () => provideCommandResolutionServices(resolveAvailableEditors()),
     launchBrowser: (target) =>
       launchBrowser(target).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    launchApplication: (applicationName) =>
+      launchApplication(applicationName).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
     launchEditor: (input) =>

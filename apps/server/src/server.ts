@@ -31,6 +31,7 @@ import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
 import { unityPipelineInstallRouteLayer } from "./unity/UnityPipelineInstallRoute.ts";
 import * as UnityPairingHandoff from "./unity/UnityPairingHandoff.ts";
 import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
+import { unityRaiseRouteLayer } from "./unity/UnityRaiseRoute.ts";
 import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
 import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
 import { unityColdStartRouteLayer } from "./editorPresence/UnityColdStartRoute.ts";
@@ -557,6 +558,7 @@ export const makeRoutesLayer = Layer.mergeAll(
       HttpRouter.provideRequest(UnityPipelineInstallDependenciesLive),
     ),
     unityColdStartRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityRaiseRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
   ),

@@ -92,6 +92,29 @@ it.effect("launches the default browser through the platform command", () => {
   );
 });
 
+it.effect("raises a macOS application through Launch Services with open -a", () => {
+  let spawned: ChildProcess.StandardCommand | undefined;
+  return Effect.gen(function* () {
+    const launcher = yield* ExternalLauncher.ExternalLauncher;
+
+    yield* launcher.launchApplication("Unity");
+
+    assert.ok(spawned);
+    assert.equal(spawned.command, "open");
+    assert.deepEqual(spawned.args, ["-a", "Unity"]);
+    assert.equal(spawned.options.detached, true);
+  }).pipe(
+    Effect.provide(
+      testLayer({
+        platform: "darwin",
+        onSpawn: (command) => {
+          spawned = command;
+        },
+      }),
+    ),
+  );
+});
+
 it.effect("launches an installed editor with platform-safe arguments", () =>
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;

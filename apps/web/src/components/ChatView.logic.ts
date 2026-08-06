@@ -34,6 +34,12 @@ export function tryBeginUnitySetupInstall(inFlightRef: { current: boolean }): bo
   return true;
 }
 
+export function tryBeginUnityRaise(inFlightRef: { current: boolean }): boolean {
+  if (inFlightRef.current) return false;
+  inFlightRef.current = true;
+  return true;
+}
+
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,
   handleNewThread: (projectRef: ScopedProjectRef) => Promise<void>,

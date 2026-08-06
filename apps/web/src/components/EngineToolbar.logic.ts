@@ -35,6 +35,21 @@ import type {
  */
 export type EngineToolbarAction = "play" | "pause" | "stop" | "step";
 
+/**
+ * Keeps the transport dispatch independent from Unity's best-effort raise.
+ * Dispatch runs first, so even a synchronously failing raise callback cannot
+ * prevent Play from reaching the existing command path. Stop/Pause/Step do
+ * not raise.
+ */
+export function invokeUnityToolbarAction(input: {
+  readonly action: EngineToolbarAction;
+  readonly onAction: (action: EngineToolbarAction) => void;
+  readonly onBringUnityToFront?: () => void;
+}): void {
+  input.onAction(input.action);
+  if (input.action === "play") input.onBringUnityToFront?.();
+}
+
 /** Fixed display order — matches the order Unity's own editor toolbar shows
  * these in (Play, Pause, Step), with Stop folded in as the fourth slot
  * rather than a class of its own; an engine simply omits what it doesn't

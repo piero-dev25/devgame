@@ -27,6 +27,7 @@ import {
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   startNewThreadForProject,
+  tryBeginUnityRaise,
   tryBeginUnitySetupInstall,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
@@ -47,6 +48,17 @@ describe("tryBeginUnitySetupInstall", () => {
 
     inFlightRef.current = false;
     expect(tryBeginUnitySetupInstall(inFlightRef)).toBe(true);
+  });
+});
+
+describe("tryBeginUnityRaise", () => {
+  it("rejects re-entry until the fire-and-forget request releases its guard", () => {
+    const inFlightRef = { current: false };
+
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(true);
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(false);
+    inFlightRef.current = false;
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(true);
   });
 });
 

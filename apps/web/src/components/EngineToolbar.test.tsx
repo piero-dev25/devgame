@@ -421,6 +421,18 @@ describe("EngineToolbar — Unity ready state renders one Unity control + a two-
     expect(html).not.toMatch(/>(?:Play|Stop|Pause)</);
   });
 
+  it("enables the Unity control with the active accessible name when a raise handler exists", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW, { onBringUnityToFront: () => {} });
+    const unityButton = findButtonByExactText(html, "Unity");
+
+    expect(unityButton).toBeDefined();
+    expect(isDisabled(unityButton ?? "")).toBe(false);
+    expect(hasAriaLabel(unityButton ?? "", "Bring the Unity Editor to the front")).toBe(true);
+    expect(
+      hasAriaLabel(unityButton ?? "", "Bringing the Unity Editor to the front isn't wired up yet."),
+    ).toBe(false);
+  });
+
   it("does NOT render the old multi-action Group's play-target chevron for Unity — that stays editor-presence-only", () => {
     // The Unity transport is still not the generic editor-presence Group
     // with its trailing

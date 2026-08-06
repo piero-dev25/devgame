@@ -111,8 +111,28 @@ export const dispatchUnityColdStartLaunch = (
       return { _tag: "insufficientScope" } as const;
     }
     const serverConfig = yield* ServerConfig.ServerConfig;
+    return yield* dispatchUnityColdStartLaunchForWorkspace(session, serverConfig.cwd);
+  });
+
+/**
+ * Project-root form of the existing cold-start dispatch. `/unity/raise`
+ * resolves its opaque project id through the projection store, then delegates
+ * here so the live-match guard and `UnityPipelineClient.open` result mapping
+ * remain one implementation.
+ */
+export const dispatchUnityColdStartLaunchForWorkspace = (
+  session: EnvironmentAuth.AuthenticatedSession,
+  workspaceRoot: string,
+): Effect.Effect<
+  UnityColdStartLaunchDispatchOutcome,
+  never,
+  UnityPipelineClient.UnityPipelineClient
+> =>
+  Effect.gen(function* () {
+    if (!session.scopes.includes(AuthPresenceCommandScope)) {
+      return { _tag: "insufficientScope" } as const;
+    }
     const client = yield* UnityPipelineClient.UnityPipelineClient;
-    const workspaceRoot = serverConfig.cwd;
 
     const listResult = yield* client.list(workspaceRoot);
     if (listResult._tag === "cliUnavailable") {

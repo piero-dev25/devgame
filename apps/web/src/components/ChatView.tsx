@@ -225,6 +225,7 @@ import { dispatchUnityCommand } from "../unity/dispatchCommand";
 import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
 import { postUnityPipelineInstall } from "../unity/postPipelineInstall";
 import { describeUnityPipelineInstallOutcome } from "../unity/unityPipelineInstallReport";
+import { describeUnityRaiseFailure, postUnityRaise } from "../unity/postUnityRaise";
 import { invalidateUnitySetupProbeCache } from "../unity/setupProbeCache";
 import { usePrimarySessionState } from "../environments/primary/sessionState";
 import { readPreparedConnection } from "../state/session";
@@ -309,6 +310,7 @@ import {
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
   tryBeginUnitySetupInstall,
+  tryBeginUnityRaise,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
@@ -1208,6 +1210,7 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
   const unitySetupInstallInFlightRef = useRef(false);
+  const unityRaiseInFlightRef = useRef(false);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -5522,6 +5525,60 @@ function ChatViewContent(props: ChatViewProps) {
     // (`[primaryEnvironmentId, unitySetupQuery.refresh]`).
   }, [activeProjectRef, unitySetupQuery.refresh]);
 
+  const handleBringUnityToFront = useCallback(() => {
+    if (!activeProjectRef) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't find this project",
+          description: "The active project is no longer available. Select it again and retry.",
+        }),
+      );
+      return;
+    }
+    const prepared = readPreparedConnection(activeProjectRef.environmentId);
+    if (!prepared) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't reach this project's connection",
+          description: "The connection isn't ready yet — wait a moment and try again.",
+        }),
+      );
+      return;
+    }
+    if (!tryBeginUnityRaise(unityRaiseInFlightRef)) return;
+    void postUnityRaise({
+      projectId: activeProjectRef.projectId,
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((result) => {
+        const report = describeUnityRaiseFailure(result);
+        if (report === null) return;
+        toastManager.add(
+          stackedThreadToast({
+            type: report.type,
+            title: report.title,
+            description: report.description,
+          }),
+        );
+      })
+      .catch((error) => {
+        console.error("Failed to bring Unity to the front:", error);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not bring Unity to the front",
+            description: error instanceof Error ? error.message : "A network error occurred.",
+          }),
+        );
+      })
+      .finally(() => {
+        unityRaiseInFlightRef.current = false;
+      });
+  }, [activeProjectRef]);
+
   const handleRetryUnitySetup = useCallback(() => {
     if (!activeProjectRef) return;
     invalidateUnitySetupProbeCache(activeProjectRef.environmentId, activeProjectRef.projectId);
@@ -5961,6 +6018,7 @@ function ChatViewContent(props: ChatViewProps) {
             onOpenConnectionsSettings={handleOpenConnectionsSettings}
             onRetryUnitySetup={handleRetryUnitySetup}
             onSetupUnityIntegrations={handleSetupUnityIntegrations}
+            onBringUnityToFront={handleBringUnityToFront}
           />
         </header>
 

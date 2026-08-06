@@ -65,6 +65,7 @@ interface ChatHeaderProps {
   onRetryUnitySetup?: () => void;
   /** See `EngineToolbarProps.onSetupUnityIntegrations`'s own doc comment. */
   onSetupUnityIntegrations?: () => void;
+  onBringUnityToFront?: () => void;
 }
 
 export function shouldShowOpenInPicker(input: {
@@ -107,6 +108,7 @@ export const ChatHeader = memo(function ChatHeader({
   onOpenConnectionsSettings,
   onRetryUnitySetup,
   onSetupUnityIntegrations,
+  onBringUnityToFront,
 }: ChatHeaderProps) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const fileScripts = useT3ProjectFileScripts(
@@ -210,6 +212,7 @@ export const ChatHeader = memo(function ChatHeader({
             onOpenConnectionsSettings={onOpenConnectionsSettings}
             {...(onRetryUnitySetup ? { onRetryUnitySetup } : {})}
             {...(onSetupUnityIntegrations ? { onSetupUnityIntegrations } : {})}
+            {...(onBringUnityToFront ? { onBringUnityToFront } : {})}
           />
         )}
       </div>

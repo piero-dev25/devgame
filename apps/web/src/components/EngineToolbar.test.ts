@@ -7,6 +7,7 @@ import {
   isUnityPauseAvailable,
   isUnityPauseEngaged,
   isUnityPlayReady,
+  invokeUnityToolbarAction,
   resolveEngineDispatchBackend,
   resolveEngineToolbarView,
   resolveUnityPlayToggleAction,
@@ -964,6 +965,41 @@ describe("resolveUnityPlayToggleAction", () => {
 
   it('returns "play" when playState is null (no status read yet) — unknown must never claim a playing session exists', () => {
     expect(resolveUnityPlayToggleAction(null)).toBe("play");
+  });
+});
+
+describe("invokeUnityToolbarAction", () => {
+  it("dispatches Play before firing its raise side effect, so a raise failure cannot block dispatch", () => {
+    const calls: Array<string> = [];
+
+    expect(() =>
+      invokeUnityToolbarAction({
+        action: "play",
+        onAction: (action) => calls.push(`dispatch:${action}`),
+        onBringUnityToFront: () => {
+          calls.push("raise");
+          throw new Error("raise failed");
+        },
+      }),
+    ).toThrow("raise failed");
+    expect(calls).toEqual(["dispatch:play", "raise"]);
+  });
+
+  it("does not raise for Stop or Pause", () => {
+    const calls: Array<string> = [];
+    const callbacks = {
+      onAction: (action: Parameters<typeof invokeUnityToolbarAction>[0]["action"]) => {
+        calls.push(`dispatch:${action}`);
+      },
+      onBringUnityToFront: () => {
+        calls.push("raise");
+      },
+    };
+
+    invokeUnityToolbarAction({ action: "stop", ...callbacks });
+    invokeUnityToolbarAction({ action: "pause", ...callbacks });
+
+    expect(calls).toEqual(["dispatch:stop", "dispatch:pause"]);
   });
 });
 
