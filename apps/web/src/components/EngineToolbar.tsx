@@ -314,15 +314,24 @@ function UnityControlCluster(props: {
         <TooltipPopup side="bottom">{retryLabel}</TooltipPopup>
       </Tooltip>
     ) : null;
+  // Owner report (2026-08-05): the worded banner flashed "big and long" on
+  // every window refocus (the probe's 5s cache expires unfocused, so focus
+  // triggers a re-check). Two-part fix: ChatView now retains the last
+  // classified result through background re-checks (stale-while-revalidate,
+  // `resolveUnitySetupForView`), so a re-check with prior data renders the
+  // SAME controls with no extra element at all — and the only remaining
+  // pending case (genuinely no classified state yet, first load) shows a
+  // compact spinner with its text in the accessible name only. No visible
+  // words, no layout shift when it resolves.
   const pendingIndicator =
-    !ready && view.unitySetupPending ? (
+    !ready && view.unitySetupPending && !view.unitySetupResolved ? (
       <div
         role="status"
         aria-live="polite"
-        className="flex items-center gap-1.5 text-xs text-muted-foreground"
+        aria-label="Checking Unity's status…"
+        className="flex items-center text-muted-foreground"
       >
         <Spinner className="size-3 shrink-0" aria-hidden />
-        <span>Checking Unity's status…</span>
       </div>
     ) : null;
 

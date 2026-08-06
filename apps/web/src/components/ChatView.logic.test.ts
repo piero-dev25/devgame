@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { Thread, ThreadShell } from "../types";
 import {
+  resolveUnitySetupForView,
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
@@ -702,5 +703,55 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+// Stale-while-revalidate for the Unity setup probe — see the function's own
+// doc comment (owner flash report, 2026-08-05). Green-by-construction (the
+// function is new); the RED evidence for the behavior change lives in
+// EngineToolbar.test.tsx, whose two pre-existing pending-banner tests
+// failed against the new contract and were updated with the supersession
+// documented inline.
+describe("resolveUnitySetupForView", () => {
+  const GOOD: { facts: string } = { facts: "fresh" };
+  const OLD: { facts: string } = { facts: "old" };
+
+  it("fresh data wins and becomes the new last-good", () => {
+    expect(
+      resolveUnitySetupForView({ data: GOOD, error: undefined, isPending: false, lastGood: OLD }),
+    ).toEqual({ setup: GOOD, nextLastGood: GOOD });
+  });
+
+  it("PENDING keeps the last-good rendered — the anti-flash rule", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: undefined,
+        isPending: true,
+        lastGood: OLD,
+      }),
+    ).toEqual({ setup: OLD, nextLastGood: OLD });
+  });
+
+  it("pending with NO last-good yields null (first load — the compact spinner case)", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: undefined,
+        isPending: true,
+        lastGood: null,
+      }),
+    ).toEqual({ setup: null, nextLastGood: null });
+  });
+
+  it("ERROR is never masked by a stale answer — the failure state + Retry must surface (#106)", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: new Error("x"),
+        isPending: false,
+        lastGood: OLD,
+      }),
+    ).toEqual({ setup: null, nextLastGood: OLD });
   });
 });

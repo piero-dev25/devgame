@@ -32,6 +32,7 @@ import {
   parseScopedThreadKey,
   scopedThreadKey,
   scopeProjectRef,
+  scopedProjectKey,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import {
@@ -306,6 +307,7 @@ import {
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
+  resolveUnitySetupForView,
   revokeUserMessagePreviewUrls,
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
@@ -1573,7 +1575,30 @@ function ChatViewContent(props: ChatViewProps) {
       ? unitySetupProbeAtom(activeProjectRef)
       : null,
   );
-  const unitySetup = unitySetupQuery.data;
+  // Stale-while-revalidate (see `resolveUnitySetupForView`'s own doc
+  // comment): keep the last classified result rendered through background
+  // re-checks so the header never flicks through the no-data shape on
+  // window refocus. Keyed by the scoped project so project A's last-good
+  // can never dress project B's header.
+  const unitySetupLastGoodRef = useRef<{
+    readonly key: string | null;
+    readonly value: NonNullable<typeof unitySetupQuery.data> | null;
+  }>({ key: null, value: null });
+  const unitySetupScopeKey = activeProjectRef ? scopedProjectKey(activeProjectRef) : null;
+  if (unitySetupLastGoodRef.current.key !== unitySetupScopeKey) {
+    unitySetupLastGoodRef.current = { key: unitySetupScopeKey, value: null };
+  }
+  const unitySetupResolution = resolveUnitySetupForView({
+    data: unitySetupQuery.data,
+    error: unitySetupQuery.error,
+    isPending: unitySetupQuery.isPending,
+    lastGood: unitySetupLastGoodRef.current.value,
+  });
+  unitySetupLastGoodRef.current = {
+    key: unitySetupScopeKey,
+    value: unitySetupResolution.nextLastGood,
+  };
+  const unitySetup = unitySetupResolution.setup;
   const unitySetupError = unitySetupQuery.error;
   const engineToolbarView = resolveEngineToolbarView({
     engineType: resolvedEngineType,

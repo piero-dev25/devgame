@@ -28,6 +28,44 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+/**
+ * Stale-while-revalidate for the Unity setup probe (owner report,
+ * 2026-08-05: "a very quick 'checking for unity state' flash when I come to
+ * the window — and it's big and long"). The probe's 5s cache expires while
+ * the window is unfocused, so refocusing triggers a refetch during which
+ * `useEnvironmentQuery.data` is momentarily absent — the header then flicked
+ * through the no-data shape (big pending banner + reshuffled controls) for
+ * a few hundred ms before the fresh answer landed.
+ *
+ * Rule: PENDING never erases a previously classified state — keep rendering
+ * the last good result while re-checking (a background re-check almost
+ * always confirms it, and every action is server-validated anyway, so a
+ * click against a just-stale state fails honestly). ERROR is deliberately
+ * NOT masked: a failed check must surface the failure + Retry (#106's
+ * escape hatch), not a comfortable stale answer.
+ *
+ * Pure so it is directly testable; the caller owns the ref and MUST reset
+ * it when the project changes (a last-good from project A must never
+ * dress project B's header).
+ */
+export function resolveUnitySetupForView<T>(input: {
+  readonly data: T | undefined;
+  readonly error: unknown;
+  readonly isPending: boolean;
+  readonly lastGood: T | null;
+}): { readonly setup: T | null; readonly nextLastGood: T | null } {
+  if (input.data !== undefined) {
+    return { setup: input.data, nextLastGood: input.data };
+  }
+  if (input.error !== undefined && input.error !== null) {
+    return { setup: null, nextLastGood: input.lastGood };
+  }
+  if (input.isPending) {
+    return { setup: input.lastGood, nextLastGood: input.lastGood };
+  }
+  return { setup: null, nextLastGood: input.lastGood };
+}
+
 export function tryBeginUnitySetupInstall(inFlightRef: { current: boolean }): boolean {
   if (inFlightRef.current) return false;
   inFlightRef.current = true;

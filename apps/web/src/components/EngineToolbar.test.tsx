@@ -22,6 +22,7 @@ const THREEJS_VIEW: EngineToolbarView = {
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
+  unitySetupResolved: true,
 };
 
 function renderToolbar(overrides: Partial<EngineToolbarProps> = {}) {
@@ -203,6 +204,7 @@ const UNITY_NOT_READY_INSTALL_OFFERED_VIEW: EngineToolbarView = {
   unitySetupCheckFailed: false,
   unityInstallOffered: true,
   unitySetupPending: false,
+  unitySetupResolved: true,
 };
 
 // The literal S5 sentence team-lead cited live as what to show INSTEAD of
@@ -220,6 +222,7 @@ const UNITY_NOT_READY_NO_INSTALL_VIEW: EngineToolbarView = {
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
+  unitySetupResolved: true,
 };
 
 const UNITY_READY_VIEW: EngineToolbarView = {
@@ -233,6 +236,7 @@ const UNITY_READY_VIEW: EngineToolbarView = {
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
+  unitySetupResolved: true,
 };
 
 function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineToolbarProps> = {}) {
@@ -348,15 +352,39 @@ describe("EngineToolbar — Unity not-ready state withholds the CTA when an inst
 // of `unitySetupPending` — `EngineToolbar.test.ts`'s own suite proves the
 // pure derivation.
 describe("EngineToolbar — Unity not-ready state shows a live 'still checking' indicator while a fetch is in flight (F13)", () => {
-  it("renders a role=status/aria-live=polite region with the checking text while pending", () => {
+  // Owner report (2026-08-05): the worded banner flashed "big and long" on
+  // every window refocus. New contract — a re-check over a KNOWN state
+  // renders nothing extra (the known controls stay, ChatView retains the
+  // last classified result via resolveUnitySetupForView); the indicator
+  // survives ONLY for a genuinely unresolved first load, compacted to a
+  // spinner whose text lives in the accessible name, never on screen.
+  it("re-checking over a KNOWN state renders NO indicator at all — the known controls stay put", () => {
+    const html = renderUnityToolbar(
+      {
+        ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
+        unitySetupPending: true,
+        unitySetupResolved: true,
+      },
+      { onSetupUnityIntegrations: () => {} },
+    );
+
+    expect(html).not.toMatch(/(?:^|\s)role="status"(?:\s|>)/);
+    expect(hasExactText(html, "Checking Unity's status…")).toBe(false);
+    // The known state's own controls are unchanged by the background check.
+    expect(html).toContain("Setup Integrations");
+  });
+
+  it("a genuinely unresolved first load shows the compact spinner: role=status region, text in the ACCESSIBLE NAME only, never visible", () => {
     const html = renderUnityToolbar({
       ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
       unitySetupPending: true,
+      unitySetupResolved: false,
     });
 
     expect(html).toMatch(/(?:^|\s)role="status"(?:\s|>)/);
     expect(html).toMatch(/(?:^|\s)aria-live="polite"(?:\s|>)/);
-    expect(hasExactText(html, "Checking Unity's status…")).toBe(true);
+    expect(html).toMatch(/aria-label="Checking Unity(?:&#x27;|')s status…"/);
+    expect(hasExactText(html, "Checking Unity's status…")).toBe(false);
   });
 
   it("renders nothing extra while NOT pending — purely additive, not a replacement for the existing disabled button/CTA", () => {
@@ -380,14 +408,18 @@ describe("EngineToolbar — Unity not-ready state shows a live 'still checking' 
     );
   });
 
-  it("still renders alongside the CTA when both an install offer AND a pending refresh are true at once (e.g. Retry, or the post-install refresh, over already-classified data)", () => {
+  it("a pending refresh over already-classified data (Retry, the post-install refresh) keeps the CTA and adds NOTHING — superseding this test's pre-2026-08-05 contract, which asserted a visible indicator alongside", () => {
     const html = renderUnityToolbar(
-      { ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW, unitySetupPending: true },
+      {
+        ...UNITY_NOT_READY_INSTALL_OFFERED_VIEW,
+        unitySetupPending: true,
+        unitySetupResolved: true,
+      },
       { onSetupUnityIntegrations: () => {} },
     );
 
     expect(hasExactText(html, "Setup Integrations")).toBe(true);
-    expect(html).toMatch(/(?:^|\s)role="status"(?:\s|>)/);
+    expect(html).not.toMatch(/(?:^|\s)role="status"(?:\s|>)/);
   });
 });
 

@@ -348,6 +348,11 @@ export interface EngineToolbarView {
    * `unityInstallOffered` as before.
    */
   readonly unitySetupPending: boolean;
+  /** Whether ANY classified probe result is in hand (fresh or the caller's
+   * retained last-good). Distinguishes "re-checking over known state" (no
+   * indicator at all — the known controls stay) from "first load, nothing
+   * classified yet" (the compact spinner). */
+  readonly unitySetupResolved: boolean;
 }
 
 function toActionSet(capabilities: ReadonlyArray<EditorPresenceCapability>): ReadonlySet<string> {
@@ -414,6 +419,7 @@ export function resolveEngineToolbarView(input: {
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
+      unitySetupResolved: false,
     };
   }
 
@@ -431,6 +437,7 @@ export function resolveEngineToolbarView(input: {
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
+      unitySetupResolved: false,
     };
   }
 
@@ -461,6 +468,7 @@ export function resolveEngineToolbarView(input: {
       // trio renders the CTA alongside a working Play in that state.
       unityInstallOffered: setup !== null && shouldOfferUnityPipelineInstall(setup.facts),
       unitySetupPending: input.unitySetupPending ?? false,
+      unitySetupResolved: setup !== null,
     };
   }
 
@@ -477,6 +485,7 @@ export function resolveEngineToolbarView(input: {
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
+      unitySetupResolved: false,
     };
   }
   const actionSet = toActionSet(connectedEditor.capabilities);
@@ -491,6 +500,7 @@ export function resolveEngineToolbarView(input: {
     unitySetupCheckFailed: false,
     unityInstallOffered: false,
     unitySetupPending: false,
+    unitySetupResolved: false,
   };
 }
 
