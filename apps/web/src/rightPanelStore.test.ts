@@ -18,12 +18,13 @@ beforeEach(() => {
 });
 
 describe("rightPanelStore", () => {
-  // Every migration fixture below now shows "plan" as the surviving
-  // surface, not a browser tab — as of v11 (task #53's fourth slice),
-  // "preview" is ALSO a retired kind (see the "drops a stale preview
-  // surface" test), so a persisted browser tab can no longer be the thing
-  // that proves a stripped surface's SIBLINGS survive. "plan" is the only
-  // kind left that can play that role at all.
+  // Every migration fixture below now shows "agents" as the surviving
+  // surface. It used to be a browser tab, then "plan" — as of v11 (task
+  // #53's fourth slice) "preview" became a retired kind (see the "drops a
+  // stale preview surface" test), and as of v12 so did "plan", which
+  // upstream retired on its own side when plans moved inline into the
+  // transcript. "agents" is the only kind left that can play the "prove the
+  // stripped surface's SIBLINGS survive" role at all.
   it("drops a stale terminal surface during migration (terminal moved to a dock panel, task #53)", () => {
     // Covers BOTH shapes a persisted "terminal" surface could be — the
     // legacy singleton (`{id:"terminal",kind:"terminal"}`, no
@@ -40,7 +41,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "terminal",
             surfaces: [
-              { id: "plan", kind: "plan" },
+              { id: "agents", kind: "agents" },
               { id: "terminal", kind: "terminal" },
               {
                 id: "terminal:term-1",
@@ -58,7 +59,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "plan", kind: "plan" }],
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
     });
@@ -76,7 +77,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "browser:tab-a",
             surfaces: [
-              { id: "plan", kind: "plan" },
+              { id: "agents", kind: "agents" },
               { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
               { id: "browser:new", kind: "preview", resourceId: null },
             ],
@@ -88,7 +89,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "plan", kind: "plan" }],
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
     });
@@ -101,7 +102,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "diff",
             surfaces: [
-              { id: "plan", kind: "plan" },
+              { id: "agents", kind: "agents" },
               { id: "diff", kind: "diff" },
             ],
           },
@@ -112,7 +113,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "plan", kind: "plan" }],
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
     });
@@ -125,8 +126,8 @@ describe("rightPanelStore", () => {
     // []} — a visibly-open, silently-empty right panel on resume, since
     // ChatView.tsx's `rightPanelOpen` reads `isOpen` with no surfaces-length
     // guard. This fixture is deliberately the single-surface case the
-    // earlier "drops a stale diff surface" test (with a plan surface still
-    // present) doesn't exercise.
+    // earlier "drops a stale diff surface" test (with an agents surface
+    // still present) doesn't exercise.
     expect(
       migratePersistedRightPanelState({
         byThreadKey: {
@@ -137,15 +138,13 @@ describe("rightPanelStore", () => {
           },
         },
       }),
-    ).toEqual({
-      byThreadKey: {
-        "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [],
-        },
-      },
-    });
+      // Merge-gate hardening (2026-08-08): a record migration emptied is now
+      // PRUNED, not kept as {isOpen:false, surfaces:[]} — absent and empty
+      // mean the same thing to every reader, and the empty rows leaked in
+      // localStorage forever. The claim under test is unchanged and now
+      // holds even more strongly: no trace of the open-and-empty panel
+      // survives at all.
+    ).toEqual({ byThreadKey: {} });
   });
 
   it("drops a stale files (explorer) surface during migration (files moved to a dock panel, task #61)", () => {
@@ -155,7 +154,7 @@ describe("rightPanelStore", () => {
           "env-1:thread-A": {
             activeSurfaceId: "files",
             surfaces: [
-              { id: "plan", kind: "plan" },
+              { id: "agents", kind: "agents" },
               { id: "files", kind: "files" },
             ],
           },
@@ -166,7 +165,7 @@ describe("rightPanelStore", () => {
         "env-1:thread-A": {
           isOpen: false,
           activeSurfaceId: null,
-          surfaces: [{ id: "plan", kind: "plan" }],
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
     });
@@ -190,44 +189,79 @@ describe("rightPanelStore", () => {
           },
         },
       }),
+      // Pruned-not-kept, same as the diff-only test above (2026-08-08).
+    ).toEqual({ byThreadKey: {} });
+  });
+
+  it("drops persisted plan surfaces and does not reopen an empty panel", () => {
+    // Upstream's own v9 test (plans render inline in the transcript now),
+    // kept for the behaviour it proves rather than the fixture it shipped
+    // with: thread B's surviving sibling was "diff" upstream, which this
+    // fork retired to a dock panel, so it is "agents" here — the only kind
+    // that survives migration in the merged build. The claim under test is
+    // upstream's and unchanged: when migration drops the surface that was
+    // ACTIVE but others survive, the panel stays open and falls back to the
+    // first survivor instead of rendering open-and-empty.
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "plan",
+            surfaces: [{ id: "plan", kind: "plan" }],
+          },
+          "env-1:thread-B": {
+            isOpen: true,
+            activeSurfaceId: "plan",
+            surfaces: [
+              { id: "plan", kind: "plan" },
+              { id: "agents", kind: "agents" },
+            ],
+          },
+        },
+      }),
     ).toEqual({
       byThreadKey: {
-        "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [],
+        // thread-A (every surface stripped) is pruned outright — see the
+        // diff-only test above (2026-08-08) — while thread-B proves the
+        // open-panel fallback to the first surviving surface.
+        "env-1:thread-B": {
+          isOpen: true,
+          activeSurfaceId: "agents",
+          surfaces: [{ id: "agents", kind: "agents" }],
         },
       },
     });
   });
 
   it("open sets the active panel for a thread", () => {
-    useRightPanelStore.getState().open(refA, "plan");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("plan");
+    useRightPanelStore.getState().open(refA, "agents");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("agents");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refB)).toBeNull();
   });
 
   // "opening a different kind keeps both surfaces and activates the new
   // one" and "reopening an inactive singleton activates its existing
-  // surface" used to live here, both leaning on "preview" as a second kind
-  // to interpose alongside "plan" — DELETED, not ported, as of task #53's
-  // fourth slice: "preview" is now a retired kind too (see
-  // RIGHT_PANEL_KINDS's own comment), and "plan" is the ONLY kind left.
-  // There is no second kind this store's public API can produce anymore to
-  // exercise "two different surfaces coexisting" with — `open`/`toggle`
-  // only ever resolve to the one singleton surface `{id:"plan",kind:
-  // "plan"}`. This is exactly the "collapse" signal flagged to the owner,
-  // not an oversight: keeping these tests would mean either deleting real
-  // coverage silently or fabricating an impossible surface via a type
-  // cast, and neither is honest about what this store can do today.
+  // surface" used to live here, both leaning on a SECOND kind ("preview",
+  // then "diff") to interpose alongside the first — DELETED, not ported, as
+  // of task #53's fourth slice, and the upstream merge only widened the
+  // reason: every kind those tests used is retired (see RIGHT_PANEL_KINDS's
+  // own comment), and "agents" is the ONLY kind left. There is no second
+  // kind this store's public API can produce anymore to exercise "two
+  // different surfaces coexisting" with — `open`/`toggle` only ever resolve
+  // to the one singleton surface `{id:"agents",kind:"agents"}`. This is
+  // exactly the "collapse" signal flagged to the owner, not an oversight:
+  // keeping these tests would mean either deleting real coverage silently
+  // or fabricating an impossible surface via a type cast, and neither is
+  // honest about what this store can do today.
 
-  it("keeps plan as a singleton surface", () => {
-    useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().open(refA, "plan");
+  it("keeps agents as a singleton surface", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().open(refA, "agents");
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: true,
-      activeSurfaceId: "plan",
-      surfaces: [{ id: "plan", kind: "plan" }],
+      activeSurfaceId: "agents",
+      surfaces: [{ id: "agents", kind: "agents" }],
     });
   });
 
@@ -249,13 +283,13 @@ describe("rightPanelStore", () => {
   // OLD, now-wrong behaviour.
 
   it("close hides the panel without clearing its selected surface", () => {
-    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().open(refA, "agents");
     useRightPanelStore.getState().close(refA);
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
-      activeSurfaceId: "plan",
-      surfaces: [{ id: "plan", kind: "plan" }],
+      activeSurfaceId: "agents",
+      surfaces: [{ id: "agents", kind: "agents" }],
     });
   });
 
@@ -272,24 +306,26 @@ describe("rightPanelStore", () => {
   });
 
   it("toggle hides the panel without discarding the active surface", () => {
-    useRightPanelStore.getState().toggle(refA, "plan");
-    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("plan");
-    useRightPanelStore.getState().toggle(refA, "plan");
+    useRightPanelStore.getState().toggle(refA, "agents");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("agents");
+    useRightPanelStore.getState().toggle(refA, "agents");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
-      activeSurfaceId: "plan",
-      surfaces: [{ id: "plan", kind: "plan" }],
+      activeSurfaceId: "agents",
+      surfaces: [{ id: "agents", kind: "agents" }],
     });
   });
 
   // "toggle to a different kind switches active" used to live here (toggle
-  // "preview" then toggle "plan", assert "plan" wins) — DELETED for the
-  // same reason as the two `open`-based tests above: there is no second
-  // kind left to toggle between.
+  // one kind, then another, assert the second wins) — DELETED for the same
+  // reason as the two `open`-based tests above: there is no second kind
+  // left to toggle between. Upstream still ships this test against
+  // "preview" and "agents"; it is not portable here, because "preview" is
+  // one of the kinds this fork moved to a dock panel.
 
   it("removeThread clears persisted state", () => {
-    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().open(refA, "agents");
     useRightPanelStore.getState().removeThread(refA);
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
   });
@@ -321,12 +357,12 @@ describe("rightPanelStore", () => {
   // other surfaces keeps the selected surface active", and "closing
   // surfaces to the right activates the selected surface when active was
   // removed" used to live here, each seeding a SECOND surface (a browser
-  // tab, then later `open(ref, "plan")` after Terminal's own promotion) to
+  // tab, then later a plan surface after Terminal's own promotion) to
   // exercise `closeSurface`'s neighbor-fallback, `closeOtherSurfaces`, and
   // `closeSurfacesToRight`. DELETED, not ported to a synthetic two-surface
-  // state: with "plan" as the only kind left AND a singleton, this store's
-  // real public API (`open`/`toggle`) can never produce more than one
-  // surface at a time — `surfaces` physically cannot exceed length 1
+  // state: with "agents" as the only kind left AND a singleton, this
+  // store's real public API (`open`/`toggle`) can never produce more than
+  // one surface at a time — `surfaces` physically cannot exceed length 1
   // through any type-safe call. Constructing a second surface here would
   // mean type-casting past `RightPanelSurface` to fabricate a kind that
   // cannot exist, which would test an impossible state rather than real
@@ -339,8 +375,8 @@ describe("rightPanelStore", () => {
   // rightPanelStore.ts's own top comment, not an oversight.
 
   it("closing the final surface closes the panel", () => {
-    useRightPanelStore.getState().open(refA, "plan");
-    useRightPanelStore.getState().closeSurface(refA, "plan");
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().closeSurface(refA, "agents");
 
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
@@ -350,7 +386,7 @@ describe("rightPanelStore", () => {
   });
 
   it("closing all surfaces closes the panel", () => {
-    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().open(refA, "agents");
 
     useRightPanelStore.getState().closeAllSurfaces(refA);
 
@@ -362,7 +398,7 @@ describe("rightPanelStore", () => {
   });
 
   it("selectActiveRightPanelSurface returns null when the panel is closed", () => {
-    useRightPanelStore.getState().open(refA, "plan");
+    useRightPanelStore.getState().open(refA, "agents");
     useRightPanelStore.getState().close(refA);
     expect(
       selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),

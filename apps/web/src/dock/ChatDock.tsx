@@ -149,8 +149,10 @@ export const chatDockPanelRegistry: PanelRegistry = createPanelRegistry();
  *
  * OWNER CORRECTION to the original spec (spec-dock-step-2.md's "decide which
  * one the dock panel hosts... do not try to host both" was overruled): both
- * `Sidebar` (v1) and `SidebarV2` stay live, neither gets deleted or
- * hardcoded away. `SidebarPanel.tsx` hosts WHICHEVER one
+ * sidebars stay live, neither gets deleted or hardcoded away. (Upstream
+ * #5672 later renamed them: `SidebarV2.tsx` became `Sidebar.tsx`, the old
+ * v1 became `LegacySidebar.tsx` behind Settings -> Legacy features — the
+ * ruling carries over unchanged.) `SidebarPanel.tsx` hosts WHICHEVER one
  * `useThreadSidebarComponent()` resolves — the exact same flag
  * `AppSidebarLayout` reads, via a hook extracted out of `AppSidebarLayout`'s
  * own inline ternary specifically so the two call sites share one
@@ -161,9 +163,9 @@ export const chatDockPanelRegistry: PanelRegistry = createPanelRegistry();
  * it's not "pick one forever," it's "don't render two competing sidebars
  * simultaneously."
  *
- * `singleton: true`: `SidebarV2.tsx:2778` hardcodes
- * `id="sidebar-thread-search-results"`, which a second SidebarV2 instance
- * would collide on. Applies regardless of which variant is currently
+ * `singleton: true`: `Sidebar.tsx` (nee SidebarV2) hardcodes
+ * `id="sidebar-thread-search-results"` (Sidebar.tsx:3212 as of the
+ * 2026-08 upstream merge), which a second instance would collide on. Applies regardless of which variant is currently
  * resolved — only one "sidebar" panel can ever be open in this dock either
  * way.
  */

@@ -1,5 +1,5 @@
 import type { ContextMenuItem } from "@t3tools/contracts";
-import { Bot, ClipboardList, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
+import { Bot, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
@@ -190,13 +190,12 @@ function RightPanelEmptyState(props: {
 
 // Task #53: this switch's LAST non-"plan" case ("preview") was removed
 // here — Browser moved to a dock panel, the fourth and final surface kind
-// promoted out of this file. "plan" is now the only member of
-// RightPanelSurface at all (see rightPanelStore.ts's own comment on what
-// that means for this store going forward).
+// promoted out of this file. The upstream merge then removed "plan" too
+// (plans render inline in the transcript now), leaving "agents" as the only
+// member of RightPanelSurface at all — see rightPanelStore.ts's own comment
+// on what that means for this store going forward.
 function surfaceTitle(surface: RightPanelSurface): string {
   switch (surface.kind) {
-    case "plan":
-      return "Plan";
     case "agents":
       return "Agents";
   }
@@ -204,8 +203,6 @@ function surfaceTitle(surface: RightPanelSurface): string {
 
 function SurfaceIcon({ surface }: { surface: RightPanelSurface }) {
   switch (surface.kind) {
-    case "plan":
-      return <ClipboardList className="size-3.5 shrink-0" />;
     case "agents":
       return <Bot className="size-3.5 shrink-0" />;
   }

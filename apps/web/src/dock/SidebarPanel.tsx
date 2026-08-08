@@ -4,7 +4,8 @@
 // prior investigation (treated as known-good, spot-checked below rather than
 // re-derived):
 //
-// - Neither `Sidebar.tsx` (v1) nor `SidebarV2.tsx` contains viewport-relative
+// - Neither `LegacySidebar.tsx` nor `Sidebar.tsx` (nee SidebarV2, renamed by
+//   upstream #5672) contains viewport-relative
 //   positioning — that lives entirely in `components/ui/sidebar.tsx`'s
 //   `<Sidebar>` wrapper (`fixed inset-y-0 … h-svh`) and `<SidebarRail>`. So
 //   this panel does NOT render `<Sidebar>` — it hosts the resolved sidebar
@@ -17,7 +18,7 @@
 //   parent — normally supplied by `<Sidebar>`'s own inner wrapper
 //   (`data-slot="sidebar-inner"`, `flex h-full w-full flex-col bg-sidebar
 //   surface-grain`). Replicated here directly (spot-checked: neither
-//   Sidebar.tsx nor SidebarV2.tsx references any `group-data-[...]` selector
+//   sidebar component references any `group-data-[...]` selector
 //   that `<Sidebar>`'s own wrapper divs would have supplied — bare hosting
 //   doesn't silently break either one's internal styling). `bg-sidebar
 //   surface-grain` are carried over too, purely for "same pixels, today" —
@@ -40,11 +41,12 @@ import { useThreadSidebarComponent } from "~/hooks/useThreadSidebarComponent";
  * `useThreadSidebarComponent()` resolves — the same flag `AppSidebarLayout`
  * already reads, via the shared hook `AppSidebarLayout.tsx` was itself
  * rewritten to use (spec-dock-step-2.md, owner correction — the earlier
- * draft of this file hardcoded `SidebarV2` and reasoned "decide one, do not
- * host both"; the owner overruled that: both sidebars stay live, neither
- * gets deleted or picked-once, the dock hosts whichever the flag currently
- * selects). No `forceV1` passed — the dock never mounts on `/settings*`,
- * which is the only context where that override applies.
+ * draft of this file hardcoded the redesigned sidebar and reasoned "decide
+ * one, do not host both"; the owner overruled that: both sidebars stay
+ * live, neither gets deleted or picked-once, the dock hosts whichever the
+ * flag currently selects). The old `forceV1` override is gone with the
+ * 2026-08 upstream merge: `/settings*` renders `SettingsSidebarNav` and
+ * mounts no thread sidebar at all.
  */
 export function SidebarPanel() {
   const ThreadSidebarComponent = useThreadSidebarComponent();

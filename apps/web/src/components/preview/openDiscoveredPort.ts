@@ -6,6 +6,7 @@ import {
 
 import { resolveDiscoveredServerUrl } from "~/browser/browserTargetResolver";
 import type { OpenPreviewMutation } from "~/browser/openFileInPreview";
+import { recordVisitForThread } from "~/browserHistoryStore";
 import { BROWSER_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
 import { openPreviewSession } from "./openPreviewSession";
 
@@ -21,6 +22,7 @@ export async function openDiscoveredPort<E>(input: {
     url: resolvedUrl,
   });
   return mapAtomCommandResult(result, () => {
+    recordVisitForThread(input.threadRef, input.port.url);
     openChatDockPanel(BROWSER_PANEL_ID);
   });
 }

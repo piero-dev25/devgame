@@ -3,25 +3,31 @@
  *
  * This is intentionally a shallow workspace model: it owns an ordered set of
  * surface descriptors and the active surface, while each feature continues to
- * own its durable resource state. Plan remains a singleton surface — as of
- * task #53's fourth slice, it is now the ONLY surface kind left. Diff,
- * Files ("files"/"file"), Terminal, and finally Browser ("preview") used to
- * live here too — all are gone as of spec-surfaces-as-dock-panels.md, Part
- * B: each moved to a first-class dock panel, with its own visibility owned
- * by the dock and its own in-panel selection state owned by a dedicated
+ * own its durable resource state. Agents is a singleton surface — after this
+ * merge with upstream it is the ONLY surface kind left, from two independent
+ * directions. Diff, Files ("files"/"file"), Terminal, and Browser ("preview")
+ * used to live here — all are gone as of spec-surfaces-as-dock-panels.md,
+ * Part B: each moved to a first-class dock panel, with its own visibility
+ * owned by the dock and its own in-panel selection state owned by a dedicated
  * store where one was needed (`fileExplorerStore.ts` for Files,
  * `terminalDockStore.ts` for Terminal — Browser needed none, since
  * `previewStateStore.ts` already carried its equivalent state; see
- * `BrowserDockPanel.tsx`'s own doc comment) — see `RIGHT_PANEL_KINDS`'s own
- * comment for why each kind is DELETED here rather than left unused.
+ * `BrowserDockPanel.tsx`'s own doc comment). Plan is gone for an unrelated
+ * upstream reason: plans stopped hijacking the UI and now render inline in
+ * the transcript (upstream #5558), so upstream retired the kind on its side
+ * while the fork was retiring the other five on ours. See
+ * `RIGHT_PANEL_KINDS`'s own comment for why each kind is DELETED here rather
+ * than left unused.
  *
- * `RIGHT_PANEL_KINDS` having exactly one member now is a real signal, not
- * an oversight left for a future pass to notice: this store could
- * plausibly collapse into a plain per-thread boolean (plan open/closed)
- * instead of a general surface-array model built for N kinds. NOT done
- * here — that's a bigger, separate decision than "finish the migration
- * template," and the owner asked to be told before it happens rather than
- * have it happen silently inside a slice that was framed as "move Browser."
+ * `RIGHT_PANEL_KINDS` having exactly one member is a real signal, not an
+ * oversight left for a future pass to notice: this store could plausibly
+ * collapse into a plain per-thread boolean (agents open/closed) instead of a
+ * general surface-array model built for N kinds. NOT done here — that's a
+ * bigger, separate decision than "finish the migration template," and the
+ * owner asked to be told before it happens rather than have it happen
+ * silently inside a slice that was framed as "move Browser." The upstream
+ * merge only strengthened that signal: the one kind that had survived the
+ * fork's migration is exactly the one upstream then deleted.
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
 import type { ScopedThreadRef } from "@t3tools/contracts";
@@ -41,16 +47,24 @@ import { resolveStorage } from "./lib/storage";
 // across 7 files; on Browser more still, since "open a preview" has far
 // more entry points than any other surface (chat markdown links, script
 // auto-open, terminal links, discovered ports, the mini-player's
-// "restore"). The persisted-data side of each retired kind still exists —
-// see migratePersistedRightPanelState's own comment on why those spots are
+// "restore"). "plan" is not a member either, for upstream's own reason
+// rather than the dock migration's: plans render inline in the transcript
+// now (upstream #5558), so there is no plan SURFACE to open at all. The
+// persisted-data side of every retired kind still exists — see
+// migratePersistedRightPanelState's own comment on why those spots are
 // exempt.
-export const RIGHT_PANEL_KINDS = ["plan", "agents"] as const;
+export const RIGHT_PANEL_KINDS = ["agents"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
-export type RightPanelSurface = { id: "plan"; kind: "plan" } | { id: "agents"; kind: "agents" };
+export type RightPanelSurface = { id: "agents"; kind: "agents" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-const RIGHT_PANEL_STORAGE_VERSION = 11;
+// v12: the fork reached v11 by retiring diff/files/file/terminal/preview;
+// upstream independently reached v9 by retiring "plan". The merged build
+// retires strictly more than either, so it needs a version above BOTH —
+// a v11 save still holds plan surfaces this build cannot render, and
+// leaving the version at 11 would skip the migration that strips them.
+const RIGHT_PANEL_STORAGE_VERSION = 12;
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -81,8 +95,6 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
 
 const singletonSurface = (kind: RightPanelKind): RightPanelSurface => {
   switch (kind) {
-    case "plan":
-      return { id: "plan", kind };
     case "agents":
       return { id: "agents", kind };
   }
@@ -127,82 +139,98 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
     persistedState.byThreadKey &&
     typeof persistedState.byThreadKey === "object"
       ? Object.fromEntries(
-          Object.entries(persistedState.byThreadKey as Record<string, ThreadRightPanelState>).map(
-            ([threadKey, threadState]) => {
-              const validThreadState =
-                threadState && typeof threadState === "object" ? threadState : null;
-              const surfaces = Array.isArray(validThreadState?.surfaces)
-                ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
-                    // v8 added "diff"; v9 (task #61) added "files" (the
-                    // browser) and "file" (one opened file); v10 (task #53,
-                    // third slice) added "terminal"; v11 (task #53, fourth
-                    // and final slice) adds "preview" — each moved to a
-                    // first-class dock panel (spec-surfaces-as-dock-
-                    // panels.md, Part B) and no longer a right-panel surface
-                    // kind ChatView renders; visibility for each now lives
-                    // in the dock's own layout state. "Preview"'s own
-                    // payload (which tab was active) needs no coercion
-                    // either — it was already duplicated in
-                    // previewStateStore.ts's own activeTabId (see
-                    // BrowserDockPanel.tsx's own doc comment), so there is
-                    // nothing here worth preserving that isn't already live
-                    // elsewhere. Drop any persisted entry of a retired kind
-                    // rather than resurrect a tab with nothing behind it;
-                    // activeSurfaceId below already falls back to null when
-                    // its target surface is gone, so this is a
-                    // non-destructive strip — no underlying session or PTY
-                    // is destroyed by any of this, only client-side tab
-                    // position resets.
-                    //
-                    // Cast past RightPanelSurface's CURRENT union
-                    // deliberately: a persisted surface can be an OLDER
-                    // shape than what this build's type allows — that is
-                    // the entire reason migration exists — and each of
-                    // these is exactly such a shape, real in an
-                    // earlier-versioned save, no longer a member of
-                    // RightPanelSurface at all as of this type's own
-                    // narrowing (see its comment). This is the one spot in
-                    // the file deliberately exempt from the compiler proof
-                    // the rest of the union now gets — a review specifically
-                    // asked for that proof everywhere ELSE, which is what
-                    // caught the two stale ChatView.tsx call sites this same
-                    // migration doesn't touch.
-                    if (
-                      (surface as { kind: string }).kind === "diff" ||
-                      (surface as { kind: string }).kind === "files" ||
-                      (surface as { kind: string }).kind === "file" ||
-                      (surface as { kind: string }).kind === "terminal" ||
-                      (surface as { kind: string }).kind === "preview"
-                    ) {
-                      return [];
-                    }
+          Object.entries(
+            persistedState.byThreadKey as Record<string, ThreadRightPanelState>,
+          ).flatMap(([threadKey, threadState]) => {
+            const validThreadState =
+              threadState && typeof threadState === "object" ? threadState : null;
+            const surfaces = Array.isArray(validThreadState?.surfaces)
+              ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
+                  // v8 added "diff"; v9 (task #61) added "files" (the
+                  // browser) and "file" (one opened file); v10 (task #53,
+                  // third slice) added "terminal"; v11 (task #53, fourth
+                  // and final slice) added "preview" — each moved to a
+                  // first-class dock panel (spec-surfaces-as-dock-
+                  // panels.md, Part B) and no longer a right-panel surface
+                  // kind ChatView renders; visibility for each now lives
+                  // in the dock's own layout state. "Preview"'s own
+                  // payload (which tab was active) needs no coercion
+                  // either — it was already duplicated in
+                  // previewStateStore.ts's own activeTabId (see
+                  // BrowserDockPanel.tsx's own doc comment), so there is
+                  // nothing here worth preserving that isn't already live
+                  // elsewhere. v12 adds "plan" to the same list from the
+                  // OTHER direction: upstream retired it (its own v9)
+                  // because plans render inline in the transcript now,
+                  // and this build merges both retirements. Drop any
+                  // persisted entry of a retired kind rather than
+                  // resurrect a tab with nothing behind it; isOpen and
+                  // activeSurfaceId below are both recomputed from the
+                  // SURVIVING surfaces, so this is a non-destructive
+                  // strip — no underlying session or PTY is destroyed by
+                  // any of this, only client-side tab position resets.
+                  //
+                  // Cast past RightPanelSurface's CURRENT union
+                  // deliberately: a persisted surface can be an OLDER
+                  // shape than what this build's type allows — that is
+                  // the entire reason migration exists — and each of
+                  // these is exactly such a shape, real in an
+                  // earlier-versioned save, no longer a member of
+                  // RightPanelSurface at all as of this type's own
+                  // narrowing (see its comment). This is the one spot in
+                  // the file deliberately exempt from the compiler proof
+                  // the rest of the union now gets — a review specifically
+                  // asked for that proof everywhere ELSE, which is what
+                  // caught the two stale ChatView.tsx call sites this same
+                  // migration doesn't touch.
+                  // Merge-gate hardening (2026-08-08): allowlist, not
+                  // denylist. The retired kinds named above are WHY
+                  // entries drop out, but the survival test is
+                  // membership in the CURRENT union — a null entry (a
+                  // corrupted save used to throw on `.kind` here, which
+                  // rejected the whole rehydrate and silently reset every
+                  // thread's panel state) and any unrecognised kind fall
+                  // out the same way instead of resurrecting a tab this
+                  // build cannot render.
+                  const candidate = surface as { kind?: unknown; id?: unknown } | null;
+                  if (candidate?.kind === "agents" && candidate.id === "agents") {
                     return [surface];
-                  })
-                : [];
-              const activeSurfaceId = surfaces.some(
-                (surface) => surface.id === validThreadState?.activeSurfaceId,
-              )
-                ? (validThreadState?.activeSurfaceId ?? null)
-                : null;
-              // Recomputed from the SURVIVING surfaces, not blindly carried
-              // over from what was persisted: a thread whose only surface
-              // was "diff" (stripped above) would otherwise keep whatever
-              // `isOpen: true` it was saved with even though `surfaces` is
-              // now empty — the exact shape that resumed a user into a
-              // visibly-open, silently-empty right panel they never asked
-              // for. Zero surviving surfaces means never open, full stop;
-              // the persisted value (or the activeSurfaceId fallback) only
-              // applies once there is at least one surface for it to mean
-              // anything about.
-              const isOpen =
-                surfaces.length === 0
-                  ? false
-                  : typeof validThreadState?.isOpen === "boolean"
-                    ? validThreadState.isOpen
-                    : activeSurfaceId !== null;
-              return [threadKey, { isOpen, surfaces, activeSurfaceId }];
-            },
-          ),
+                  }
+                  return [];
+                })
+              : [];
+            const persistedActiveSurfaceId = surfaces.some(
+              (surface) => surface.id === validThreadState?.activeSurfaceId,
+            )
+              ? (validThreadState?.activeSurfaceId ?? null)
+              : null;
+            // A migration that dropped every surface must not reopen an
+            // empty panel: a thread whose only surface was "diff" (or
+            // "plan") would otherwise keep whatever `isOpen: true` it was
+            // saved with even though `surfaces` is now empty — the exact
+            // shape that resumed a user into a visibly-open,
+            // silently-empty right panel they never asked for. Zero
+            // surviving surfaces means never open, full stop.
+            const isOpen =
+              surfaces.length > 0 &&
+              (typeof validThreadState?.isOpen === "boolean"
+                ? validThreadState.isOpen
+                : persistedActiveSurfaceId !== null);
+            // An open panel needs an active surface: if migration dropped
+            // the persisted one (e.g. plan was active), fall back to the
+            // first survivor instead of rendering an open empty panel.
+            const activeSurfaceId =
+              persistedActiveSurfaceId ?? (isOpen ? (surfaces[0]?.id ?? null) : null);
+            // Prune records migration emptied: an absent record and a
+            // zero-surface record mean the same thing to every reader,
+            // and keeping one per legacy thread would leak a dead
+            // localStorage row per thread forever (merge-gate finding,
+            // 2026-08-08).
+            if (surfaces.length === 0) {
+              return [];
+            }
+            return [[threadKey, { isOpen, surfaces, activeSurfaceId }]];
+          }),
         )
       : {};
   return { byThreadKey };

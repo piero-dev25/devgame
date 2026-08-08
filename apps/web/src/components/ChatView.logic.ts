@@ -25,6 +25,7 @@ import type { DraftThreadEnvMode } from "../composerDraftStore";
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
+export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
@@ -76,6 +77,18 @@ export function tryBeginUnityRaise(inFlightRef: { current: boolean }): boolean {
   if (inFlightRef.current) return false;
   inFlightRef.current = true;
   return true;
+}
+
+export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
+  const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+  return () => globalThis.clearTimeout(timeoutId);
+}
+
+export function hasEnvironmentReconnectWarningGraceElapsed(
+  activeEnvironmentId: EnvironmentId | null,
+  elapsedEnvironmentId: EnvironmentId | null,
+): boolean {
+  return activeEnvironmentId !== null && activeEnvironmentId === elapsedEnvironmentId;
 }
 
 export function startNewThreadForProject(
