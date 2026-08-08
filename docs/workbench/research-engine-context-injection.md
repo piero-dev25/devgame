@@ -98,7 +98,7 @@ VERIFIED:
   `attachments` — it is **per turn**. So Codex receives a freshly-built instruction block
   on every single turn.
 - That block already contains DevGame product prose. DOCUMENTED, from
-  `CodexDeveloperInstructions.ts:3-13`: _"You are running inside DevGame. The `devgame`
+  `CodexDeveloperInstructions.ts:3-13`: \_"You are running inside DevGame. The `devgame`
   MCP server is the product-native collaborative browser shared with the user. When it
   exposes `preview\__` tools, prefer those tools..."\*
 - **Measured cost** (VERIFIED, `measure-blocks.ts`): 2,284 chars ≈ **571 tokens** in
