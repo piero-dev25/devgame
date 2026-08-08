@@ -331,6 +331,7 @@ import {
   deriveLockedProvider,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
+  resolveEngineChipState,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
@@ -1567,6 +1568,20 @@ function ChatViewContent(props: ChatViewProps) {
   // client-side value can ever disagree with the server's own detection
   // again.
   const resolvedEngineType: EngineType | null = activeProject?.engineType ?? null;
+  // no-engine-ui-for-non-game-projects spec (rev 2): the THREE-state signal
+  // every game-harness UI gate must key off — never `resolvedEngineType`
+  // above, whose `?? null` collapse conflates "not a game" with "haven't
+  // loaded the project yet" (see `resolveEngineChipState`'s own doc comment
+  // for why that collapse is safe for the toolbar's badge but not here).
+  // Drives the composer's editor-presence mount gate and the send-path
+  // prompt-content gate (Scope B/C); `resolvedEngineType` above stays as
+  // EngineToolbar's own input, unchanged.
+  const engineChipState = resolveEngineChipState(activeProject);
+  // Same expression `activeProjectCwd` (this file, further down) computes
+  // for git/"open in" purposes — recomputed here under its own name so a
+  // reader sees why the composer's chip row is scoped this way without
+  // tracing an unrelated git/cwd variable.
+  const presenceWorkspaceRoot: string | null = activeProject?.workspaceRoot ?? null;
   const connectedProjectEditor = resolveConnectedEditorForProject(
     engineToolbarEditorPresence.editors,
     activeProject,
@@ -6329,7 +6344,6 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
-            resolvedEngineType={resolvedEngineType}
             engineToolbarView={engineToolbarView}
             onEngineAction={handleEngineAction}
             {...(threeJsUnavailableReason
@@ -6484,6 +6498,8 @@ function ChatViewContent(props: ChatViewProps) {
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
                             draftId={draftId}
+                            engineChipState={engineChipState}
+                            presenceWorkspaceRoot={presenceWorkspaceRoot}
                             activeThreadId={activeThreadId}
                             activeThreadEnvironmentId={activeThread?.environmentId}
                             activeThread={activeThread}

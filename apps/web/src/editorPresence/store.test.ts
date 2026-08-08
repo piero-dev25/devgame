@@ -6,6 +6,7 @@ import {
   getCurrentEditorPresenceChips,
   mergeEditorPresenceChips,
   publishCurrentEditorPresenceChips,
+  resolveEditorPresenceChipsView,
   selectEditorPresenceChipsForProject,
   useEditorPresencePinStore,
   type EditorPresenceChipItem,
@@ -315,6 +316,95 @@ describe("selectEditorPresenceChipsForProject", () => {
 
   it("selects nothing when the thread has no project resolved yet", () => {
     expect(selectEditorPresenceChipsForProject([renderChip()], null)).toEqual([]);
+  });
+});
+
+describe("resolveEditorPresenceChipsView", () => {
+  const mine: EditorPresenceChipItem = {
+    id: "obj-1",
+    kind: "gameObject",
+    label: "Player",
+    path: null,
+    detail: null,
+    key: "session-1:obj-1",
+    editorId: "unity",
+    editorName: "Unity",
+    sessionId: "session-1",
+    workspaceRoot: "/repo/game-a",
+  };
+  const theirs: EditorPresenceChipItem = {
+    ...mine,
+    id: "obj-2",
+    label: "BossB",
+    key: "session-2:obj-2",
+    sessionId: "session-2",
+    workspaceRoot: "/repo/game-b",
+  };
+
+  it("is hidden for a 'none' (non-game) project, regardless of what's live or pinned", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "none",
+    });
+
+    expect(view).toEqual({ kind: "hidden" });
+  });
+
+  it("shows the project-scoped chips for 'unknown' — the composer keeps this row mounted through that window", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine, theirs],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unknown",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: false }] });
+  });
+
+  it("shows the project-scoped chips for a concrete engine type", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine, theirs],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: false }] });
+  });
+
+  it("yields no chips (not hidden) for a null workspace root — the same 'nothing to scope to' answer selectEditorPresenceChipsForProject already gives", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine],
+      pinned: new Map(),
+      workspaceRoot: null,
+      engineChipState: "unknown",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [] });
+  });
+
+  it("delegates the merge to mergeEditorPresenceChips — a pinned item from THIS project survives dropping out of the live selection", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [],
+      pinned: new Map([[mine.key, mine]]),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: true }] });
+  });
+
+  it("delegates the project scoping to selectEditorPresenceChipsForProject — a pin from another project is not a licence to cross", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [],
+      pinned: new Map([[theirs.key, theirs]]),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [] });
   });
 });
 

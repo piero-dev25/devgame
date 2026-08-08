@@ -1,4 +1,5 @@
 import {
+  type EngineType,
   type EnvironmentId,
   isProviderDriverKind,
   ProjectId,
@@ -28,6 +29,51 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+/**
+ * The subset of a project `resolveEngineChipState` needs — structural,
+ * matching the `EditorPresenceProjectRef`-style refs already used in
+ * `editorPresence/store.ts` for the same reason: a test should not have to
+ * build an `EnvironmentProject`'s many unrelated required fields to
+ * exercise this.
+ */
+export interface EngineChipStateProjectRef {
+  // `| undefined` explicit (not just the `?` modifier) — `exactOptionalPropertyTypes`
+  // distinguishes "absent" from "present and undefined," and the Effect Schema
+  // `Schema.optional(...)` field this mirrors (`OrchestrationProject.engineType`)
+  // decodes to the latter, not the former.
+  readonly engineType?: EngineType | null | undefined;
+}
+
+/**
+ * The three-state engine signal (no-engine-ui-for-non-game-projects spec,
+ * rev 2, "core design"): `engineType` on the wire means three DIFFERENT
+ * things and every UI gate that hides/shows game-harness chrome must key
+ * off this, never off a collapsed `activeProject?.engineType ?? null` —
+ * that collapse is exactly what would unmount the composer's live presence
+ * socket on every project switch (the "unknown" window every thread-open
+ * and project-switch passes through) and blank all engine UI on an older
+ * backend that predates the field entirely (both states decode to
+ * `undefined`/absent, indistinguishable from "detection hasn't run yet"
+ * without this function).
+ *
+ * - `"unknown"` — `activeProject` is `null` (nothing loaded yet), or the
+ *   project loaded but `engineType` is `undefined` (an older server, or a
+ *   fixture predating the field — optional-for-decode per the contract's
+ *   own comment). We cannot say whether this is a game.
+ * - `"none"` — the project loaded and `engineType` decoded to `null`:
+ *   detection RAN against the workspace and matched no marker. This is
+ *   "not a game," a settled answer, not an in-flight one.
+ * - a concrete `EngineType` — a game project.
+ */
+export function resolveEngineChipState(
+  activeProject: EngineChipStateProjectRef | null,
+): "unknown" | "none" | EngineType {
+  if (activeProject === null) return "unknown";
+  if (activeProject.engineType === undefined) return "unknown";
+  if (activeProject.engineType === null) return "none";
+  return activeProject.engineType;
+}
 
 /**
  * Stale-while-revalidate for the Unity setup probe (owner report,

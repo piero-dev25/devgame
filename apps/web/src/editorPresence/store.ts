@@ -12,6 +12,7 @@
 // use for state that must survive whatever remounts happen as the user
 // switches threads, rather than component state scoped to one
 // `<EditorPresenceChips>` mount.
+import type { EngineType } from "@t3tools/contracts";
 import { create } from "zustand";
 
 import type { EditorPresenceEntry, EditorPresenceItem } from "./protocol";
@@ -150,17 +151,26 @@ export interface EditorPresenceProjectRef {
  * Narrows a merged chip set to the editors publishing for ONE project, by
  * normalized `workspace.root`.
  *
- * Task #71. Presence is environment-scoped BY OWNER RULING — every connected
- * editor is visible in the chip row, and that is deliberate ("presence is a
- * property of the connected editor, not of a conversation", see this file's
- * header). This function does not touch that: it is applied at SEND time
- * only, between the snapshot and the `<editor_selection>` block, so the row
- * keeps showing every editor while a thread only ever ships its OWN
- * project's objects to its model.
+ * Ruling supersession (carry both — a later report overturned only HALF of
+ * an earlier one):
  *
- * Those are two different questions and the ruling answers only the first.
- * A thread rooted at project A silently attaching project B's selected
- * objects is a correctness bug with a privacy edge, not a display policy.
+ * - 2026-08, task #71: presence is environment-scoped BY OWNER RULING —
+ *   every connected editor is visible in the chip ROW, deliberately
+ *   ("presence is a property of the connected editor, not of a
+ *   conversation", see this file's header). This function was applied at
+ *   SEND time ONLY, between the snapshot and the `<editor_selection>`
+ *   block — the row kept showing every editor while a thread shipped only
+ *   its OWN project's objects to its model. Those were two different
+ *   questions and the 2026-08 ruling answered only the first: a thread
+ *   rooted at project A silently attaching project B's selected objects
+ *   was a correctness bug with a privacy edge, not a display policy.
+ * - 2026-08-08, owner screenshot report ("the 'current selection' chip was
+ *   showing in an unrelated project session" — a t3code-fork thread's
+ *   composer displayed the Mafia Game Unity editor's selection):
+ *   SUPERSEDES the display half. The chip ROW is project-scoped too, now —
+ *   this same function is also the gate `resolveEditorPresenceChipsView`
+ *   uses for what the row renders, not just for what gets sent. See
+ *   docs/specs/no-engine-ui-for-non-game-projects.md.
  *
  * Returns `[]` for a null project — a draft thread with no project resolved
  * yet has no project to scope TO, and attaching every connected editor's
@@ -177,19 +187,70 @@ export function selectEditorPresenceChipsForProject(
   return chips.filter((chip) => normalizeWorkspaceRoot(chip.workspaceRoot) === targetRoot);
 }
 
+/** What `EditorPresenceChips.tsx` renders: either the row is hidden
+ * entirely, or it shows a (possibly empty) chip list. Not a plain array —
+ * an empty array is ambiguous between "hidden, non-game project" and
+ * "game project, nothing selected right now," and those read differently
+ * (the second still shows the row's connection/pin chrome). */
+export type EditorPresenceChipsView =
+  | { readonly kind: "hidden" }
+  | { readonly kind: "chips"; readonly chips: ReadonlyArray<EditorPresenceRenderChip> };
+
+/**
+ * The single pure seam covering BOTH halves of
+ * docs/specs/no-engine-ui-for-non-game-projects.md's Scope B: the game gate
+ * (hidden for a "none" project) and the project scoping this file's
+ * `selectEditorPresenceChipsForProject` ruling supersession describes above
+ * (the row shows only ITS project's editors, not every connected one).
+ *
+ * Deliberately does NOT re-implement the merge+filter — critique F5: it
+ * calls `mergeEditorPresenceChips` (already covered by this file's own
+ * suite) and `selectEditorPresenceChipsForProject` (same) as two existing
+ * steps, so this function has exactly one new thing to get wrong: the gate.
+ *
+ * `workspaceRoot: null` (no project resolved for this thread — a draft, or
+ * `engineChipState` still `"unknown"` with `activeProject` absent) yields no
+ * chips via the SAME path `selectEditorPresenceChipsForProject` already
+ * uses for that case — not a second null-check duplicated here.
+ */
+export function resolveEditorPresenceChipsView(input: {
+  readonly liveChips: ReadonlyArray<EditorPresenceChipItem>;
+  readonly pinned: ReadonlyMap<string, EditorPresenceChipItem>;
+  readonly workspaceRoot: string | null;
+  readonly engineChipState: "unknown" | "none" | EngineType;
+}): EditorPresenceChipsView {
+  if (input.engineChipState === "none") return { kind: "hidden" };
+  const merged = mergeEditorPresenceChips(input.liveChips, input.pinned);
+  const chips = selectEditorPresenceChipsForProject(
+    merged,
+    input.workspaceRoot !== null ? { workspaceRoot: input.workspaceRoot } : null,
+  );
+  return { kind: "chips", chips };
+}
+
 // --------------------------------------------------------------------------
 // Current-selection snapshot: a plain, non-reactive read-model
 // --------------------------------------------------------------------------
 //
-// EditorPresenceChips.tsx (mounted once, always live per the owner's "chips
-// appear before you type" requirement) already computes the merged
-// live+pinned list on every render for display. It publishes that same
-// list here so ChatView.tsx's send path — a different component, one level
-// up the tree, that runs at a specific instant rather than reactively — can
-// read "what would attach right now" with a single synchronous call
-// instead of mounting a second socket connection or subscribing to a hook
-// of its own. Not a hook on purpose: a component that only needs this at
-// send time must not re-render on every incoming presence frame.
+// EditorPresenceChips.tsx already computes the merged live+pinned list
+// (filtered through `resolveEditorPresenceChipsView`, below) on every render
+// for display. It publishes that same, RENDERED list here so ChatView.tsx's
+// send path — a different component, one level up the tree, that runs at a
+// specific instant rather than reactively — can read "what would attach
+// right now" with a single synchronous call instead of mounting a second
+// socket connection or subscribing to a hook of its own. Not a hook on
+// purpose: a component that only needs this at send time must not re-render
+// on every incoming presence frame.
+//
+// Superseded claim: this used to say the container is "mounted once, always
+// live per the owner's 'chips appear before you type' requirement" — already
+// false before this file's own no-engine-ui rework (ChatComposer.tsx unmounts
+// it on three OTHER conditions: mobile-collapsed, an active approval, or a
+// pending user input), and now false on a fourth: a "none" (non-game)
+// project. Publish still follows render by construction — the container's
+// own effect cleanup clears both snapshots on every unmount, "none" project
+// included, so a thread rooted at a non-game project can never carry a stale
+// chip list into its next send.
 let currentChipsSnapshot: ReadonlyArray<EditorPresenceRenderChip> = [];
 
 export function publishCurrentEditorPresenceChips(

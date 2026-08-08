@@ -38,6 +38,14 @@ on everything.
 - NON-Unity backends and the no-engine case are OUT OF SCOPE: the Badge
   rendering for godot/unreal/threejs/"No engine" stays exactly as is.
 
+  **Superseded (2026-08-08):** the no-engine case's Badge is GONE. The
+  owner's screenshot report ("just not show the no engine chip in there and
+  any other chip that is game harness specific") replaced the "No engine"
+  chip with nothing at all — see
+  docs/specs/no-engine-ui-for-non-game-projects.md. godot/unreal/threejs are
+  unaffected by that later change; only the null-engine badge this line
+  described is gone.
+
 ### B. Unity icon (new, tiny)
 
 No engine icon assets exist in apps/web (verified). Add an inline SVG React

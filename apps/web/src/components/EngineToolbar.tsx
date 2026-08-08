@@ -61,14 +61,6 @@ const ACTION_LABEL: Readonly<Record<EngineToolbarAction, string>> = {
 };
 
 export interface EngineToolbarProps {
-  /**
-   * The DETECTED engine — never a user choice (owner ruling: "it's not a
-   * 'pick your project', it's just detection of project type, so we should
-   * not have it selectable"). `null` when nothing's been detected for this
-   * project yet — the label still renders (as "No engine"), the control
-   * cluster does not.
-   */
-  readonly resolvedEngineType: EngineType | null;
   readonly view: EngineToolbarView;
   /** One callback for every control button — the caller switches on the
    * action rather than this component exposing four separate props. */
@@ -129,9 +121,17 @@ export interface EngineToolbarProps {
 
 export function EngineToolbar(props: EngineToolbarProps) {
   const { view } = props;
-  const engineLabel = props.resolvedEngineType
-    ? ENGINE_LABELS[props.resolvedEngineType]
-    : "No engine";
+  // no-engine-ui-for-non-game-projects spec (rev 2), Scope A: a null engine
+  // renders NOTHING — the placeholder engine-label badge this used to show
+  // for an undetected project is gone entirely. The rule lives HERE, in
+  // the component's own contract, rather than at each call site's gate, so
+  // no future caller of `EngineToolbar` can resurrect the chip by
+  // forgetting an outer condition. `view.engineType` (not a second,
+  // separately-passed prop — see the deleted `resolvedEngineType`,
+  // critique F4) is the single source `resolveEngineToolbarView` already
+  // resolves a null/unknown engine down to.
+  if (view.engineType === null) return null;
+  const engineLabel = ENGINE_LABELS[view.engineType];
 
   return (
     <div className="flex shrink-0 items-center gap-2" data-engine-toolbar="true">
@@ -144,7 +144,8 @@ export function EngineToolbar(props: EngineToolbarProps) {
         closest `Badge` size to the removed button's height (`Button`'s
         `xs`), so this control's neighbours in the header row don't visibly
         reflow. Unity replaces this badge with its merged icon-led control;
-        every other engine and the no-engine case retain it.
+        every other detected engine retains it (the no-engine case never
+        reaches this JSX at all any more — see the early return above).
       */}
       {view.backend !== "unity-cli" ? (
         <Badge variant="outline" size="lg" className="max-w-24 truncate px-2 font-medium">

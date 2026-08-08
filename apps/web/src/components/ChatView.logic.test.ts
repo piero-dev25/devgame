@@ -27,6 +27,7 @@ import {
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
+  resolveEngineChipState,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   scheduleEnvironmentReconnectWarning,
@@ -63,6 +64,25 @@ describe("tryBeginUnityRaise", () => {
     expect(tryBeginUnityRaise(inFlightRef)).toBe(false);
     inFlightRef.current = false;
     expect(tryBeginUnityRaise(inFlightRef)).toBe(true);
+  });
+});
+
+describe("resolveEngineChipState", () => {
+  it("is 'unknown' when no project has resolved yet", () => {
+    expect(resolveEngineChipState(null)).toBe("unknown");
+  });
+
+  it("is 'unknown' when the project loaded but engineType is absent (an older server)", () => {
+    expect(resolveEngineChipState({})).toBe("unknown");
+  });
+
+  it("is 'none' when detection ran and matched no marker", () => {
+    expect(resolveEngineChipState({ engineType: null })).toBe("none");
+  });
+
+  it("returns the concrete engine type for a game project", () => {
+    expect(resolveEngineChipState({ engineType: "unity" })).toBe("unity");
+    expect(resolveEngineChipState({ engineType: "threejs" })).toBe("threejs");
   });
 });
 

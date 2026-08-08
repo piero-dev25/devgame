@@ -25,10 +25,33 @@ const THREEJS_VIEW: EngineToolbarView = {
   unitySetupResolved: true,
 };
 
+// The exact shape `resolveEngineToolbarView({ engineType: null,
+// connectedEditor: null })` returns (EngineToolbar.logic.ts) — used below to
+// prove the component's own null-engine contract without hand-typing a
+// second, potentially-drifting literal.
+const NULL_ENGINE_VIEW: EngineToolbarView = {
+  engineType: null,
+  backend: null,
+  requiresPresenceCommandScope: false,
+  hasConnectedEditor: false,
+  availableActions: [],
+  playState: null,
+  disabledReason: null,
+  unitySetupCheckFailed: false,
+  unityInstallOffered: false,
+  unitySetupPending: false,
+  unitySetupResolved: false,
+};
+
+// no-engine-ui-for-non-game-projects spec (rev 2), critique F4: `view` is
+// now the toolbar's ONLY engine input (the deleted `resolvedEngineType`
+// prop used to let a caller pass a DISAGREEING engine — see the flipped
+// null-case test below, and the `NULL_ENGINE_VIEW` fixture it needs to be
+// a true anchor rather than a coincidence of two inputs happening to
+// agree).
 function renderToolbar(overrides: Partial<EngineToolbarProps> = {}) {
   return renderToStaticMarkup(
     <EngineToolbar
-      resolvedEngineType="threejs"
       view={THREEJS_VIEW}
       onAction={() => {}}
       hasPresenceCommandScope={false}
@@ -170,10 +193,21 @@ describe("EngineToolbar engine label is a static badge, not a picker", () => {
     expect(isInsideButton(html, "three.js")).toBe(false);
   });
 
-  it("still renders 'No engine' for the null case", () => {
-    const html = renderToolbar({ resolvedEngineType: null });
+  // Flipped (no-engine-ui-for-non-game-projects spec, rev 2, Scope A): this
+  // used to prove the placeholder undetected-engine badge rendered for the
+  // null case; the owner's 2026-08-08 screenshot report ("just not show the
+  // no engine chip … and any other chip that is game harness specific")
+  // replaced that badge with nothing at all. `NULL_ENGINE_VIEW` matches exactly
+  // what `resolveEngineToolbarView({ engineType: null, connectedEditor:
+  // null })` produces (EngineToolbar.logic.ts) — the fixture correction
+  // critique F4 called for: with `resolvedEngineType` deleted, `view` is
+  // this test's ONLY engine input, so a red run here is a true anchor
+  // rather than an artifact of two disagreeing props (the OLD fixture
+  // passed `resolvedEngineType: null` while `view` stayed `THREEJS_VIEW`).
+  it("renders nothing for the null-engine case", () => {
+    const html = renderToolbar({ view: NULL_ENGINE_VIEW });
 
-    expect(hasExactText(html, "No engine")).toBe(true);
+    expect(html).toBe("");
   });
 });
 
@@ -241,13 +275,7 @@ const UNITY_READY_VIEW: EngineToolbarView = {
 
 function renderUnityToolbar(view: EngineToolbarView, overrides: Partial<EngineToolbarProps> = {}) {
   return renderToStaticMarkup(
-    <EngineToolbar
-      resolvedEngineType="unity"
-      view={view}
-      onAction={() => {}}
-      hasPresenceCommandScope
-      {...overrides}
-    />,
+    <EngineToolbar view={view} onAction={() => {}} hasPresenceCommandScope {...overrides} />,
   );
 }
 
@@ -554,12 +582,7 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
 
   it("still renders the full Play/Pause/Stop cluster and play-target chevron for Godot", () => {
     const html = renderToStaticMarkup(
-      <EngineToolbar
-        resolvedEngineType="godot"
-        view={GODOT_READY_VIEW}
-        onAction={() => {}}
-        hasPresenceCommandScope
-      />,
+      <EngineToolbar view={GODOT_READY_VIEW} onAction={() => {}} hasPresenceCommandScope />,
     );
 
     expect(hasAriaLabel(html, "Play")).toBe(true);
@@ -604,12 +627,7 @@ describe("EngineToolbar — disabled Unity controls' accessible names (#107)", (
       unitySetupPending: false,
     };
     const html = renderToStaticMarkup(
-      <EngineToolbar
-        resolvedEngineType="godot"
-        view={godotNotConnected}
-        onAction={() => {}}
-        hasPresenceCommandScope
-      />,
+      <EngineToolbar view={godotNotConnected} onAction={() => {}} hasPresenceCommandScope />,
     );
 
     expect(hasAriaLabel(html, "No editor connected")).toBe(false);

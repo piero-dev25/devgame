@@ -163,5 +163,13 @@ raise + dispatch.
    or keep a third affordance?
 3. **Non-Unity projects.** Godot/Unreal/three.js exist in the current selector.
    Does the header show nothing for them, or an equivalent per-engine pair?
+
+   **Answered (2026-08-08), by docs/specs/no-engine-ui-for-non-game-projects.md:**
+   Godot/Unreal/three.js keep their existing per-engine controls, unchanged
+   — this question's "equivalent per-engine pair" half. What it actually
+   settled is the OTHER, unasked half: a project with NO detected engine at
+   all now shows nothing in the header (badge, toolbar, chips, status pill),
+   not the "No engine" badge this plan shipped with.
+
 4. **Multi-instance.** Accept the `open -a` limitation (cannot disambiguate two
    Editors), or buy the Automation permission for pid-precise focus?

@@ -1,7 +1,6 @@
 import {
   type EnvironmentId,
   type EditorId,
-  type EngineType,
   type ProjectScript,
   type ResolvedKeybindingsConfig,
   type ThreadId,
@@ -76,7 +75,6 @@ interface ChatHeaderProps {
    * here) — deliberately NOT tied to whether the project is a git repo: an
    * engine project needn't be one.
    */
-  resolvedEngineType: EngineType | null;
   engineToolbarView: EngineToolbarView;
   onEngineAction: (action: EngineToolbarAction) => void;
   onPlayThreeJs?: () => void;
@@ -137,7 +135,6 @@ export const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onDeleteProjectScript,
-  resolvedEngineType,
   engineToolbarView,
   onEngineAction,
   onPlayThreeJs,
@@ -363,7 +360,6 @@ export const ChatHeader = memo(function ChatHeader({
         )}
         {activeProjectName && (
           <EngineToolbar
-            resolvedEngineType={resolvedEngineType}
             view={engineToolbarView}
             onAction={onEngineAction}
             {...(onPlayThreeJs ? { onPlayThreeJs } : {})}

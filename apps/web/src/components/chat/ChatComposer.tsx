@@ -1,5 +1,6 @@
 import type {
   ApprovalRequestId,
+  EngineType,
   EnvironmentId,
   ModelSelection,
   PreviewAnnotationPayload,
@@ -498,6 +499,21 @@ export interface ChatComposerProps {
   routeThreadRef: ScopedThreadRef;
   draftId: DraftId | null;
 
+  /**
+   * The three-state engine signal (`resolveEngineChipState`,
+   * `ChatView.logic.ts`) — MEMO-SAFE primitives, not an `EnvironmentProject`
+   * object, since this component is `memo`'d (critique F8). Gates the
+   * editor-presence chip row's mount at this file's `EditorPresenceChips`
+   * call site: `"none"` unmounts it (a fourth condition alongside the
+   * existing mobile-collapsed/approval/pending-input three); `"unknown"`
+   * keeps it mounted so a project switch never re-mints the presence
+   * socket or flashes "connecting…" (spec critique F1).
+   */
+  engineChipState: "unknown" | "none" | EngineType;
+  /** `activeProject?.workspaceRoot ?? null` — threaded straight into
+   * `EditorPresenceChips` for its own project scoping. */
+  presenceWorkspaceRoot: string | null;
+
   // Thread context
   activeThreadId: ThreadId | null;
   activeThreadEnvironmentId: EnvironmentId | undefined;
@@ -608,6 +624,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     routeKind,
     routeThreadRef,
     draftId,
+    engineChipState,
+    presenceWorkspaceRoot,
     activeThreadId,
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
@@ -2895,10 +2913,23 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </ComposerCommandMenuLayer>
             )}
 
+            {/* no-engine-ui-for-non-game-projects spec (rev 2), Scope B: ONE
+                new condition beyond the pre-existing three below —
+                `engineChipState === "none"` unmounts this row for a
+                non-game project. `"unknown"` deliberately stays mounted
+                (never added here) so a project switch's in-flight window
+                never re-mints the presence socket or flashes
+                "connecting…" (critique F1). */}
             {!isComposerCollapsedMobile &&
               !isComposerApprovalState &&
-              pendingUserInputs.length === 0 && (
-                <EditorPresenceChips environmentId={environmentId} className="mb-3" />
+              pendingUserInputs.length === 0 &&
+              engineChipState !== "none" && (
+                <EditorPresenceChips
+                  environmentId={environmentId}
+                  workspaceRoot={presenceWorkspaceRoot}
+                  engineChipState={engineChipState}
+                  className="mb-3"
+                />
               )}
 
             {!isComposerCollapsedMobile &&

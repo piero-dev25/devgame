@@ -255,8 +255,15 @@ export interface EngineToolbarView {
   /** The engine this toolbar targets — the project's server-DETECTED engine
    * type (`activeProject.engineType` in `ChatView.tsx`), never a user
    * choice — owner ruling: engine identity is detection, not a picker.
-   * `null` means no engine is known for the project at all: the toolbar
-   * still renders (as "No engine"), but with no control cluster. */
+   * `null` means no engine is known for the project at all.
+   *
+   * Superseded ruling (no-engine-ui-for-non-game-projects spec, rev 2,
+   * 2026-08-08): a `null` engine used to still render the toolbar, as a
+   * placeholder undetected-engine badge with no control cluster. The
+   * owner's screenshot report ("just not show the no engine chip … and
+   * any other chip that is game harness specific") replaced that:
+   * `EngineToolbar.tsx` now renders NOTHING for this view — see its own
+   * early-return doc comment. */
   readonly engineType: EngineType | null;
   /** `null` exactly when `engineType` is `null` — see `resolveEngineDispatchBackend`. */
   readonly backend: EngineDispatchBackend | null;
