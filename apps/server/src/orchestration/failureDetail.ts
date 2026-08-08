@@ -11,6 +11,13 @@
  * event store, broadcast over the websocket, and rendered. One rejected
  * message produced ~394KB of thread state.
  *
+ * Effect beta.103 (the 2026-08-06 upstream merge) changed the default schema
+ * formatter to stop embedding the offending value, so the schema-rejection
+ * path no longer amplifies on its own. The funnel stays: a provider SDK that
+ * echoes the request body into its own error message is the same shape from
+ * a source we do not control, and the reactor's call sites still pass raw
+ * `Cause.pretty(cause)`.
+ *
  * TRUNCATION IS SAFE HERE, and this is the reason it is truncation rather
  * than a log sink: the rejected payload is ALREADY stored in full as the
  * user's own message on the same thread (verified: `messages[0].text` holds

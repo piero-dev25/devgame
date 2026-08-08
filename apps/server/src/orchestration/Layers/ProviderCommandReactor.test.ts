@@ -3015,10 +3015,18 @@ describe("ProviderCommandReactor", () => {
     expect(activity).toBeDefined();
     expect(detail).toContain("at most 120000");
 
-    // THE FIX: the detail no longer scales with the rejected payload.
+    // THE FIX: the detail no longer scales with the rejected payload. Under
+    // Effect beta.102 the default schema formatter embedded the offending
+    // 130k value verbatim, so this detail arrived oversized and the funnel's
+    // truncation marker used to be asserted here too. beta.103's formatter
+    // stopped embedding the value (the 2026-08-06 upstream merge went red on
+    // exactly that assertion), so this path now yields a short detail with
+    // nothing to truncate. The truncation proof lives in the next test,
+    // forced through a provider error message instead of the schema
+    // formatter; the path-scrub assertions below still exercise the funnel
+    // on this one (the raw Cause stack carries absolute paths).
     expect(detail.length).toBeLessThanOrEqual(FAILURE_DETAIL_MAX_CHARS);
     expect(detail).not.toContain("A".repeat(2_000));
-    expect(detail).toContain("characters omitted");
 
     // No absolute server paths reach this client-visible, persisted activity.
     expect(detail).not.toContain("/Users/");
@@ -3032,5 +3040,67 @@ describe("ProviderCommandReactor", () => {
     expect(String((userMessage as { text?: string } | undefined)?.text ?? "").length).toBe(
       OVERSIZE_CHARS,
     );
+  });
+
+  // The schema formatter no longer embeds rejected values (Effect beta.103),
+  // but the funnel at the activity boundary still guards every OTHER
+  // oversized-detail source: a provider SDK that echoes the request body into
+  // its own error message is the surviving real-world shape. This forces that
+  // shape through the real reactor and asserts the funnel truncates it.
+  // RED-proven by mutation: with ProviderCommandReactor's
+  // `sanitizeFailureDetail(input.detail)` replaced by `input.detail`, the
+  // length and marker assertions below fail.
+  it("truncates a provider failure whose own message embeds the payload", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const echoedPayload = "B".repeat(50_000);
+
+    harness.sendTurn.mockImplementation((() =>
+      Effect.fail(
+        new ProviderValidationError({
+          operation: "ProviderService.sendTurn",
+          issue: `provider echoed the request body: ${echoedPayload}`,
+        }),
+      )) as never);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-echoing-provider"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-echoed"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      const pending = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        pending?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) => entry.kind === "provider.turn.start.failed",
+    );
+    const detail = String((activity?.payload as { detail?: string } | undefined)?.detail ?? "");
+
+    // The head still names the failure...
+    expect(detail).toContain("provider echoed the request body");
+    // ...but the echo cannot dominate persisted thread state.
+    expect(detail.length).toBeLessThanOrEqual(FAILURE_DETAIL_MAX_CHARS);
+    expect(detail).not.toContain("B".repeat(2_000));
+    expect(detail).toContain("characters omitted");
   });
 });
