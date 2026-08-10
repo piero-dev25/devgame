@@ -143,6 +143,22 @@ function HostedStaticOnboardingState() {
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+        {/*
+          dock-chrome-strip.md, Section A: verified this does NOT double-stack
+          against `_chat.tsx`'s hoisted chrome strip, which now renders above
+          every `_chat` child route including this one. `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS`
+          only applies its padding when an ancestor `SidebarProvider` carries
+          `data-sidebar-state="collapsed"` (workspaceTitlebar.ts), which in
+          turn only happens when `SidebarProvider`'s `open` is false. On
+          thread routes `open` starts `true` (`_chat.tsx`'s `defaultOpen`)
+          and nothing on this route tree ever calls `setOpen`/`toggleSidebar`
+          (the new sidebar toggle deliberately does NOT touch this state —
+          critique m13) — so this header's own inset never actually fires
+          alongside the strip on desktop. Left as-is rather than deleted:
+          this route can also render on the plain web build (no strip,
+          `isElectron` false), where this header is the ONLY chrome and the
+          inset still does its original job on a narrow/mobile viewport.
+        */}
         <header
           className={cn(
             "border-b border-border px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5 sm:py-3",

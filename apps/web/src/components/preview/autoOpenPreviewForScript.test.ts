@@ -156,7 +156,7 @@ describe("triggerAutoOpenPreview — autoOpenPreview: false", () => {
       AsyncResult.success(snapshot("tab-1")),
     );
     const openPanel = vi.fn();
-    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn(), toggleSidebarVisibility: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({ autoOpenPreview: false }),
@@ -178,7 +178,7 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal listening",
     const tab = snapshot("tab-auto");
     const openPreview = vi.fn(async (_input: PreviewOpenInput) => AsyncResult.success(tab));
     const openPanel = vi.fn();
-    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn(), toggleSidebarVisibility: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({ previewUrl: "http://localhost:5173" }),
@@ -204,7 +204,7 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal NOT listeni
       AsyncResult.success(snapshot("tab-1")),
     );
     const openPanel = vi.fn();
-    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn(), toggleSidebarVisibility: vi.fn() });
 
     const opened = await triggerAutoOpenPreview({
       script: scriptWith({}),

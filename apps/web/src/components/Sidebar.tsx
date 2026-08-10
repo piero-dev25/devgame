@@ -73,7 +73,6 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { isElectron } from "../env";
 import {
   resolveShortcutCommand,
   shortcutLabelForCommand,
@@ -179,7 +178,7 @@ import { Input } from "./ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "./ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "./ui/select";
 import { SidebarContent, SidebarGroup, SidebarMenuButton, useSidebar } from "./ui/sidebar";
-import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
 import { useComposerDraftStore } from "../composerDraftStore";
@@ -3023,7 +3022,14 @@ export default function Sidebar() {
     : "New thread";
   return (
     <>
-      <SidebarChromeHeader isElectron={isElectron} />
+      {/* SUPERSEDED 2026-08-10 (dock-chrome-strip.md, Section B): the
+          SidebarChromeHeader mount that used to be here — inside this
+          panel's own content, below the dock's tab strip — is DELETED, not
+          moved: it duplicated `_chat.tsx`'s hoisted chrome strip, which now
+          renders the same brand/toggle row ABOVE the whole dock, at the
+          window's real top edge. This panel is `closeable: false`
+          (ChatDock.tsx's `SIDEBAR_PANEL_ID` registration) so it stays
+          mounted regardless; only the interior header row is gone. */}
       <SidebarContent
         className="gap-0"
         fixedHeader={

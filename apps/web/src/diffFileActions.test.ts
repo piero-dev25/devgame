@@ -23,7 +23,7 @@ describe("openDiffFilePrimaryAction", () => {
     const openInEditor = vi.fn();
     const openPanel = vi.fn();
     const togglePanel = vi.fn();
-    registerChatDockHandle({ openPanel, togglePanel });
+    registerChatDockHandle({ openPanel, togglePanel, toggleSidebarVisibility: vi.fn() });
 
     openDiffFilePrimaryAction({
       threadRef: THREAD_REF,

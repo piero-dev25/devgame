@@ -38,7 +38,7 @@ describe("addBrowserSurface", () => {
     const second = snapshot("tab-2");
     applyPreviewServerSnapshot(threadRef, first);
     const openPanel = vi.fn();
-    registerChatDockHandle({ openPanel, togglePanel: vi.fn() });
+    registerChatDockHandle({ openPanel, togglePanel: vi.fn(), toggleSidebarVisibility: vi.fn() });
     const openPreview = vi.fn(async (_input: PreviewOpenInput) => AsyncResult.success(second));
 
     await addBrowserSurface({ threadRef, openPreview: ({ input }) => openPreview(input) });

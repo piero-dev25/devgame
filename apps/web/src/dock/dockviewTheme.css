@@ -17,6 +17,24 @@
  * is a hairline border, never a shadow. Applied here as:
  * --dv-floating-box-shadow: none, and every fill mapped straight to
  * --wb-surface rather than a lighter tier.
+ *
+ * VOID-SPACE TRAP (dock-chrome-strip.md): a blanket `app-region: drag` on
+ * dockview's own void/group space is FORBIDDEN in this file and everywhere
+ * else in this app — do not add one. Dockview's `.dv-void-container` (the
+ * "empty" area of a group, between/around tabs and floating splits) is
+ * ALREADY a real interactive surface of its own: it is a drag SOURCE, a
+ * drop TARGET, and a click-to-activate control simultaneously
+ * (voidContainer.js:22-71), and it ships its own `cursor: grab`
+ * (dockview.css:3419-3421). Marking it `app-region: drag` would fight
+ * Electron's OS-level window-drag gesture against dockview's own
+ * pointer-driven group-drag gesture on the exact same pixels — at best one
+ * silently wins and breaks the other; the owner's actual release blocker
+ * (grabbing void space starts a dockview group drag, which renders the
+ * layout-preview drop-target overlays) is dockview's INTENDED affordance
+ * for that space, kept by design rather than "fixed" by drag-region here.
+ * The window's own draggable area is `_chat.tsx`'s hoisted chrome strip
+ * instead — a real region OUTSIDE the dock entirely, not a property on any
+ * dockview element.
  */
 
 .dockview-theme-workbench {

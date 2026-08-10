@@ -58,11 +58,14 @@ import {
   createLocalStorageLayoutStorage,
   findUnknownPanelIds,
   isEmptyDockviewTree,
+  isPanelGroupVisible,
   migrateLoadedLayout,
   openPanelInDock,
   parseLayoutFile,
   restoreActivePanelForThread,
+  subscribePanelGroupVisibility,
   syncFloatingConstraints,
+  togglePanelGroupVisibility,
   togglePanelInDock,
   type LayoutPresetFactory,
   type LayoutStorage,
@@ -229,6 +232,24 @@ export interface DockviewLayoutHandle {
    * that isn't in `panelRegistry` at all, same as `openPanel`.
    */
   togglePanel(id: string): void;
+  /**
+   * dock-chrome-strip.md, Section C: toggles a panel's GROUP-level dockview
+   * visibility (size-to-zero / restore-to-slot — `lib/openPanel.ts`'s
+   * `togglePanelGroupVisibility`, see its own doc for why this is NOT the
+   * same as `togglePanel` above). Generic by panel id, like `openPanel`/
+   * `togglePanel` — this component stays a generic layout engine with no
+   * sidebar-specific concept of its own; `ChatDock.tsx`/`chatDockHandle.ts`
+   * are what apply this to the sidebar panel specifically. No-op when `id`
+   * isn't currently an open panel.
+   */
+  togglePanelGroupVisibility(id: string): void;
+  /** Paired with `togglePanelGroupVisibility` — defaults to `true` when `id`
+   * isn't currently an open panel (nothing to hide). */
+  isPanelGroupVisible(id: string): boolean;
+  /** Paired with the two above: notifies `listener` with the panel's
+   * group's live visibility on every change. Returns a no-op unsubscribe
+   * when `id` isn't currently an open panel. */
+  subscribePanelGroupVisibility(id: string, listener: (isVisible: boolean) => void): () => void;
 }
 
 /**
@@ -1186,6 +1207,31 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       apiRef.current?.exitMaximizedGroup();
     }, []);
 
+    // dock-chrome-strip.md, Section C: same "no live DockviewApi yet" timing
+    // guard as handleOpenPanel/handleTogglePanel above. The actual decisions
+    // are lib/openPanel.ts's togglePanelGroupVisibility/isPanelGroupVisible/
+    // subscribePanelGroupVisibility — see that file's own doc for why.
+    const handleTogglePanelGroupVisibility = useCallback((id: string) => {
+      const api = apiRef.current;
+      if (!api) return;
+      togglePanelGroupVisibility(id, { api });
+    }, []);
+
+    const handleIsPanelGroupVisible = useCallback((id: string) => {
+      const api = apiRef.current;
+      if (!api) return true;
+      return isPanelGroupVisible(id, { api });
+    }, []);
+
+    const handleSubscribePanelGroupVisibility = useCallback(
+      (id: string, listener: (isVisible: boolean) => void) => {
+        const api = apiRef.current;
+        if (!api) return () => {};
+        return subscribePanelGroupVisibility(id, listener, { api });
+      },
+      [],
+    );
+
     useImperativeHandle(
       forwardedRef,
       () => ({
@@ -1194,8 +1240,20 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         importLayoutFile: handleImportFile,
         openPanel: handleOpenPanel,
         togglePanel: handleTogglePanel,
+        togglePanelGroupVisibility: handleTogglePanelGroupVisibility,
+        isPanelGroupVisible: handleIsPanelGroupVisible,
+        subscribePanelGroupVisibility: handleSubscribePanelGroupVisibility,
       }),
-      [handleReset, handleExport, handleImportFile, handleOpenPanel, handleTogglePanel],
+      [
+        handleReset,
+        handleExport,
+        handleImportFile,
+        handleOpenPanel,
+        handleTogglePanel,
+        handleTogglePanelGroupVisibility,
+        handleIsPanelGroupVisible,
+        handleSubscribePanelGroupVisibility,
+      ],
     );
 
     // Fix-round finding #1: recomputed every render — cheap (a linear scan
@@ -1211,7 +1269,15 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     );
 
     return (
-      <div className={cn("relative flex h-full min-h-0 flex-col", className)}>
+      // dock-chrome-strip.md, Section A (critique M3, "a proven overflow,
+      // not a 'verify'"): `h-full` -> `flex-1`, an explicit class change.
+      // `_chat.tsx`'s hoisted chrome strip sits ABOVE this dock inside the
+      // same `SidebarProvider`/`SidebarInset` flex column; a `h-full` dock
+      // root claims 100% of `SidebarInset`'s own declared height on top of
+      // the strip's 52px, clipping the composer's bottom edge. `flex-1`
+      // takes the REMAINING flex space instead, whatever `SidebarInset`
+      // actually renders as once the strip's height is accounted for.
+      <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
         {notice ? <LayoutNotice message={notice} onDismiss={() => setNotice(null)} /> : null}
         {/*
           Fix round, finding #1 ("app bricks in 3 clicks") + task #109 +

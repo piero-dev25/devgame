@@ -73,3 +73,56 @@ export function togglePanelInDock(
   }
   openPanelInDock(id, deps);
 }
+
+/**
+ * dock-chrome-strip.md, Section C: the core decision behind
+ * `DockviewLayout.tsx`'s `togglePanelGroupVisibility`/`isPanelGroupVisible`/
+ * `subscribePanelGroupVisibility` imperative handle actions — same
+ * extraction reason as `openPanelInDock`/`togglePanelInDock` above.
+ *
+ * This is a GROUP-level visibility toggle (dockview-core's
+ * `DockviewGroupPanelApi.setVisible`, a size-to-zero/restore on the group's
+ * own splitview slot — verified against dockview-core@7.0.4's
+ * `branchNode.js#setChildVisible`, which caches and restores the group's
+ * exact prior size/position rather than removing it from the tree), NOT
+ * `IDockviewPanel.api.close()`. The distinction is load-bearing: closing a
+ * panel unmounts its React content; this never does. For the sidebar panel
+ * specifically, staying mounted through a hide/show cycle is required —
+ * its window keydown listeners (thread prev/next, Cmd+1..9) live only while
+ * mounted (see ChatDock.tsx's `SIDEBAR_PANEL_ID` registration comment,
+ * `closeable: false`, and ChatDock.tsx:180-185's own citation of why).
+ *
+ * All three functions resolve the panel's GROUP via `api.getPanel(id)?.group`
+ * rather than a group id, so a caller only ever needs to know the PANEL's
+ * id (already the shared vocabulary `openPanelInDock`/`togglePanelInDock`
+ * use) — no second "which group is this panel in" constant to keep in sync.
+ * No-op (or the documented default) when the panel isn't currently open,
+ * matching `openPanelInDock`'s "unknown id -> silent no-op" precedent.
+ */
+export function isPanelGroupVisible(id: string, { api }: { api: DockviewApi }): boolean {
+  return api.getPanel(id)?.group.api.isVisible ?? true;
+}
+
+export function togglePanelGroupVisibility(id: string, { api }: { api: DockviewApi }): void {
+  const group = api.getPanel(id)?.group;
+  if (!group) return;
+  group.api.setVisible(!group.api.isVisible);
+}
+
+/**
+ * `listener` receives the group's live `isVisible` on every dockview
+ * `onDidVisibilityChange` event. Returns a no-op unsubscribe (rather than
+ * throwing) when the panel isn't open — same "timing issue, not a caller
+ * bug" reasoning `DockviewLayout.tsx`'s other ref actions already apply to
+ * a not-yet-live `apiRef.current`.
+ */
+export function subscribePanelGroupVisibility(
+  id: string,
+  listener: (isVisible: boolean) => void,
+  { api }: { api: DockviewApi },
+): () => void {
+  const group = api.getPanel(id)?.group;
+  if (!group) return () => {};
+  const disposable = group.api.onDidVisibilityChange((event) => listener(event.isVisible));
+  return () => disposable.dispose();
+}

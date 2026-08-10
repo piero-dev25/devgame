@@ -47,6 +47,7 @@ import {
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
   registerChatDockHandle,
+  reportChatDockSidebarVisibleChange,
   TERMINAL_PANEL_ID,
 } from "./chatDockHandle";
 import BrowserDockPanel from "./BrowserDockPanel";
@@ -545,8 +546,39 @@ export function ChatDock(props: ChatDockProps) {
   // reconcile here.
   const dockviewLayoutRef = useRef<DockviewLayoutHandle>(null);
   useEffect(() => {
-    registerChatDockHandle(dockviewLayoutRef.current);
-    return () => registerChatDockHandle(null);
+    // dock-chrome-strip.md, Section C: `ChatDockHandle`'s new
+    // `toggleSidebarVisibility` has a different shape than
+    // `DockviewLayoutHandle`'s generic-by-id `togglePanelGroupVisibility`,
+    // so (unlike `openPanel`/`togglePanel`, which pass straight through
+    // structurally) this is a real adapter, applying the generic dock
+    // action to `SIDEBAR_PANEL_ID` specifically. The functions close over
+    // `dockviewLayoutRef` (not its `.current` at registration time), so
+    // they stay correct across any ref changes.
+    registerChatDockHandle({
+      openPanel: (id) => dockviewLayoutRef.current?.openPanel(id),
+      togglePanel: (id) => dockviewLayoutRef.current?.togglePanel(id),
+      toggleSidebarVisibility: () =>
+        dockviewLayoutRef.current?.togglePanelGroupVisibility(SIDEBAR_PANEL_ID),
+    });
+    // Mirrors the sidebar panel's live group visibility into
+    // `chatDockHandle.ts`'s standalone store, for `_chat.tsx`'s strip (a
+    // sibling, not a descendant) to read reactively — see that store's own
+    // doc comment. Seeded once synchronously right after registration so a
+    // subscriber that mounted before this dock did sees the correct value
+    // immediately, not just on the next change.
+    if (dockviewLayoutRef.current) {
+      reportChatDockSidebarVisibleChange(
+        dockviewLayoutRef.current.isPanelGroupVisible(SIDEBAR_PANEL_ID),
+      );
+    }
+    const unsubscribeSidebarVisibility = dockviewLayoutRef.current?.subscribePanelGroupVisibility(
+      SIDEBAR_PANEL_ID,
+      reportChatDockSidebarVisibleChange,
+    );
+    return () => {
+      registerChatDockHandle(null);
+      unsubscribeSidebarVisibility?.();
+    };
   }, []);
   // Not memoized: step 1 memoized this object, but constructing a
   // 3-4-field plain object is cheap enough that the memo bought nothing

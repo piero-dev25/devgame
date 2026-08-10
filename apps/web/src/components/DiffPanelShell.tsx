@@ -9,11 +9,16 @@ export type DiffPanelMode = "inline" | "sheet" | "sidebar" | "embedded";
 
 function getDiffPanelHeaderRowClassName(mode: DiffPanelMode) {
   const shouldUseDragRegion = isElectron && mode !== "sheet" && mode !== "embedded";
+  // dock-chrome-strip.md, Section D (critique M7): `drag-region` dropped —
+  // same reasoning as ChatView.tsx's panel topbar (redundant with the
+  // hoisted chrome strip now covering the window's real top edge). Height
+  // and content unchanged; `shouldUseDragRegion`'s name is now about which
+  // branch/attribute this row uses, not a literal drag claim.
   return cn(
     "flex items-center justify-between gap-2",
     mode === "embedded" ? "px-2" : "px-4",
     shouldUseDragRegion
-      ? "drag-region h-[52px] border-b border-border wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
+      ? "h-[52px] border-b border-border wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+1em)]"
       : "surface-subheader",
   );
 }

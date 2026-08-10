@@ -185,7 +185,7 @@ import {
   ThreadStatusPill,
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
-import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { SidebarChromeFooter } from "./sidebar/SidebarChrome";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -3583,7 +3583,12 @@ export default function LegacySidebar() {
       {prewarmedSidebarThreadRefs.map((threadRef) => (
         <SidebarThreadDetailPrewarmer key={scopedThreadKey(threadRef)} threadRef={threadRef} />
       ))}
-      <SidebarChromeHeader isElectron={isElectron} />
+      {/* SUPERSEDED 2026-08-10 (dock-chrome-strip.md, Section B): the
+          SidebarChromeHeader mount that used to be here is DELETED, not
+          moved — see Sidebar.tsx's matching deletion for the full
+          reasoning. The legacy sidebar is user-reachable via Settings ->
+          Legacy features, so it needed this deletion too, not just
+          Sidebar.tsx's. */}
 
       <SidebarProjectsContent
         showArm64IntelBuildWarning={showArm64IntelBuildWarning}

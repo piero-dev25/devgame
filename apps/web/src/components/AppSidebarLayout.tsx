@@ -10,10 +10,12 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
+import { useDesktopFullscreenState } from "../hooks/useDesktopFullscreenState";
 import { getLocalStorageItem } from "../hooks/useLocalStorage";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
+import { resolveWorkspaceChromeInsetStyle } from "../workspaceChromeInset";
 import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import { useThreadSidebarComponent } from "../hooks/useThreadSidebarComponent";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
@@ -35,8 +37,6 @@ import {
   useSidebarVisibility,
 } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-
-const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "90px";
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -106,6 +106,15 @@ function SidebarControl() {
                   "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
               )}
               aria-label="Toggle main sidebar"
+              // dock-chrome-strip.md, Section C: `SidebarTrigger` now accepts
+              // explicit `onToggle`/`pressed` so it can be reused by the
+              // dock-side strip toggle without touching `SidebarProvider`
+              // state. Passed explicitly here too (not left to `SidebarTrigger`'s
+              // internal `useSidebar()` fallback) so this call site's behavior
+              // is visibly, verifiably unchanged: same `toggleSidebar` function,
+              // same `isSidebarVisible` read this component already computed.
+              onToggle={toggleSidebar}
+              pressed={isSidebarVisible}
             />
           }
         />
@@ -139,35 +148,19 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   // that would otherwise refresh a render-time snapshot.
   const viewportWidth = useSyncExternalStore(subscribeToViewportWidth, readViewportWidth);
   const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth);
-  const [isWindowFullscreen, setIsWindowFullscreen] = useState(() => {
-    const getWindowFullscreenState = window.desktopBridge?.getWindowFullscreenState;
-    return isMacosDesktop && typeof getWindowFullscreenState === "function"
-      ? getWindowFullscreenState()
-      : false;
-  });
+  // dock-chrome-strip.md, Section A: both the fullscreen subscription and the
+  // resulting inset mapping are now shared with `_chat.tsx`'s hoisted chrome
+  // strip via `useDesktopFullscreenState`/`resolveWorkspaceChromeInsetStyle`
+  // — no behavior change here, same inputs, same byte-equal output (see
+  // `workspaceChromeInset.test.ts`).
+  const isWindowFullscreen = useDesktopFullscreenState(isMacosDesktop);
   const sidebarProviderStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
-    ...(isMacosDesktop && !isWindowFullscreen
-      ? { "--workspace-controls-left": MACOS_TRAFFIC_LIGHTS_LEFT_INSET }
-      : {}),
+    ...resolveWorkspaceChromeInsetStyle({
+      isMacDesktop: isMacosDesktop,
+      isFullscreen: isWindowFullscreen,
+    }),
   } as CSSProperties;
-
-  useEffect(() => {
-    if (!isMacosDesktop) return;
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
-    const { getWindowFullscreenState, onWindowFullscreenStateChange } = bridge;
-    if (
-      typeof getWindowFullscreenState !== "function" ||
-      typeof onWindowFullscreenStateChange !== "function"
-    ) {
-      return;
-    }
-
-    const unsubscribe = onWindowFullscreenStateChange(setIsWindowFullscreen);
-    setIsWindowFullscreen(getWindowFullscreenState());
-    return unsubscribe;
-  }, [isMacosDesktop]);
 
   useEffect(() => {
     const onMenuAction = window.desktopBridge?.onMenuAction;

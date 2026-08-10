@@ -10,6 +10,7 @@ import {
   resolveSidebarStageBackdropVariant,
   SidebarStageBackdrop,
   useEnvironmentStageLabel,
+  type SidebarStageBackdropVariant,
 } from "../SidebarStageBackdrop";
 import { Badge } from "../ui/badge";
 import {
@@ -24,10 +25,57 @@ import {
 import { SidebarProviderUpdatePill } from "./SidebarProviderUpdatePill";
 import { SidebarUpdatePill } from "./SidebarUpdatePill";
 
+/**
+ * dock-chrome-strip.md, Section A/C: when `SidebarChromeHeader` is hoisted
+ * into `_chat.tsx`'s route-level chrome strip (as opposed to its other,
+ * unchanged call site — `AppSidebarLayout.tsx:211`'s settings nav — where
+ * `sidebarToggle` stays `undefined`), the strip needs an ALWAYS-visible
+ * sidebar toggle, not the mobile-only one below. Reuses the SAME trigger
+ * slot rather than adding a second button: when `sidebarToggle` is
+ * provided, this replaces the trigger's default `md:hidden`/`useSidebar()`-
+ * driven behaviour with an always-visible one wired to `onToggle`/`pressed`
+ * instead (the dock-side sidebar GROUP hide/show — critique m13 forbids
+ * wiring this to `SidebarProvider`'s own open state, which this trigger
+ * still does when `sidebarToggle` is omitted).
+ *
+ * Pulled out into its own named, EXPORTED component — same reasoning as
+ * `DockviewLayout.tsx`'s `DockControlsCluster`: `SidebarChromeHeader` also
+ * renders `SidebarBrand`'s router `<Link>`, which throws under this repo's
+ * `renderToStaticMarkup`-only test harness with no `RouterProvider`
+ * ancestor (no in-repo router-mock precedent — verified: `useLinkProps`
+ * throws "useRouter must be used inside a <RouterProvider>"). This
+ * component needs only a `SidebarProvider` ancestor (via `SidebarTrigger`'s
+ * `useSidebar()`/`useSidebarVisibility()`), so it's the presentational
+ * surface `SidebarChromeHeader.test.tsx` actually renders.
+ */
+export function SidebarChromeToggle({
+  backdropVariant,
+  sidebarToggle,
+}: {
+  backdropVariant: SidebarStageBackdropVariant | null;
+  sidebarToggle?: { onToggle: () => void; pressed: boolean };
+}) {
+  return (
+    <SidebarTrigger
+      className={cn(
+        "relative z-10",
+        !sidebarToggle && "md:hidden",
+        backdropVariant &&
+          "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
+      )}
+      {...(sidebarToggle
+        ? { onToggle: sidebarToggle.onToggle, pressed: sidebarToggle.pressed }
+        : {})}
+    />
+  );
+}
+
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   isElectron,
+  sidebarToggle,
 }: {
   isElectron: boolean;
+  sidebarToggle?: { onToggle: () => void; pressed: boolean };
 }) {
   const stageLabel = useEnvironmentStageLabel();
   const environmentIdentificationMode = useEnvironmentIdentificationMode();
@@ -48,12 +96,9 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
       )}
     >
       {backdropVariant ? <SidebarStageBackdrop variant={backdropVariant} /> : null}
-      <SidebarTrigger
-        className={cn(
-          "relative z-10 md:hidden",
-          backdropVariant &&
-            "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
-        )}
+      <SidebarChromeToggle
+        backdropVariant={backdropVariant}
+        {...(sidebarToggle ? { sidebarToggle } : {})}
       />
       <SidebarBrand onBackdrop={backdropVariant !== null} />
       {pillLabel ? (

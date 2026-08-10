@@ -6313,13 +6313,23 @@ function ChatViewContent(props: ChatViewProps) {
         data-chat-column-maximized-away={rightPanelMaximized ? "true" : "false"}
       >
         {/* Top bar */}
+        {/*
+          dock-chrome-strip.md, Section D (critique M7): `drag-region` is
+          dropped from this panel topbar — with `_chat.tsx`'s hoisted chrome
+          strip now covering the window's real top edge, this inner header's
+          own drag claim is redundant. Height and content are unchanged; the
+          resulting visible chrome stack (strip 52px + dock tab strip 36px +
+          this panel topbar) is ACCEPTED for now as the cost of the dock
+          being a first-class feature — stated here so the owner adjudicates
+          it seeing the actual build, not silently absorbed as "fine."
+        */}
         <header
           data-chat-header
           className={cn(
             "bg-background transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none",
             isElectron
               ? cn(
-                  "workspace-topbar drag-region relative px-3 sm:px-5",
+                  "workspace-topbar relative px-3 sm:px-5",
                   reserveTitleBarControlInset &&
                     !inlineRightPanelOwnsTitleBar &&
                     "wco:pr-[var(--workspace-native-controls-inset)]",

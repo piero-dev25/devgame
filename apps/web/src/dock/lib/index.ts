@@ -47,6 +47,15 @@ export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
 // extracted for the same "no jsdom to drive the ref" reason as
 // decideImportedLayoutAction.
 export { openPanelInDock, togglePanelInDock } from "./openPanel";
+// dock-chrome-strip.md, Section C: the core decision behind
+// DockviewLayout.tsx's `togglePanelGroupVisibility`/`isPanelGroupVisible`/
+// `subscribePanelGroupVisibility` imperative handle actions — same
+// extraction reason as openPanelInDock/togglePanelInDock above.
+export {
+  isPanelGroupVisible,
+  subscribePanelGroupVisibility,
+  togglePanelGroupVisibility,
+} from "./openPanel";
 // Task #108: the core decision behind restoring a thread's remembered
 // active-panel selection — same "no jsdom to drive the ref" extraction
 // reason as openPanelInDock/togglePanelInDock above.

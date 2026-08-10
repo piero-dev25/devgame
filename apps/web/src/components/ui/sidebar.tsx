@@ -316,9 +316,33 @@ function Sidebar({
   );
 }
 
-function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<typeof Button>) {
+function SidebarTrigger({
+  className,
+  onClick,
+  onToggle,
+  pressed,
+  ...props
+}: React.ComponentProps<typeof Button> & {
+  /**
+   * dock-chrome-strip.md, Section C: overrides the default
+   * `useSidebar().toggleSidebar` action. `SidebarTrigger` used to hardcode
+   * that ambient-provider toggle unconditionally, which made it unusable
+   * for the dock-side sidebar GROUP hide/show — that toggle must NOT touch
+   * `SidebarProvider`'s own open state (critique m13:
+   * `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS` consumers key off it; wiring
+   * both would half-wire two different sidebar concepts). Falls back to
+   * `useSidebar()`'s own toggle when omitted — every other existing caller
+   * (this component's own `SidebarProvider`-scoped usages) is unchanged.
+   */
+  onToggle?: () => void;
+  /** Paired with `onToggle`: overrides the default `useSidebarVisibility()`
+   * read that drives the icon and `aria-pressed`. Falls back the same way. */
+  pressed?: boolean;
+}) {
   const { toggleSidebar } = useSidebar();
-  const isOpen = useSidebarVisibility();
+  const defaultIsOpen = useSidebarVisibility();
+  const isOpen = pressed ?? defaultIsOpen;
+  const handleToggle = onToggle ?? toggleSidebar;
 
   return (
     <Button
@@ -331,7 +355,7 @@ function SidebarTrigger({ className, onClick, ...props }: React.ComponentProps<t
       aria-pressed={isOpen}
       onClick={(event) => {
         onClick?.(event);
-        toggleSidebar();
+        handleToggle();
       }}
       size="icon"
       variant="ghost"
