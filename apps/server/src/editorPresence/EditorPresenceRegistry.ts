@@ -487,11 +487,23 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
             // Reset on every (re)registration, including a reconnect that
             // takes over an existing session — same self-healing shape as
             // `selection: null` above. A `playState` frame follows
-            // immediately after `hello` (see plugin.gd; Unity no longer
-            // publishes through this registry at all — it's served by
-            // Unity's own official com.unity.pipeline package, see
-            // unity/README.md), so this null window is momentary, not a
+            // immediately after `hello` (see plugin.gd for Godot; Unity's
+            // com.ironmind.editor-presence package (>=0.3.1) does the same
+            // — see EditorPresenceConnection.cs's awaited post-hello send in
+            // ConnectAndRunAsync), so this null window is momentary, not a
             // lasting regression to "unknown" on every reconnect.
+            //
+            // SUPERSEDED 2026-08-10 (unity-playstate-presence.md,
+            // comment fix only — zero behavior change): this used to say
+            // "Unity no longer publishes through this registry at all —
+            // it's served by Unity's own official com.unity.pipeline
+            // package." That was true for Unity's Play/Stop COMMAND path
+            // (still is — Unity's dispatch still goes through the CLI
+            // shell-out, per EngineToolbar.logic.ts's
+            // `resolveEngineDispatchBackend`), but Unity's presence
+            // publisher itself was never removed: it registers through
+            // THIS registry via hello/selection (unchanged since #129) and,
+            // as of this task, playState too.
             playState: null,
             // The FIRST known claimant identity wins and sticks — a
             // same-identity reconnect doesn't need to "refresh" it (it's

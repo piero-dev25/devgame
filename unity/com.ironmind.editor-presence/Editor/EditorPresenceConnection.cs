@@ -1,11 +1,20 @@
-// The EPP publisher WebSocket connection. Selection-only: this plugin
-// sends `hello` and `selection`, and never sends or receives anything else.
+// The EPP publisher WebSocket connection. This plugin sends `hello`,
+// `selection`, and `playState`, and never sends or receives anything else.
 // It does not implement the `command` extension at all (see
 // docs/workbench/spec-editor-presence-commands.md) — no `commandResult`,
-// no `playState`, no inbound dispatch. com.unity.pipeline (Unity's official
-// package) owns play/stop/pause/step/status; see unity/README.md for the
-// split. This keeps the receive loop below intentionally dumb: it exists
-// only to notice a server-initiated close, never to act on frame content.
+// no inbound dispatch. com.unity.pipeline (Unity's official package) owns
+// play/stop/pause/step/status; see unity/README.md for the split. This
+// keeps the receive loop below intentionally dumb: it exists only to
+// notice a server-initiated close, never to act on frame content.
+//
+// SUPERSEDED 2026-08-10 (unity-playstate-presence.md, package 0.3.1):
+// this header used to say "Selection-only: this plugin sends `hello` and
+// `selection`, and never sends or receives anything else" and list
+// `playState` alongside `commandResult` as never sent. `playState` is now
+// sent — see `SendPlayStateAsync` below and `ConnectAndRunAsync`'s
+// mandated awaited post-hello send. `commandResult` and inbound dispatch
+// remain entirely unimplemented; this plugin still never receives an
+// actionable frame.
 //
 // UNVERIFIED (see UNVERIFIED.md): ClientWebSocket's async handshake/read/
 // write behavior inside the Unity Editor's Mono/CoreCLR runtime and
@@ -224,6 +233,37 @@ namespace Ironmind.EditorPresence
             SetState(EditorPresenceConnectionState.Connected);
             await SendHelloAsync();
 
+            // THE RECONNECT CONTRACT (unity-playstate-presence.md,
+            // critique F1 — MANDATED, not a stylistic choice): a direct,
+            // AWAITED call, here and only here, between `SendHelloAsync`
+            // and `ReceiveUntilClosedAsync`. `State` flips to `Connected`
+            // above BEFORE `SendHelloAsync` is awaited, so any
+            // pump/StateChanged-driven publish (e.g.
+            // `EditorPresencePlayStateWatcher`'s own debounced publish,
+            // triggered independently by a `playModeStateChanged`/
+            // `pauseStateChanged` event racing this reconnect) could win
+            // the wire race and arrive BEFORE `hello` — and the server
+            // silently drops a playState frame that arrives before
+            // registration (EditorPresenceRoute.ts's playState case is
+            // gated on `registeredSessionIds`), leaving the null window
+            // permanent until the next real change. Concurrent `SendAsync`
+            // calls on one `ClientWebSocket` are also unordered/unsafe, and
+            // `SendJsonAsync` swallows exceptions rather than surfacing
+            // them here. Awaited-in-sequence = single writer, guaranteed
+            // ordering, no heartbeat needed. This is also what delivers the
+            // EnteredPlayMode state after a play-mode domain reload with no
+            // extra machinery: `[InitializeOnLoad]` reruns this whole
+            // method after every reload, and the reconnect pump retries
+            // within `ReconnectIntervalSeconds`.
+            //
+            // The watcher itself publishes ONLY on change (debounced),
+            // never on connect — this call is the sole source of the
+            // post-(re)connect frame.
+            await SendPlayStateAsync(new PlayStateFrameDto
+            {
+                playState = EditorPresencePlayStateWatcher.ComputeCurrentPlayState(),
+            });
+
             await ReceiveUntilClosedAsync(_cts.Token);
         }
 
@@ -245,6 +285,18 @@ namespace Ironmind.EditorPresence
         }
 
         public static Task SendSelectionAsync(SelectionFrameDto frame)
+        {
+            return SendJsonAsync(JsonUtility.ToJson(frame));
+        }
+
+        /// Same shape as `SendSelectionAsync` — fire-and-forget for the
+        /// watcher's own debounced publishes, but ALSO the call
+        /// `ConnectAndRunAsync` awaits directly for the mandated post-hello
+        /// send (see that method's own doc comment). `SendJsonAsync`
+        /// already no-ops silently when disconnected and swallows send
+        /// exceptions, so awaiting this can't throw or hang past the
+        /// underlying `SendAsync`.
+        public static Task SendPlayStateAsync(PlayStateFrameDto frame)
         {
             return SendJsonAsync(JsonUtility.ToJson(frame));
         }

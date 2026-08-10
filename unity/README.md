@@ -41,7 +41,8 @@ against a real Unity 6000.3.14f1 Editor: a full
 read back from editor state, and a real 1280x720 Game View capture.
 
 **A LATER commit rebuilt `com.ironmind.editor-presence` — thin,
-selection-only.** It carries forward exactly the selection watcher, item
+reporting-only (originally selection-only; 0.3.1 added play-state reporting,
+see below).** It carries forward exactly the selection watcher, item
 builder, connection/auth transport, and pairing settings from the deleted
 package's reviewed code. It does **not** carry forward the command
 dispatcher, play-mode controller, or cold-start entry point — those stay
@@ -51,6 +52,19 @@ sends selection (single-select, multi-select, deselect), survives a forced
 domain reload with session identity intact, and a real pairing redeem
 against a live server. See `unity/com.ironmind.editor-presence/UNVERIFIED.md`
 for the full verification record and what remains unverified.
+
+**Corrected 2026-08-10 — 0.3.1 added play-state REPORTING, not play-state
+CONTROL.** The package now also publishes a live `playState`
+("stopped"/"playing"/"paused", computed from `EditorApplication.isPlaying`/
+`isPaused`) over the same presence connection: once right after `hello` on
+every (re)connect, and again on every change — see
+`docs/specs/unity-playstate-presence.md`. This closes the gap where the
+DevGame toolbar could only reflect a play state it had itself commanded via
+Pipeline's CLI, and went stale the moment the user pressed Play/Stop/Pause
+inside the Editor directly instead. It does **not** change the command split
+described above: this package still advertises `capabilities: []` and still
+cannot be told to do anything — Play/Stop/Pause commands issued FROM DevGame
+still go through Pipeline's CLI shell-out, unchanged.
 
 ## Known gap
 

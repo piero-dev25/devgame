@@ -1592,13 +1592,21 @@ function ChatViewContent(props: ChatViewProps) {
   // surfaces) is deliberately NOT taken: the fork's Files panel is a dock
   // panel (#61) and its pending state lives there — the RightPanelTabs call
   // sites pass EMPTY_PENDING_FILE_SURFACE_IDS by construction.
-  // Unity has no presence feed to read a play state from — the CLI route's
-  // successful responses carry a freshly re-read `UnityEditorStatus`
-  // (`UnityPipelineClient` re-reads status before returning, so a caller
-  // never has to separately poll), and this is where that lands. Reset per
-  // project so switching projects never shows a stale reading from a
-  // different one — presence-backed engines don't need this because
-  // `connectedProjectEditor` itself is re-derived per project already.
+  // SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this used to
+  // say "Unity has no presence feed to read a play state from" — it does
+  // now (Unity package >=0.3.1 publishes `playState`; see
+  // `resolveEngineToolbarView`'s unity-cli branch, which prefers
+  // `connectedProjectEditor?.playState` over this echo). This state stays
+  // as the FALLBACK for when presence has no opinion (no publisher
+  // connected, an older package, or the post-reconnect null window): the
+  // CLI route's successful responses carry a freshly re-read
+  // `UnityEditorStatus` (`UnityPipelineClient` re-reads status before
+  // returning, so a caller never has to separately poll), and this is where
+  // that lands. Reset per project so switching projects never shows a stale
+  // reading from a different one — presence-backed engines don't need this
+  // because `connectedProjectEditor` itself is re-derived per project
+  // already; this echo's own per-project reset stays load-bearing precisely
+  // because it's now only a fallback, not the sole source.
   const [unityPlayState, setUnityPlayState] = useState<EditorPresencePlayState | null>(null);
   useEffect(() => {
     setUnityPlayState(null);

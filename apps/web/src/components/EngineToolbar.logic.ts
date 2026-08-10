@@ -79,9 +79,22 @@ const CONTROL_ACTION_ORDER: ReadonlyArray<EngineToolbarAction> = ["play", "pause
  *   exists to close. Only `"threejs-script"` is genuinely exempt: it runs a
  *   project script the user already configured, and touches no editor.
  * - Only `"editor-presence"` has a live `capabilities`/`playState` feed at
- *   all (the presence WebSocket). `"unity-cli"` has no publisher and never
- *   appears in the presence feed's editor list; `"threejs-script"` has no
- *   engine, full stop.
+ *   all (the presence WebSocket). `"threejs-script"` has no engine, full
+ *   stop.
+ *
+ *   SUPERSEDED 2026-08-10 (unity-playstate-presence.md): the line this
+ *   replaced claimed `"unity-cli"` "has no publisher and never appears in
+ *   the presence feed's editor list" — true when written, wrong since
+ *   Unity package 0.3.1. Unity's presence publisher (hello/selection since
+ *   #129, now also `playState`) DOES appear in the feed and IS consulted —
+ *   see `resolveEngineToolbarView`'s unity-cli branch, which now prefers
+ *   `connectedEditor?.playState` over the CLI echo. What's still true, and
+ *   is the actual reason this file's dispatch routing is untouched: Unity's
+ *   publisher advertises `capabilities: []` (no `command` support), so
+ *   `resolveEngineDispatchBackend` still sends every Play/Stop/Pause click
+ *   down the CLI shell-out, never a presence `command` frame — only the
+ *   read side (what the toolbar SHOWS) changed, not the write side (how a
+ *   click is dispatched).
  */
 export type EngineDispatchBackend = "editor-presence" | "unity-cli" | "threejs-script";
 
@@ -276,11 +289,26 @@ export interface EngineToolbarView {
   readonly requiresPresenceCommandScope: boolean;
   /** Whether a connected editor was found for this project's workspace
    * root. Only meaningful for the `"editor-presence"` backend — `false`
-   * for `"unity-cli"` (no publisher, ever) and `"threejs-script"`
-   * (irrelevant), and for `"editor-presence"` with nothing currently
-   * connected. The correct response to `false` on `"editor-presence"` is a
-   * disabled control cluster, not a hidden toolbar: the engine is known
-   * even when nothing is connected right now. */
+   * for `"unity-cli"` and `"threejs-script"` (irrelevant), and for
+   * `"editor-presence"` with nothing currently connected. The correct
+   * response to `false` on `"editor-presence"` is a disabled control
+   * cluster, not a hidden toolbar: the engine is known even when nothing is
+   * connected right now.
+   *
+   * SUPERSEDED 2026-08-10 (unity-playstate-presence.md critique F6):
+   * this used to say `"unity-cli"` is `false` because it has "no publisher,
+   * ever" — wrong since Unity package 0.3.1 (see `EngineDispatchBackend`'s
+   * own doc comment for the fuller correction). This field stays `false`
+   * for `"unity-cli"` regardless, but not because no publisher exists — a
+   * Unity presence publisher exists and now feeds `playState`
+   * (`resolveEngineToolbarView`'s unity-cli branch reads
+   * `connectedEditor?.playState`). What this field actually MEANS is
+   * "presence-DRIVEN controls" — i.e. whether the control cluster's
+   * enabled/disabled state and available actions come from a presence
+   * `capabilities` feed — and unity-cli's controls are not that: they stay
+   * gated on `UnitySetupProbe`'s classified facts (`isUnityPlayReady`), same
+   * as before this task, wholly independent of whether a Unity publisher is
+   * connected. */
   readonly hasConnectedEditor: boolean;
   /** Actions to render. For `"editor-presence"`, filtered to what the
    * connected editor actually advertised — see
@@ -293,10 +321,21 @@ export interface EngineToolbarView {
    * list. */
   readonly availableActions: ReadonlyArray<EngineToolbarAction>;
   /** For `"editor-presence"`, the connected editor's own reported state.
-   * For `"unity-cli"`, the caller-supplied `unityPlayState` (there is no
-   * status RPC wired yet as of this change — see `resolveEngineToolbarView`'s
-   * doc comment — so this is `null` until one exists). Always `null` for
-   * `"threejs-script"`. */
+   * For `"unity-cli"`, `connectedEditor?.playState ?? unityPlayState` — see
+   * `resolveEngineToolbarView`'s unity-cli branch for the precedence
+   * rationale. Always `null` for `"threejs-script"`.
+   *
+   * SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this used to
+   * say `"unity-cli"` gets "the caller-supplied `unityPlayState`" and
+   * nothing else, because there was no status RPC wired for Unity at all.
+   * That's still true in the narrow sense — there is still no `unity
+   * command editor_status` RPC reachable from here — but it's no longer the
+   * whole story: Unity package 0.3.1 publishes a real presence `playState`
+   * feed, and it now wins whenever it has an opinion. `unityPlayState` (the
+   * CLI's own last-known-good echo, set from a successful dispatch reply)
+   * is the fallback for when presence has none — see the merge-point
+   * comment at this backend's `playState` assignment for the full
+   * reasoning, including its honest bound during a long presence outage. */
   readonly playState: EditorPresencePlayState | null;
   /** Why the control cluster is disabled (`availableActions.length === 0`)
    * — `null` when there's nothing backend-specific to say (the component
@@ -371,12 +410,22 @@ export function resolveEngineToolbarView(input: {
   /** Only consulted for the `"editor-presence"` backend. */
   readonly connectedEditor: EditorPresenceEntry | null;
   /**
-   * Only consulted for the `"unity-cli"` backend. `null` until a server
+   * Only consulted for the `"unity-cli"` backend, and only as the FALLBACK
+   * when `connectedEditor` has no playState opinion — see the merge point
+   * at this backend's `playState` assignment. `null` until a server
    * endpoint exists to query Unity CLI play state (`unity command
    * editor_status`, per team-lead's verification, has no client-reachable
    * route yet — the same gap `dispatchEditorCommand` had for Godot before
    * this task added one). A caller with nothing to pass should omit this
    * or pass `null` explicitly; do not guess `"stopped"`.
+   *
+   * SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this doc used
+   * to describe `unityPlayState` as the ONLY play-state source for
+   * `"unity-cli"` ("play state is caller-supplied-only"). As of Unity
+   * package 0.3.1, `connectedEditor`'s presence-reported `playState` is
+   * consulted first — this field is now the one-shot echo that fills the
+   * gap only while presence has nothing to say (no publisher connected, an
+   * older package, or the momentary post-reconnect null window).
    */
   readonly unityPlayState?: EditorPresencePlayState | null;
   /**
@@ -458,7 +507,26 @@ export function resolveEngineToolbarView(input: {
       requiresPresenceCommandScope: true,
       hasConnectedEditor: false,
       availableActions: playReady ? UNITY_CLI_ACTIONS : [],
-      playState: input.unityPlayState ?? null,
+      // unity-playstate-presence.md (2026-08-10): presence wins
+      // WHENEVER it is non-null, because it is a level sourced from Unity's
+      // own EditorApplication callbacks and republished in full on every
+      // reconnect (protocol.ts's own design principle) — `unityPlayState`
+      // is only the fallback for presence-has-no-opinion (no publisher
+      // connected, an older package that never sent a frame, or the
+      // momentary post-reconnect null window before Unity's watcher
+      // resends). Post-click transient: after a harness Play, presence may
+      // say "stopped" for a sub-second until Unity's own callback fires —
+      // intentional; the reverse choice (trusting the echo over presence)
+      // reintroduces #136 in miniature, which is the bug this whole task
+      // exists to fix. During Unity's play-mode domain reload the publisher
+      // DISCONNECTS, so `connectedEditor` goes null and the echo bridges
+      // the gap. HONEST BOUND: this composition holds only while
+      // disconnections are short — the echo carries no age and no
+      // invalidation, so a LONG presence outage (credential rejection
+      // halting reconnect, a backend restart, #113's degraded pairing)
+      // reverts the toolbar to exactly today's echo-only behavior until
+      // presence returns. That is the status quo, not a regression.
+      playState: connectedEditor?.playState ?? input.unityPlayState ?? null,
       disabledReason: playReady ? null : unityDisabledReason(setup, unitySetupError),
       // A failed CHECK, not a confirmed classifier state — see this field's
       // own doc comment. Only possible while `setup` is still `null`
@@ -534,11 +602,18 @@ export function isPlayEngaged(playState: EditorPresencePlayState | null): boolea
  * the one command that both starts from stopped and resumes from paused),
  * so collapsing stopped+paused onto the same face is the toggle correctly
  * tracking what its click DOES, not merely mirroring the three raw states
- * 1:1. `null` (no status read yet — there is no live status feed for
- * Unity, only a caller-supplied last-known value; see
- * `resolveEngineToolbarView`'s `unityPlayState` param doc comment) falls
- * into the same `"play"` face — showing Pause would claim knowledge of a
- * playing session this client has no evidence for.
+ * 1:1. `null` (no status read yet — see `EngineToolbarView.playState`'s own
+ * doc comment for where this can come from: presence, the CLI echo, or
+ * neither) falls into the same `"play"` face — showing Pause would claim
+ * knowledge of a playing session this client has no evidence for.
+ *
+ * SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this doc used
+ * to say `null` means "there is no live status feed for Unity, only a
+ * caller-supplied last-known value." As of Unity package 0.3.1 there IS a
+ * live status feed (Unity's presence `playState`) — `null` now means
+ * neither that feed nor the CLI echo has an opinion, a narrower and rarer
+ * case (no publisher connected AND no prior successful dispatch), not "no
+ * live feed exists at all."
  *
  * Pause remains a separate latch and always dispatches `"pause"`.
  */

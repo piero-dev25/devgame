@@ -5,12 +5,24 @@
 // own selection), and — unlike the deleted 1,633-line package this was
 // mined from (git show 33d6cc4d8^:unity/com.ironmind.editor-presence/ —
 // see unity/README.md for why it was deleted and why this thinner one
-// exists) — it is selection-only. It covers `hello` / `selection` outbound
-// only. No `command` frame is ever parsed, no `commandResult` or
-// `playState` frame is ever sent, and no play/stop/pause/step capability is
-// ever advertised: com.unity.pipeline (Unity's official package) owns all
-// of that. The `presence` fan-out frame remains the web subscriber's
+// exists) — it does not implement the two-way `command` extension. It
+// covers `hello` / `selection` / `playState` outbound only. No `command`
+// frame is ever parsed, no `commandResult` is ever sent, and no
+// play/stop/pause/step CAPABILITY is ever advertised (`capabilities` stays
+// `[]`): com.unity.pipeline (Unity's official package) owns issuing
+// play/stop/pause commands, status polling, console, tests, and
+// screenshots. The `presence` fan-out frame remains the web subscriber's
 // concern, not this package's; Unity never receives one.
+//
+// SUPERSEDED 2026-08-10 (unity-playstate-presence.md, package 0.3.1):
+// this header used to say "no `commandResult` or `playState` frame is ever
+// sent." `playState` now is — see `EditorPresencePlayStateWatcher.cs` and
+// `EditorPresenceConnection.cs`'s awaited post-hello send. This is
+// REPORTING Unity's own play/pause state (a level, self-computed from
+// `EditorApplication.isPlaying`/`isPaused`), not accepting a command — the
+// `command`/`commandResult` extension remains entirely unimplemented, and
+// `capabilities` is still always `[]`. `commandResult` alone is still never
+// sent.
 //
 // Serialized with UnityEngine.JsonUtility (built-in, no external dependency).
 // JsonUtility's handling of a `null` string field is not something we can
@@ -87,6 +99,25 @@ namespace Ironmind.EditorPresence
         public int seq;
         public string at;
         public SelectionItemDto[] items;
+    }
+
+    /// `{v:1, type:"playState", playState:"stopped"|"playing"|"paused"}` —
+    /// this plugin's own report of its editor's current play/pause state.
+    /// Unlike `SelectionFrameDto`, there is no `seq`: the registry's
+    /// `updatePublisherPlayState` needs none (a single WebSocket connection
+    /// already orders frames via TCP — see
+    /// apps/server/src/editorPresence/EditorPresenceRegistry.ts), so nothing
+    /// here tracks a sequence counter the way `EditorPresenceSelectionWatcher`
+    /// does. See `EditorPresencePlayStateWatcher.cs` for how `playState` is
+    /// computed (always LIVE at send time, never inferred from which event
+    /// fired) and `EditorPresenceConnection.cs`'s `ConnectAndRunAsync` for
+    /// the mandated awaited post-hello send that uses this same DTO.
+    [Serializable]
+    internal sealed class PlayStateFrameDto
+    {
+        public int v = 1;
+        public string type = "playState";
+        public string playState;
     }
 
     internal static class EditorPresenceProtocol

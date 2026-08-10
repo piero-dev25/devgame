@@ -477,14 +477,52 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     expect(view.disabledReason).toBe("boom, exact CLI wording");
   });
 
-  it("ignores any connectedEditor passed in — Unity never appears in the presence feed", () => {
+  // Flipped 2026-08-10 (unity-playstate-presence.md): Unity 0.3.1's
+  // publisher now sends a real `playState` frame, so `connectedEditor` is no
+  // longer ignorable on this backend — it now WINS over the CLI echo
+  // whenever it has an opinion. `hasConnectedEditor` still stays `false`
+  // here (unity-cli's consumers only pick between generic disabled-copy
+  // strings — see that field's own doc comment), so this is deliberately
+  // NOT the same as the "ignores any connectedEditor" claim the old test
+  // name made; only `playState`'s source changed.
+  it("connectedEditor's playState wins for the unity-cli backend when non-null", () => {
     const view = resolveEngineToolbarView({
       engineType: "unity",
-      connectedEditor: editor({ editor: { id: "unity-1", name: "Unity", version: "6000.3" } }),
+      connectedEditor: editor({
+        editor: { id: "unity-1", name: "Unity", version: "6000.3" },
+        playState: "playing",
+      }),
+      unityPlayState: "stopped", // the CLI echo disagrees; presence must win
       unitySetup: probeResult(readyFacts(), S11),
     });
     expect(view.hasConnectedEditor).toBe(false);
     expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+    expect(view.playState).toBe("playing");
+  });
+
+  it("falls back to the unityPlayState echo when connectedEditor has no playState opinion", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: editor({
+        editor: { id: "unity-1", name: "Unity", version: "6000.3" },
+        playState: null,
+      }),
+      unityPlayState: "playing",
+      unitySetup: probeResult(readyFacts(), S11),
+    });
+    expect(view.playState).toBe("playing");
+  });
+
+  it("is null when neither connectedEditor nor the echo has an opinion", () => {
+    const view = resolveEngineToolbarView({
+      engineType: "unity",
+      connectedEditor: editor({
+        editor: { id: "unity-1", name: "Unity", version: "6000.3" },
+        playState: null,
+      }),
+      unitySetup: probeResult(readyFacts(), S11),
+    });
+    expect(view.playState).toBeNull();
   });
 
   it("defaults playState to null when no status has been supplied", () => {

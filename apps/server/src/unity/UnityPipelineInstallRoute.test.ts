@@ -280,7 +280,7 @@ describe("dispatchUnityPipelineInstall", () => {
           },
           selectionPackage: {
             packageId: "com.ironmind.editor-presence",
-            version: "0.3.0",
+            version: "0.3.1",
             operation: "installed",
           },
           pairingOutcome: { _tag: "minted" },
@@ -385,7 +385,13 @@ describe("dispatchUnityPipelineInstall", () => {
       yield* fileSystem.makeDirectory(destination, { recursive: true });
       yield* fileSystem.writeFileString(
         path.join(destination, "package.json"),
-        encodeJson({ name: "com.ironmind.editor-presence", version: "0.3.0" }),
+        // Must match the embedded SOURCE package's real on-disk version
+        // (unity/com.ironmind.editor-presence/package.json, currently
+        // 0.3.1) — this test's whole premise is "destination already at the
+        // same version as source," so this fixture has to track that
+        // version, not a hardcoded historical one, or it silently starts
+        // testing the "replaced" path instead of "alreadyInstalled".
+        encodeJson({ name: "com.ironmind.editor-presence", version: "0.3.1" }),
       );
       yield* fileSystem.writeFileString(path.join(destination, "keep-on-no-op.txt"), "sentinel");
 
@@ -401,7 +407,7 @@ describe("dispatchUnityPipelineInstall", () => {
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
         packageId: "com.ironmind.editor-presence",
-        version: "0.3.0",
+        version: "0.3.1",
         operation: "alreadyInstalled",
       });
       expect(yield* fileSystem.exists(path.join(destination, "keep-on-no-op.txt"))).toBe(true);
@@ -435,7 +441,7 @@ describe("dispatchUnityPipelineInstall", () => {
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
         packageId: "com.ironmind.editor-presence",
-        version: "0.3.0",
+        version: "0.3.1",
         operation: "replaced",
       });
       expect(yield* fileSystem.exists(path.join(destination, "stale.txt"))).toBe(false);
@@ -496,7 +502,7 @@ describe("dispatchUnityPipelineInstall", () => {
       expect(outcome.value.value.packageId).toBe("com.unity.pipeline");
       expect(outcome.value.selectionPackage).toMatchObject({
         packageId: "com.ironmind.editor-presence",
-        version: "0.3.0",
+        version: "0.3.1",
       });
       expect(outcome.value.pairingOutcome).toEqual({
         _tag: "skipped",

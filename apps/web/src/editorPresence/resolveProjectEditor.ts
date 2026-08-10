@@ -33,6 +33,28 @@ export interface ProjectWorkspaceRef {
  * both this app and the plugins construct these paths independently and a
  * single stray separator must not silently produce "no editor connected"
  * for a project that plainly has one.
+ *
+ * STALE-PUBLISHER GUARD (2026-08-10, unity-playstate-presence.md
+ * critique F3): more than one CONNECTED entry can legitimately share the
+ * same workspace root at once. A crashed/force-quit editor leaves a
+ * half-open registry entry behind — the server never writes `connected`
+ * false on its own (no liveness sweep, and no publisher in this repo sends
+ * a ping the server could time out on) — and a relaunched editor then
+ * registers as a genuinely SECOND publisher (a fresh SessionState-backed
+ * session id, so it lands as a distinct entry, not a takeover of the old
+ * one). Among same-root connected matches, this now prefers the entry with
+ * the newest `lastSeenAt` rather than the first one encountered — otherwise
+ * the corpse's stale state (e.g. a stuck "playing") would outrank the live
+ * editor forever, purely because of array position. Verified wire shape:
+ * `EditorPresenceEntry.lastSeenAt` (this file's `protocol.ts`) is present on
+ * every entry — the server stamps a fresh ISO-8601 UTC timestamp on every
+ * hello AND on every subsequent selection/playState update
+ * (`EditorPresenceRegistry.ts`), so a plain string comparison orders
+ * correctly and a crashed publisher's `lastSeenAt` stops advancing the
+ * moment it stops sending frames. This is the newest-`lastSeenAt` variant of
+ * the guard, not the registration-order fallback the spec names for a wire
+ * entry that omits the field entirely — this repo's entries never do. Also
+ * fixes the same ambiguity for selection chips, which share this resolver.
  */
 export function resolveConnectedEditorForProject(
   editors: ReadonlyArray<EditorPresenceEntry>,
@@ -40,12 +62,17 @@ export function resolveConnectedEditorForProject(
 ): EditorPresenceEntry | null {
   if (!project) return null;
   const targetRoot = normalizeWorkspaceRoot(project.workspaceRoot);
+  let best: EditorPresenceEntry | null = null;
   for (const entry of editors) {
-    if (entry.connected && normalizeWorkspaceRoot(entry.workspace.root) === targetRoot) {
-      return entry;
+    if (!entry.connected || normalizeWorkspaceRoot(entry.workspace.root) !== targetRoot) continue;
+    // `>=` rather than `>`: on an (unlikely) exact tie, prefer the entry
+    // encountered later, which is also this resolver's fallback rule for a
+    // publisher whose wire entry has no `lastSeenAt` at all.
+    if (best === null || entry.lastSeenAt >= best.lastSeenAt) {
+      best = entry;
     }
   }
-  return null;
+  return best;
 }
 
 /**

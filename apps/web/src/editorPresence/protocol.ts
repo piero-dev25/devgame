@@ -74,10 +74,19 @@ export interface EditorPresenceEntry {
    * The publisher's own most recently reported play/pause state, or `null`
    * when it has never reported one — an older publisher that predates this
    * field, or a fresh registration that hasn't sent its first `playState`
-   * frame yet. Also the correct steady state for a publisher whose
+   * frame yet.
+   *
+   * SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this used to
+   * also call `null` "the correct steady state for a publisher whose
    * `capabilities` don't include `"play"`/`"stop"` at all — there is
-   * nothing to report, so the toolbar should show no play-state control
-   * rather than guessing "stopped".
+   * nothing to report." That's no longer a safe inference: Unity's
+   * publisher (package >=0.3.1) reports a real, non-null `playState` while
+   * keeping `capabilities: []` — it reports its OWN play/pause state
+   * (something to show) without advertising the `command` capability
+   * (nothing it can be TOLD to do). `capabilities` and `playState` are
+   * independent axes; do not read a non-null `playState` alongside empty
+   * `capabilities` as a protocol violation — it's Unity's normal steady
+   * state.
    */
   readonly playState: EditorPresencePlayState | null;
 }
