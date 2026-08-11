@@ -54,6 +54,20 @@ export function computeTopBandLayout(
     // A popout (or not-yet-sized) group reports no boundingBox at all —
     // skip it rather than crash; it simply isn't part of the band.
     if (!box) continue;
+    // Round-13 fix (real bug, owner screenshot): a hidden group
+    // (`group.api.setVisible(false)` — the sidebar-toggle mechanism) is NOT
+    // `boundingBox === undefined`. It's a REAL box: verified against the
+    // installed dockview-core@7.0.4's own splitview.js#layoutViews, a
+    // hidden view's container gets `width: 0px` via inline style, while its
+    // `left` offset is computed EXACTLY the same as if visible — for the
+    // grid's index-0 item (the Sidebar), `offset` is unconditionally `0`
+    // regardless of visibility. Critically, when index-0 is hidden, the
+    // NEXT visible item ALSO gets `offset: 0` (nothing visible before it),
+    // so the hidden Sidebar and the now-visible (0,0) group report
+    // `left: 0` SIMULTANEOUSLY, live. Exclude zero-area boxes from BOTH
+    // topRowGroupIds and corner-owner candidacy so the collision always
+    // resolves to the group that's actually rendered.
+    if (box.width <= 0 || box.height <= 0) continue;
     if (box.top !== 0) continue;
     topRowGroupIds.add(candidate.id);
     if (box.left === 0 && cornerOwner === null) {

@@ -116,14 +116,23 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --workspace-native-controls-inset: 0px;
   --workspace-titlebar-control-size: 1.75rem;
   --workspace-titlebar-control-gap: 0.75rem;
-  /* docs/specs/unified-topband.md, Section B: the corner cell's fixed
-     width — single source DockviewLayout.tsx's onDidLayoutChange handler
-     also reads (via getComputedStyle) to compute the (0,0) group's tab-strip
-     padding and its docked minimum width, so a designer widening this one
-     value keeps both the visible cell and the dock's own clearance in sync
-     without a second number to update. Sized for the mac inset (90px,
-     MACOS_TRAFFIC_LIGHTS_LEFT_INSET) + toggle control + gap + the
-     "DevGame" wordmark at its current type size, with headroom. */
+  /* docs/specs/unified-topband.md, Section B — fix round 2 (owner mock,
+     "kills the guessed 220px"): this static value is now the PRE-
+     MEASUREMENT FALLBACK ONLY, not the live corner width. Once
+     `_chat.tsx`'s `WorkspaceChromeCornerShell` mounts, its own
+     content-driven measurement (a ResizeObserver on the shell's actual
+     rendered width) overrides this by writing the SAME property directly
+     onto `SidebarProvider`'s DOM node — more specific in the cascade than
+     this `:root` default, so the override always wins once it exists.
+     Kept here so the FIRST paint (before that effect has run) and any
+     context with no corner mounted at all (there is none today, but this
+     value must still resolve to *something* sane) both have a real number
+     — DockviewLayout.tsx's `applyTopBandLayout` reads whatever is
+     currently in scope via `getComputedStyle`, live, on every apply, so it
+     transparently picks up the measured value once it exists with no
+     separate wiring. Value unchanged from the original guess (still a
+     reasonable fallback shape: mac inset + toggle + gap + wordmark
+     headroom) — only its ROLE changed. */
   --workspace-corner-width: 220px;
 }
 

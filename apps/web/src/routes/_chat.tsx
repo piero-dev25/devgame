@@ -3,6 +3,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   useEffect,
   useMemo,
+  useRef,
   useSyncExternalStore,
   type CSSProperties,
   type ReactNode,
@@ -228,29 +229,91 @@ function ChatRouteGlobalShortcuts() {
 
 /**
  * The corner cell's positioning/sizing SHELL, pulled out into its own
- * named, exported, hook-free component for the same reason
- * `DockviewLayout.tsx`'s `DockControlsCluster` and `SidebarChrome.tsx`'s
- * `SidebarChromeToggle` were: `WorkspaceChromeStrip` below cannot render
- * under this repo's `renderToStaticMarkup`-only harness — verified
- * empirically (not assumed from the old comment this file's `dock-chrome-
- * strip.md` doc used to carry): its own `useSyncExternalStore` call throws
- * without a `getServerSnapshot` third argument, and even past that,
+ * named, exported component for the same reason `DockviewLayout.tsx`'s
+ * `DockControlsCluster` and `SidebarChrome.tsx`'s `SidebarChromeToggle`
+ * were: `WorkspaceChromeStrip` below cannot render under this repo's
+ * `renderToStaticMarkup`-only harness — verified empirically (not assumed
+ * from the old comment this file's `dock-chrome-strip.md` doc used to
+ * carry): its own `useSyncExternalStore` call throws without a
+ * `getServerSnapshot` third argument, and even past that,
  * `SidebarChromeHeader` unconditionally renders `SidebarBrand`'s router
  * `<Link>`, which throws with no `RouterProvider` ancestor (the same
  * limitation `SidebarChromeHeader.test.tsx` already documents). This shell
- * carries neither: no hooks, no Link, just the corner's own
- * absolute-position / fixed-width / height-override styling — so
- * `WorkspaceChromeCornerShell.test.tsx` can render it directly (with a
- * stand-in child) and prove that structure survived the strip -> corner
- * change, including that the OLD full-width strip's own accommodations
- * (`wco:pr-[...]`) are genuinely gone, not just visually invisible. See
- * `WorkspaceChromeStrip`'s own doc comment below for the full design
- * reasoning behind what this shell now measures.
+ * carries no Link and no router-dependent hook — `useSyncExternalStore`
+ * lives on `WorkspaceChromeStrip`, one level up — so
+ * `WorkspaceChromeCornerShell.test.tsx` can still render it directly (with
+ * a stand-in child) under `renderToStaticMarkup` (React skips `useEffect`
+ * entirely there, so the measurement effect below never runs in that test —
+ * harmless, not a crash) and prove the structure survived the strip ->
+ * corner change, including that the OLD full-width strip's own
+ * accommodations (`wco:pr-[...]`) are genuinely gone, not just visually
+ * invisible. See `WorkspaceChromeStrip`'s own doc comment below for the
+ * full design reasoning behind what this shell measures.
+ *
+ * docs/specs/unified-topband.md, Section B, fix round 2 (owner mock,
+ * "kills the guessed 220px"): CONTENT-DRIVEN width, not a fixed
+ * `--workspace-corner-width` read. `w-fit` — the shell sizes to its own
+ * children (toggle + gap + brand + the trailing `pr-5` gap baked into
+ * `SidebarChromeHeader`'s own padding, so the MEASURED width already
+ * includes the "clear trailing gap before the first tab" the owner asked
+ * for, with no separate addition needed here). A `ResizeObserver` on the
+ * shell's own element re-measures on every content change (environment
+ * label toggling the pill, font load, etc.) and writes the result onto
+ * `--workspace-corner-width` on the nearest `[data-slot="sidebar-wrapper"]`
+ * ancestor — `SidebarProvider`'s own DOM node, the SAME element
+ * `resolveWorkspaceChromeInsetStyle`'s `chromeInsetStyle` is already
+ * applied to (`ChatRouteLayout` below), found via `closest()` rather than a
+ * new `forwardRef` plumbed through `SidebarProvider` — smaller change,
+ * stays entirely inside this file. `DockviewLayout.tsx`'s
+ * `applyTopBandLayout` needs no change: it already re-reads
+ * `--workspace-corner-width` live via `getComputedStyle` on every
+ * apply, and CSS custom properties cascade from `SidebarProvider` down to
+ * its `container` descendant same as any other inherited value.
+ *
+ * NO FEEDBACK LOOP (asserted, not just claimed): the shell's OWN width is
+ * `w-fit` — content-sized, independent of `--workspace-corner-width`, which
+ * this effect only ever WRITES, never reads for layout. Its children
+ * (`SidebarChromeToggle`: fixed `size-[--workspace-titlebar-control-size]`;
+ * `SidebarBrand`: `w-fit`, sized by its own text) are equally independent
+ * of that variable. Downstream, `applyTopBandLayout` consumes the written
+ * value only to set `padding-left` on the corner-OWNER GROUP's tab strip
+ * (a sibling subtree entirely outside this shell) — that padding changes
+ * the tab strip's CONTENT area, not `group.element`'s own outer
+ * `boundingBox` (dockview's splitview owns that size), so it does not
+ * retrigger DockviewLayout.tsx's own per-group `ResizeObserver` either.
+ * Every step in the chain terminates without looping back to a
+ * `--workspace-corner-width` write.
  */
 export function WorkspaceChromeCornerShell({ children }: { children: ReactNode }) {
+  const shellRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const shellElement = shellRef.current;
+    if (!shellElement) return undefined;
+    const providerElement = shellElement.closest<HTMLElement>('[data-slot="sidebar-wrapper"]');
+    if (!providerElement) return undefined;
+
+    const applyMeasuredWidth = () => {
+      const measuredWidth = shellElement.getBoundingClientRect().width;
+      // `0` means not-yet-laid-out (or genuinely empty) — leave whatever
+      // `--workspace-corner-width` currently holds (the 220px CSS fallback,
+      // or a previous real measurement) rather than overwriting it with a
+      // meaningless value.
+      if (measuredWidth > 0) {
+        providerElement.style.setProperty("--workspace-corner-width", `${measuredWidth}px`);
+      }
+    };
+
+    applyMeasuredWidth();
+    const resizeObserver = new ResizeObserver(applyMeasuredWidth);
+    resizeObserver.observe(shellElement);
+    return () => resizeObserver.disconnect();
+  }, []);
+
   return (
     <div
-      className="absolute top-0 left-0 z-20 w-[var(--workspace-corner-width)]"
+      ref={shellRef}
+      className="absolute top-0 left-0 z-20 w-fit"
       style={{ "--workspace-topbar-height": "36px" } as CSSProperties}
     >
       {children}

@@ -88,3 +88,56 @@ describe("computeTopBandLayout — empty groups", () => {
     expect(result.cornerPaddingPx).toBe(0);
   });
 });
+
+// Round-13 fix (real bug, owner screenshot): a hidden (setVisible(false),
+// e.g. the sidebar-toggle) group is NOT `boundingBox === undefined` — it's
+// a REAL box, verified against the installed dockview-core@7.0.4's own
+// splitview.js#layoutViews (not assumed): a hidden view's container gets
+// `width: 0px` via inline style (line ~615: `const size = view.visible ?
+// view.size - marginReducedSize : 0;`), while its `left` offset is computed
+// EXACTLY the same as if it were visible — for the grid's index-0 item
+// (the Sidebar), `offset` is unconditionally `0` regardless of visibility
+// (line 617: `offset = i === 0 || visiblePanelsBeforeThisView === 0 ? 0 :
+// ...`). Critically, when index-0 IS hidden, the NEXT visible item ALSO
+// gets `visiblePanelsBeforeThisView === 0` (nothing visible before it), so
+// it ALSO gets `offset: 0` — meaning the hidden Sidebar and the now-visible
+// (0,0) group report `left: 0` SIMULTANEOUSLY, live. Before this fix,
+// `computeTopBandLayout` handed the corner to whichever candidate it saw
+// FIRST with `left === 0`, regardless of width — if that happened to be the
+// hidden, zero-width Sidebar, the corner clearance applied to a group with
+// nothing rendered under it, leaving the ACTUALLY VISIBLE group unpadded
+// (the reported defect: the Browser tab rendered at the traffic lights).
+describe("computeTopBandLayout — zero-area groups (hidden via setVisible) never win the corner", () => {
+  it("excludes a hidden group reporting a REAL zero-width box at (0,0) from both topRowGroupIds and corner-owner candidacy — the actually-visible group at (0,0) must win", () => {
+    const result = computeTopBandLayout(
+      [
+        // Hidden Sidebar — listed FIRST, same ordering dockview's own
+        // `api.groups` would produce (index 0 in the grid).
+        group("sidebar-hidden", { left: 0, top: 0, width: 0, height: 600 }),
+        // The group that slides into the (0,0) slot once Sidebar is
+        // hidden — real width, same left:0 dockview's own splitview math
+        // gives it.
+        group("browser-diff", { left: 0, top: 0, width: 640, height: 600 }),
+      ],
+      CORNER_WIDTH,
+    );
+
+    expect(result.topRowGroupIds.has("sidebar-hidden")).toBe(false);
+    expect(result.topRowGroupIds.has("browser-diff")).toBe(true);
+    expect(result.cornerOwnerGroupId).toBe("browser-diff");
+    expect(result.cornerPaddingPx).toBe(CORNER_WIDTH);
+  });
+
+  it("also excludes a zero-HEIGHT box at (0,0) (the instruction's fix shape names both width<=0 and height<=0) — symmetric, defensive, not separately live-observed", () => {
+    const result = computeTopBandLayout(
+      [
+        group("zero-height", { left: 0, top: 0, width: 256, height: 0 }),
+        group("real", { left: 0, top: 0, width: 640, height: 600 }),
+      ],
+      CORNER_WIDTH,
+    );
+
+    expect(result.topRowGroupIds.has("zero-height")).toBe(false);
+    expect(result.cornerOwnerGroupId).toBe("real");
+  });
+});

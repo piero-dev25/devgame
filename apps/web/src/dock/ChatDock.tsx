@@ -185,17 +185,26 @@ chatDockPanelRegistry.register({
   // stays mounted — see this file's own comment further down.
   closeable: false,
   // docs/specs/unified-topband.md, Section B, NARROW-COLUMN RULE (critique
-  // M4): matches `--workspace-corner-width` (index.css) — this Sidebar
-  // panel is always the (0,0) group in the default preset, so a floating
-  // Sidebar window can never render narrower than the corner cell it sits
-  // under while docked. This is the ADVISORY half of the rule (honoured
-  // only while floating — `PanelDefinition.minWidth`'s own doc comment,
-  // `lib/types.ts`); the DOCKED half is enforced separately and more
-  // strongly by DockviewLayout.tsx's `applyTopBandLayout`, which caps the
-  // corner's own padding at the (0,0) group's live width regardless of
-  // whether the sash respects this minimum — see that function's own
-  // comment for why a group-level docked `minimumWidth` constraint is
-  // reapplied every layout tick instead of being set here once.
+  // M4): matches index.css's `--workspace-corner-width` FALLBACK value —
+  // this Sidebar panel is always the (0,0) group in the default preset, so
+  // a floating Sidebar window can never render narrower than the corner
+  // cell it sits under while docked. This is the ADVISORY half of the rule
+  // (honoured only while floating — `PanelDefinition.minWidth`'s own doc
+  // comment, `lib/types.ts`); the DOCKED half is enforced separately and
+  // more strongly by DockviewLayout.tsx's `applyTopBandLayout`, which caps
+  // the corner's own padding at the (0,0) group's live width regardless of
+  // whether the sash respects this minimum.
+  //
+  // Fix round 2 (content-driven corner width): this stays a STATIC 220,
+  // deliberately NOT wired to the corner's own live-measured width — this
+  // registry entry is built once, at module scope, before any DOM (or
+  // corner) exists, so it has no live value to read. A documented,
+  // accepted gap: if the corner's real measured width ever grows
+  // meaningfully past 220px (a longer future brand string, a wider pill
+  // label), a floating Sidebar's advisory minimum would under-reserve
+  // relative to the corner it sits under while docked — the DOCKED
+  // guarantee above is unaffected either way, since it derives its cap
+  // from the LIVE corner width, not this constant.
   minWidth: 220,
 });
 

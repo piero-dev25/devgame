@@ -40,12 +40,17 @@ function renderCorner() {
 }
 
 describe("WorkspaceChromeCornerShell — the corner cell (replaces the full-width strip, ffafc3728)", () => {
-  it("is a fixed-width, absolutely-positioned top-left cell — not a full-width flex row", () => {
+  it("is an absolutely-positioned top-left cell — not a full-width flex row", () => {
     const html = renderCorner();
     expect(html).toContain("absolute");
     expect(html).toContain("top-0");
     expect(html).toContain("left-0");
-    expect(html).toContain("w-[var(--workspace-corner-width)]");
+  });
+
+  it("is CONTENT-sized (w-fit), fix round 2 — no fixed --workspace-corner-width reference on the shell itself, which is what this element measures and writes, not reads (NO FEEDBACK LOOP, per the shell's own doc comment)", () => {
+    const html = renderCorner();
+    expect(html).toContain("w-fit");
+    expect(html).not.toContain("w-[var(--workspace-corner-width)]");
   });
 
   it("overlays above dock content (z-20, above DockControlsCluster's z-10)", () => {
