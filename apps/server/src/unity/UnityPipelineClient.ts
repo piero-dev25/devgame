@@ -555,6 +555,29 @@ export class UnityPipelineClient extends Context.Service<
     readonly open: (
       workspaceRoot: string,
     ) => Effect.Effect<UnityPipelineResult<UnityPipelineOpenResult>>;
+    /** `unity command package_resolve --project-path <workspaceRoot> --json`
+     * — task #130's zero-touch wire. `UnityPipelineInstallRoute.ts` calls
+     * this right after replacing the embedded selection package, when a
+     * live matched Editor exists, to force Unity's resolver to notice and
+     * load the package it just copied — verified live
+     * (evidence/qa-round9/REPORT.md): with Auto-Refresh off, the embedded
+     * package sat unloaded until this exact command was invoked externally,
+     * which then triggered reimport → recompile → package redemption in 9s
+     * (and this works even while Unity is UNFOCUSED). Same `runEditorCommand`
+     * idiom as `status`/`play`/`stop`/`pause` (one `unity command <name>
+     * --project-path <root> --json` call, `notReady` folded via
+     * `isNotReadyMessage`), but with two differences: (1) the subprocess
+     * `cwd` IS pinned to `workspaceRoot`, unlike those four — a defensive
+     * posture borrowed from `install`/`list` (see their own doc comments)
+     * rather than proven necessary for this specific subcommand, since a
+     * package-resolution command seemed more likely than an editor_* one to
+     * share their invocation-directory sensitivity; (2) there is no
+     * confirming status re-read: the effect this kicks off (reimport →
+     * recompile → package load) has no `editor_status` field that reflects
+     * it, so there is nothing for a bounded poll to confirm. The caller
+     * treats ANY outcome here as non-fatal to the install either way — see
+     * `UnityPipelineInstallRoute.ts`. */
+    readonly packageResolve: (workspaceRoot: string) => Effect.Effect<UnityPipelineResult<void>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -584,12 +607,24 @@ export const make = Effect.gen(function* () {
    * folds it into a `UnityPipelineResult`, WITHOUT parsing the extracted
    * `data.result` yet — callers that need a typed result (status) parse it
    * themselves; callers that only need pass/fail (the action commands,
-   * before their own confirming status re-read) use this as-is. */
+   * before their own confirming status re-read; `packageResolve`, which has
+   * no confirming re-read at all) use this as-is.
+   *
+   * `cwd`, added for `packageResolve` (task #130): OPTIONAL and unused by
+   * every existing caller (`editor_play`/`editor_stop`/`editor_pause`/
+   * `editor_status` all still omit it, unchanged) — `package_resolve` opts
+   * in defensively, borrowing `install`/`list`'s posture of also pinning
+   * the subprocess cwd to `workspaceRoot` on top of `--project-path`, since
+   * a package-resolution command seemed more likely than an editor_* one to
+   * share their invocation-directory sensitivity. Not proven necessary for
+   * `package_resolve` specifically; not extended to the four existing
+   * callers, which have no such live-observed need. */
   const runEditorCommand = (
-    action: "editor_play" | "editor_stop" | "editor_pause" | "editor_status",
+    action: "editor_play" | "editor_stop" | "editor_pause" | "editor_status" | "package_resolve",
     workspaceRoot: string,
+    cwd?: string,
   ): Effect.Effect<UnityPipelineResult<unknown>> =>
-    runUnityCommand(["command", action, "--project-path", workspaceRoot]).pipe(
+    runUnityCommand(["command", action, "--project-path", workspaceRoot], cwd).pipe(
       Effect.map((envelope): UnityPipelineResult<unknown> => {
         if (envelope === null) {
           return {
@@ -837,6 +872,22 @@ export const make = Effect.gen(function* () {
       );
   };
 
+  /** `unity command package_resolve --project-path <root> --json` — see the
+   * service interface's own doc comment above for the full reasoning. No
+   * confirming status re-read (unlike `dispatchAndConfirm`'s
+   * play/stop/pause): `.value` is discarded and replaced with `undefined`
+   * on `ok`, since `runEditorCommand`'s unparsed `data.result` for this
+   * subcommand has never been observed live and this caller has nothing to
+   * read from it anyway — only the pass/fail/notReady/error TAG matters to
+   * `UnityPipelineInstallRoute.ts`. */
+  const packageResolve: UnityPipelineClient["Service"]["packageResolve"] = (workspaceRoot) =>
+    runEditorCommand("package_resolve", workspaceRoot, workspaceRoot).pipe(
+      Effect.map(
+        (result): UnityPipelineResult<void> =>
+          result._tag === "ok" ? { _tag: "ok", value: undefined } : result,
+      ),
+    );
+
   return UnityPipelineClient.of({
     isAvailable: () =>
       isCommandAvailable(UNITY_CLI_COMMAND).pipe(
@@ -851,6 +902,7 @@ export const make = Effect.gen(function* () {
     list,
     install,
     open,
+    packageResolve,
   });
 });
 

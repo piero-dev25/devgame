@@ -80,6 +80,24 @@ export const UnityPipelinePairingOutcome = Schema.Union([
 ]);
 export type UnityPipelinePairingOutcome = typeof UnityPipelinePairingOutcome.Type;
 
+/** Outcome of `UnityPipelineInstallRoute.ts`'s post-copy `unity command
+ * package_resolve` nudge (task #130) — forces an Auto-Refresh-OFF Editor to
+ * notice and load the embedded selection package this same install just
+ * replaced, rather than leaving it sat unloaded until the user happens to
+ * refocus Unity (verified live, evidence/qa-round9/REPORT.md).
+ * `"invoked"` means the CLI command was actually run (a live matched Unity
+ * Editor was found for this project); `"skipped_no_editor"` means no live
+ * Editor was found, so nothing was attempted (this route never cold-starts
+ * Unity just to resolve a package); `"failed"` means a live Editor WAS
+ * found but the CLI call itself did not succeed — non-fatal to the
+ * install either way, see `UnityPipelineInstallRoute.ts`. */
+export const UnityPackageResolveOutcome = Schema.Literals([
+  "invoked",
+  "skipped_no_editor",
+  "failed",
+]);
+export type UnityPackageResolveOutcome = typeof UnityPackageResolveOutcome.Type;
+
 /**
  * Mirrors `UnityPipelineClient.ts`'s own `UnityPipelineResult<A>` exactly —
  * same shape `UnityCommandResult` uses for the identical reason: a client
@@ -95,6 +113,10 @@ export const UnityPipelineInstallResult = Schema.Union([
     value: UnityPipelineInstallOutcome,
     selectionPackage: UnitySelectionPackageInstallOutcome,
     pairingOutcome: UnityPipelinePairingOutcome,
+    // Optional, same non-breaking posture as `legacyCleanup` above: absent
+    // on any wire payload/test fixture predating task #130, not merely
+    // `undefined`.
+    packageResolve: Schema.optional(UnityPackageResolveOutcome),
   }),
   Schema.Struct({ _tag: Schema.Literal("notReady") }),
   Schema.Struct({ _tag: Schema.Literal("cliUnavailable") }),

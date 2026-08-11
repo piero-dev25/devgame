@@ -334,12 +334,12 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
       unitySetup: probeResult(readyFacts({ cliAvailable: false }), {
         state: "S1",
         message:
-          "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor.",
+          "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.",
       }),
     });
     expect(view.availableActions).toEqual([]);
     expect(view.disabledReason).toBe(
-      "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor.",
+      "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.",
     );
   });
 
@@ -611,6 +611,34 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
             },
           }),
           { state: "S5", message: "placeholder" },
+        ),
+      });
+      expect(view.availableActions).toEqual([]);
+      expect(view.unityInstallOffered).toBe(true);
+    });
+
+    it("true for S13 (package declared in the manifest, not yet resolved) — was a permanent dead end (no CTA, no timeout) before this round", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        // Selection pinned already-installed-and-paired (unlike readyFacts()'s
+        // own default) so ONLY the S13 pipeline-package branch is under
+        // test — otherwise #129's "selection missing is itself an offer"
+        // rule would make this pass even with the pre-fix code.
+        unitySetup: probeResult(
+          readyFacts({
+            pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: true },
+            selectionPackage: {
+              installed: true,
+              resolvedVersion: "0.1.0",
+              declaredInManifest: false,
+            },
+            selectionPublisherRegistered: true,
+          }),
+          {
+            state: "S13",
+            message: "placeholder",
+          },
         ),
       });
       expect(view.availableActions).toEqual([]);
@@ -910,7 +938,15 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
     ).toBe(false);
   });
 
-  it("withholds when the pipeline package is declared in the manifest (S13) AND selection is installed — re-installing has nothing left to do", () => {
+  // CHANGED 2026-08-11: this used to assert `false` under the reasoning
+  // "already added, just awaiting Unity's own resolver — re-running install
+  // has nothing left to do." That reasoning is now false: re-clicking is
+  // idempotent (manifest write + embedded copy) AND now also nudges Unity's
+  // resolver directly via `packageResolve` (UnityPipelineClient.ts), so S13
+  // is a genuine escape hatch, not a no-op — see
+  // `shouldOfferUnityPipelineInstall`'s own doc comment and
+  // `UnitySetupClassifier.ts`'s S13_MESSAGE, both updated the same round.
+  it("offers when the pipeline package is declared in the manifest but not yet resolved (S13) — re-clicking is a real escape hatch now, not a no-op", () => {
     expect(
       shouldOfferUnityPipelineInstall(
         readyFacts({
@@ -923,7 +959,7 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
           selectionPublisherRegistered: true,
         }),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 

@@ -197,9 +197,21 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  * recovery fact is trusted only with a live match:
  *  - `isUnityProject` — S0 is never an installation opportunity.
  *  - `cliAvailable` — no working `unity` binary, no install to run (S1/S2).
- *  - `!pipelinePackage.installed` — nothing missing means nothing to add.
- *  - `!pipelinePackage.declaredInManifest` — already added, just awaiting
- *    Unity's own resolver (S13); re-running install has nothing left to do.
+ *  - `!pipelinePackage.installed` — nothing missing means nothing to add,
+ *    REGARDLESS of `declaredInManifest` (S13, package declared but not yet
+ *    resolved). CHANGED 2026-08-11: this used to also require
+ *    `!declaredInManifest`, withholding the CTA at S13 under the reasoning
+ *    "already added, just awaiting Unity's own resolver; re-running install
+ *    has nothing left to do." That reasoning no longer holds — the install
+ *    route is idempotent (a repeat manifest write / embedded-package copy
+ *    is a no-op) AND now also directly nudges Unity's resolver via `unity
+ *    command package_resolve` when a live Editor is open
+ *    (`UnityPipelineClient.ts`'s `packageResolve`,
+ *    `UnityPipelineInstallRoute.ts`). S13 used to be a genuine dead end — no
+ *    CTA (this gate) and no timeout (`UnitySetupClassifier.ts`'s own S13
+ *    branch never re-evaluates on a timer) — so a resolve that silently
+ *    never happens left the user with only a "wait" sentence and nothing to
+ *    click. Re-offering the CTA turns that into a real escape hatch.
  *  - an installed selection package without a registered publisher — S10's
  *    recovery is a re-click, but only while a live Editor proves the absent
  *    publisher means unpaired rather than merely closed.
@@ -216,8 +228,9 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
   if (!facts.isUnityProject || !facts.cliAvailable) {
     return false;
   }
-  const pipelineMissing =
-    !facts.pipelinePackage.installed && !facts.pipelinePackage.declaredInManifest;
+  // `declaredInManifest` no longer withholds the offer (S13) — see this
+  // function's own doc comment for the 2026-08-11 ruling.
+  const pipelineMissing = !facts.pipelinePackage.installed;
   // The one click now installs BOTH packages (f95c1731c), so a missing
   // SELECTION package is an installation opportunity too — the owner hit
   // exactly this live: Pipeline installed, Play working, chips silently

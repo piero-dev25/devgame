@@ -126,11 +126,19 @@ export type UnitySetupPrimaryStateResult =
 
 // Every sentence below is copied VERBATIM from plan §2's table — a reader
 // diffing this file against that table should find byte-identical text,
-// not a paraphrase.
+// not a paraphrase. `S1_MESSAGE` is the one exception (see its own doc
+// comment).
 const S0_MESSAGE =
   "This project doesn't look like a Unity project — no ProjectSettings/ProjectVersion.txt was found.";
+/** Extended 2026-08-11 (S1's own dead-end defect): the plan §2 original was
+ * a diagnosis with no remedy — S1 is the ONLY place this sentence appears
+ * (no button renders while the CLI is missing, per `EngineToolbar.tsx`'s
+ * tooltip-only rendering for a disabled control), so a stranger hitting it
+ * had nowhere to go. The install command/URL are copied verbatim from this
+ * repo's own onboarding docs (`README.md`, `docs/user/install.md`) so the
+ * three don't drift. */
 const S1_MESSAGE =
-  "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor.";
+  "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.";
 const S2_PRIME_MESSAGE = "The Unity CLI is installed. Finishing setup…";
 const S4_MESSAGE =
   "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.";
@@ -149,9 +157,18 @@ const S7B_MESSAGE = "Waiting for Unity to respond…";
  * Unity is currently closed, and this state can just as easily fire while
  * Unity IS open and simply hasn't re-resolved yet (the exact liveness
  * ambiguity S4/S4' already exist to avoid making promises about). Worded to
- * be true either way. */
+ * be true either way.
+ *
+ * SECOND SENTENCE added 2026-08-11: S13 used to be a genuine dead end if
+ * Unity's resolve never actually happened (`shouldOfferUnityPipelineInstall`
+ * refused the CTA once this state was reached, per its own now-superseded
+ * "nothing left to do" reasoning — see EngineToolbar.logic.ts). Re-clicking
+ * Setup Unity Integrations is NOW a real escape hatch (idempotent manifest
+ * write + embedded-package copy + the `package_resolve` nudge this same
+ * round adds — see UnityPipelineClient.ts's `packageResolve`), so this
+ * state can finally say so instead of only ever promising to wait. */
 const S13_MESSAGE =
-  "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it.";
+  "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it. If the package hasn't appeared after a minute, open the project in Unity and click Setup Unity Integrations again.";
 const S9_MESSAGE =
   "Unity selection chips are off — this project doesn't have DevGame's selection package.";
 const S10_MESSAGE =

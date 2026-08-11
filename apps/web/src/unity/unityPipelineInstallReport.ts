@@ -26,18 +26,45 @@ export function describeUnityPipelineInstallOutcome(
         : result.pairingOutcome._tag === "alreadyPaired"
           ? "Unity selection is already paired."
           : result.pairingOutcome.reason;
+    // The rename's legacy-cleanup migration (com.ironmind.editor-presence ->
+    // com.devgame.editor-presence) sweeps a stranded pre-rename directory on
+    // EVERY install call, not just fresh ones — see
+    // `UnityEmbeddedSelectionPackage.ts`'s own doc comment. This surface was
+    // left silent when that landed; silent on the common case (nothing
+    // legacy found, or a legacy dir was found but couldn't be removed — the
+    // latter must NOT claim success it didn't have) and only speaks up when
+    // something was actually swept.
+    const legacyRemoved =
+      result.selectionPackage.legacyCleanup !== undefined &&
+      (result.selectionPackage.legacyCleanup.packagesDirectory === "removed" ||
+        result.selectionPackage.legacyCleanup.libraryDirectory === "removed");
+    const legacyRemovedLine = legacyRemoved
+      ? " Removed the old com.ironmind.editor-presence package."
+      : "";
+    // Task #130's package_resolve nudge: silent on every outcome except
+    // `"failed"` — `"invoked"` and `"skipped_no_editor"` are both ordinary,
+    // and the embedded-package copy already succeeded regardless (this
+    // nudge is best-effort, not load-bearing for the install's own
+    // success). Only a `"failed"` nudge needs the user told, since it's the
+    // one case where Unity might silently sit on the old package longer
+    // than expected.
+    const packageResolveFailedLine =
+      result.packageResolve === "failed"
+        ? " If the change hasn't appeared in Unity, click into the Editor to trigger it — it will also load automatically the next time you open the project."
+        : "";
+    const trailer = `${legacyRemovedLine}${packageResolveFailedLine}`;
     if (pipelineAlreadyInstalled && selectionAlreadyInstalled) {
       if (result.pairingOutcome._tag === "skipped") {
         return {
           type: "error",
           title: "Unity integrations installed, but pairing needs attention",
-          description: `${pipeline} and ${selection} are already in this project. ${pairingReport}`,
+          description: `${pipeline} and ${selection} are already in this project. ${pairingReport}${trailer}`,
         };
       }
       return {
         type: "success",
         title: "Unity integrations already installed",
-        description: `${pipeline} and ${selection} are already in this project. ${pairingReport}`,
+        description: `${pipeline} and ${selection} are already in this project. ${pairingReport}${trailer}`,
       };
     }
     const pipelineReport = pipelineAlreadyInstalled
@@ -54,12 +81,12 @@ export function describeUnityPipelineInstallOutcome(
       ? {
           type: "error",
           title: "Unity integrations installed, but pairing needs attention",
-          description: `${packageReport} ${pairingReport}`,
+          description: `${packageReport} ${pairingReport}${trailer}`,
         }
       : {
           type: "success",
           title: "Unity integrations installed",
-          description: `${packageReport} ${pairingReport}`,
+          description: `${packageReport} ${pairingReport}${trailer}`,
         };
   }
   return {

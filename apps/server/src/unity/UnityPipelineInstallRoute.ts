@@ -32,9 +32,11 @@
 import {
   AuthPresenceCommandScope,
   UnityPipelineInstallInput,
+  type UnityPackageResolveOutcome,
   type UnityPipelineInstallResult,
   UNITY_PIPELINE_INSTALL_PATH,
 } from "@t3tools/contracts";
+import { normalizeWorkspaceRoot } from "@t3tools/shared/workspaceRootPath";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -143,14 +145,65 @@ export const dispatchUnityPipelineInstall = (
         value: { _tag: "error", message: "Could not install Unity selection package." },
       } as const;
     }
+    // Task #130's zero-touch wire: an Auto-Refresh-OFF Editor does not
+    // notice the embedded package this call just replaced on disk until
+    // Unity's resolver is nudged (verified live,
+    // evidence/qa-round9/REPORT.md — `unity command package_resolve`
+    // triggered reimport → recompile → package redemption in 9s where the
+    // click alone left it unloaded). Only attempted with POSITIVE evidence
+    // of a live, RUNNING matched instance — a missing or unconfirmable
+    // match (an absent match, a stale/non-running one, or `list` itself
+    // failing) all fold into "skip," never a guess and never a cold start;
+    // see `UnityPipelineClient.ts`'s own `open` for why cold-starting Unity
+    // is a separate, deliberate user action this route does not take on
+    // its own.
+    //
+    // Hoisted to a local `const` (unlike every other `lookup.project.value.*`
+    // read in this function, all at the top level of the generator body):
+    // TypeScript's `Option.isNone` narrowing of `lookup.project` does not
+    // survive into the `.find()` callback below — a property access
+    // narrowed on the OUTER scope reverts to its widened `Option<...>` type
+    // inside a nested closure, which is exactly what tripped a real
+    // `Property 'value' does not exist on type 'Option<...>'` typecheck
+    // error here.
+    const workspaceRoot = lookup.project.value.workspaceRoot;
+    const listResult = yield* client.list(workspaceRoot);
+    const liveMatch =
+      listResult._tag === "ok"
+        ? (listResult.value.instances.find(
+            (instance) =>
+              normalizeWorkspaceRoot(instance.projectPath) ===
+              normalizeWorkspaceRoot(workspaceRoot),
+          ) ?? null)
+        : null;
+    let packageResolve: UnityPackageResolveOutcome;
+    if (liveMatch !== null && liveMatch.isRunning) {
+      const resolveResult = yield* client.packageResolve(workspaceRoot);
+      if (resolveResult._tag === "ok") {
+        packageResolve = "invoked";
+      } else {
+        // Non-fatal to the install either way — the embedded package copy
+        // already succeeded; this is only a best-effort nudge so the user
+        // doesn't have to refocus Unity themselves. Logged so a real
+        // pattern of failures is visible without making the install itself
+        // report an error over a resolver nudge.
+        packageResolve = "failed";
+        yield* Effect.logWarning("unity package_resolve failed after install (non-fatal)", {
+          workspaceRoot,
+          outcome: resolveResult,
+        });
+      }
+    } else {
+      packageResolve = "skipped_no_editor";
+    }
     const pairingHandoff = yield* UnityPairingHandoff.UnityPairingHandoff;
     const pairingOutcome = yield* pairingHandoff.prepare({
-      workspaceRoot: lookup.project.value.workspaceRoot,
+      workspaceRoot,
       projectTitle: lookup.project.value.title,
     });
     return {
       _tag: "ok",
-      value: { ...pipeline, selectionPackage, pairingOutcome },
+      value: { ...pipeline, selectionPackage, pairingOutcome, packageResolve },
     } as const;
   });
 

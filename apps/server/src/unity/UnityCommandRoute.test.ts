@@ -62,17 +62,19 @@ function makeUnityPipelineClientSpy(): {
       stop: record("stop"),
       pause: record("pause"),
       // Never exercised by this file's own tests (this route dispatches
-      // play/stop/pause/status only, never list/install/open) — present
-      // only because `UnityPipelineClient.of({...})`'s object literal is
-      // checked against the FULL service interface. A latent gap from
-      // #92 increment 1 adding `list` to the interface (and again from
-      // increment 4a adding `install`, and again from #92's cold-start
-      // wiring round adding `open`), surfaced by running plain `tsc
+      // play/stop/pause/status only, never list/install/open/
+      // packageResolve) — present only because `UnityPipelineClient.of({...})`'s
+      // object literal is checked against the FULL service interface. A
+      // latent gap from #92 increment 1 adding `list` to the interface (and
+      // again from increment 4a adding `install`, again from #92's
+      // cold-start wiring round adding `open`, and again from task #130
+      // adding `packageResolve`), surfaced by running plain `tsc
       // --noEmit` on this package rather than only the lint-inclusive
       // `vp run ... typecheck`.
       list: () => Effect.die("unexpected list call"),
       install: () => Effect.die("unexpected install call"),
       open: () => Effect.die("unexpected open call"),
+      packageResolve: () => Effect.die("unexpected packageResolve call"),
     }),
   );
   return { layer, calls };

@@ -71,6 +71,150 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
   });
 });
 
+describe("describeUnityPipelineInstallOutcome — package_resolve (task #130), silent on success", () => {
+  it("adds a remedy line when package_resolve failed — the one non-silent case", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+      packageResolve: "failed",
+    });
+
+    expect(report.type).toBe("success");
+    expect(report.description).toContain("Unity");
+    expect(report.description.toLowerCase()).toContain("click into");
+  });
+
+  it("says nothing extra when package_resolve was invoked successfully", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+      packageResolve: "invoked",
+    });
+
+    expect(report.description.toLowerCase()).not.toContain("click into");
+  });
+
+  it("says nothing extra when package_resolve was skipped (no live editor) or absent (pre-#130 fixture)", () => {
+    const skipped = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+      packageResolve: "skipped_no_editor",
+    });
+    const absent = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(skipped.description.toLowerCase()).not.toContain("click into");
+    expect(absent.description.toLowerCase()).not.toContain("click into");
+  });
+});
+
+describe("describeUnityPipelineInstallOutcome — legacy cleanup (the rename's migration), silent when nothing was removed", () => {
+  it("names the removed legacy package when the Packages/ directory was actually swept", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
+        operation: "installed",
+        legacyCleanup: { packagesDirectory: "removed", libraryDirectory: "absent" },
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(report.description).toContain("Removed the old com.ironmind.editor-presence package");
+  });
+
+  it("names the removed legacy package when only the stranded Library/ pairing directory was swept", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
+        operation: "installed",
+        legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "removed" },
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(report.description).toContain("Removed the old com.ironmind.editor-presence package");
+  });
+
+  it("stays silent when there was nothing legacy to remove", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
+        operation: "installed",
+        legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "absent" },
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(report.description).not.toContain("com.ironmind.editor-presence");
+  });
+
+  it("stays silent (not a false claim) when a legacy directory was found but could NOT be removed", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
+        operation: "installed",
+        legacyCleanup: { packagesDirectory: "failed", libraryDirectory: "absent" },
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(report.description).not.toContain("com.ironmind.editor-presence");
+  });
+
+  it("stays silent when legacyCleanup is absent entirely (pre-rename fixture)", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+    });
+
+    expect(report.description).not.toContain("com.ironmind.editor-presence");
+  });
+});
+
 describe("describeUnityPipelineInstallOutcome — failure branches", () => {
   it("uses the server's own message verbatim for a generic error", () => {
     const report = describeUnityPipelineInstallOutcome({

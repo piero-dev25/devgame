@@ -68,6 +68,13 @@ function stubPipelineClient(
       // landed (0a1f6415d), and this object literal is checked against the
       // full service interface.
       open: () => Effect.die("unexpected open call"),
+      // Same reason again — this suite never resolves packages.
+      // `packageResolve` became a required member when task #130 landed;
+      // without a concrete base value here, the `...overrides` spread below
+      // (typed `Partial<...>`) makes the MERGED object's `packageResolve`
+      // inferred optional, which does not satisfy `.of(...)`'s required
+      // member.
+      packageResolve: () => Effect.die("unexpected packageResolve call"),
       ...overrides,
     }),
   );

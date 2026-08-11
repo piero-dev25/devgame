@@ -132,10 +132,30 @@ function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null | "fail")
 }
 
 /** A `UnityPipelineClient` double that records which `workspaceRoot`
- * `install` was called with, and returns a fixed outcome — this suite is
- * about ROUTING and AUTHORIZATION, not about CLI parsing (already covered
- * by `UnityPipelineClient.test.ts`'s own `install` describe block). */
-function makeUnityPipelineClientSpy(): {
+ * `install`/`list`/`packageResolve` were called with, and returns a fixed
+ * (optionally overridden) outcome for each — this suite is about ROUTING,
+ * AUTHORIZATION, and the task #130 liveness gate, not about CLI parsing
+ * (already covered by `UnityPipelineClient.test.ts`'s own `install`/`list`/
+ * `packageResolve` describe blocks).
+ *
+ * `list`/`packageResolve` DEFAULT to "no live Editor found for this
+ * project" (empty `instances`) / "ok" respectively — the common case every
+ * test in this suite written before task #130 implicitly assumes, and the
+ * SAFE default for the liveness gate itself (never call `packageResolve`
+ * without positive evidence of a live match). Only the tests that actually
+ * exercise the gate override them. */
+function makeUnityPipelineClientSpy(
+  options: {
+    readonly list?: (
+      workspaceRoot: string,
+    ) => Effect.Effect<
+      UnityPipelineClient.UnityPipelineResult<UnityPipelineClient.UnityPipelineListResult>
+    >;
+    readonly packageResolve?: (
+      workspaceRoot: string,
+    ) => Effect.Effect<UnityPipelineClient.UnityPipelineResult<void>>;
+  } = {},
+): {
   readonly layer: Layer.Layer<UnityPipelineClient.UnityPipelineClient>;
   readonly calls: Array<{ readonly method: string; readonly workspaceRoot: string }>;
 } {
@@ -145,6 +165,12 @@ function makeUnityPipelineClientSpy(): {
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "0.4.0-exp.1", alreadyInstalled: false },
     };
+  const defaultListResult: UnityPipelineClient.UnityPipelineResult<UnityPipelineClient.UnityPipelineListResult> =
+    { _tag: "ok", value: { instances: [], latestVersion: null, unparseableInstanceCount: 0 } };
+  const defaultPackageResolveResult: UnityPipelineClient.UnityPipelineResult<void> = {
+    _tag: "ok",
+    value: undefined,
+  };
   const layer = Layer.succeed(
     UnityPipelineClient.UnityPipelineClient,
     UnityPipelineClient.UnityPipelineClient.of({
@@ -153,12 +179,21 @@ function makeUnityPipelineClientSpy(): {
       play: () => Effect.die("unexpected play call"),
       stop: () => Effect.die("unexpected stop call"),
       pause: () => Effect.die("unexpected pause call"),
-      list: () => Effect.die("unexpected list call"),
+      list: (workspaceRoot) => {
+        calls.push({ method: "list", workspaceRoot });
+        return options.list?.(workspaceRoot) ?? Effect.succeed(defaultListResult);
+      },
       install: (workspaceRoot) => {
         calls.push({ method: "install", workspaceRoot });
         return Effect.succeed(outcome);
       },
       open: () => Effect.die("unexpected open call"),
+      packageResolve: (workspaceRoot) => {
+        calls.push({ method: "packageResolve", workspaceRoot });
+        return (
+          options.packageResolve?.(workspaceRoot) ?? Effect.succeed(defaultPackageResolveResult)
+        );
+      },
     }),
   );
   return { layer, calls };
@@ -291,9 +326,16 @@ describe("dispatchUnityPipelineInstall", () => {
             legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "absent" },
           },
           pairingOutcome: { _tag: "minted" },
+          // No live matched Editor in this fixture (the spy's own default
+          // `list()`) — task #130's liveness gate correctly never attempts
+          // `packageResolve` here.
+          packageResolve: "skipped_no_editor",
         });
         expect(projection.requestedProjectIds).toEqual([PROJECT_ID]);
-        expect(spy.calls).toEqual([{ method: "install", workspaceRoot }]);
+        expect(spy.calls).toEqual([
+          { method: "install", workspaceRoot },
+          { method: "list", workspaceRoot },
+        ]);
         expect(pairing.registeredRoots).toEqual([workspaceRoot]);
         expect(pairing.issued).toEqual([
           {
@@ -316,6 +358,193 @@ describe("dispatchUnityPipelineInstall", () => {
         });
       }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  describe("package_resolve nudge (task #130) — the last zero-touch wire, non-fatal to the install either way", () => {
+    function liveMatchedInstance(
+      projectPath: string,
+      overrides: Partial<UnityPipelineClient.UnityPipelineListInstance> = {},
+    ): UnityPipelineClient.UnityPipelineListInstance {
+      return {
+        projectPath,
+        pid: 111,
+        isRunning: true,
+        hasPipelinePackage: true,
+        isReachable: true,
+        pipelineVersion: "0.4.0-exp.1",
+        updateAvailable: false,
+        safeMode: false,
+        ...overrides,
+      };
+    }
+
+    it.effect(
+      "a live matched RUNNING instance triggers packageResolve, cwd'd to the project — outcome reports 'invoked'",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-invoked-",
+          });
+          const list = (root: string) =>
+            Effect.succeed({
+              _tag: "ok" as const,
+              value: {
+                instances: [liveMatchedInstance(root)],
+                latestVersion: null,
+                unparseableInstanceCount: 0,
+              },
+            });
+          const spy = makeUnityPipelineClientSpy({ list });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.packageResolve).toBe("invoked");
+          expect(spy.calls).toEqual([
+            { method: "install", workspaceRoot },
+            { method: "list", workspaceRoot },
+            { method: "packageResolve", workspaceRoot },
+          ]);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "no matched instance (empty list) skips packageResolve entirely — outcome reports 'skipped_no_editor'",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-noeditor-",
+          });
+          // Default spy: list() reports zero instances.
+          const spy = makeUnityPipelineClientSpy();
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.packageResolve).toBe("skipped_no_editor");
+          expect(spy.calls.map((call) => call.method)).toEqual(["install", "list"]);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "a matched instance that isn't RUNNING (stale lock, F13's own scenario) is treated as no live editor — never cold-starts Unity",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-stale-",
+          });
+          const list = (root: string) =>
+            Effect.succeed({
+              _tag: "ok" as const,
+              value: {
+                instances: [
+                  liveMatchedInstance(root, {
+                    isRunning: false,
+                    pid: null,
+                    hasPipelinePackage: false,
+                    isReachable: false,
+                    pipelineVersion: null,
+                    updateAvailable: null,
+                    safeMode: null,
+                  }),
+                ],
+                latestVersion: null,
+                unparseableInstanceCount: 0,
+              },
+            });
+          const spy = makeUnityPipelineClientSpy({ list });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.packageResolve).toBe("skipped_no_editor");
+          expect(spy.calls.map((call) => call.method)).toEqual(["install", "list"]);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "a live matched instance whose packageResolve call FAILS is reported 'failed', but never fails the install itself",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-failed-",
+          });
+          const list = (root: string) =>
+            Effect.succeed({
+              _tag: "ok" as const,
+              value: {
+                instances: [liveMatchedInstance(root)],
+                latestVersion: null,
+                unparseableInstanceCount: 0,
+              },
+            });
+          const packageResolve = () =>
+            Effect.succeed({
+              _tag: "error" as const,
+              message: "Cannot connect to Unity Editor Pipeline server at 127.0.0.1:7801",
+            });
+          const spy = makeUnityPipelineClientSpy({ list, packageResolve });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          // The install ITSELF is still an honest success — package_resolve
+          // failing is explicitly non-fatal, per this route's own doc
+          // comment (mirrors the pairing-mint-failure test's own posture).
+          expect(outcome.value.value.packageId).toBe("com.unity.pipeline");
+          expect(outcome.value.selectionPackage.operation).toBe("installed");
+          expect(outcome.value.packageResolve).toBe("failed");
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "list() itself failing (CLI error) is treated as 'no confirmed live editor', not a guess — skips packageResolve",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-listfail-",
+          });
+          const list = () =>
+            Effect.succeed({ _tag: "error" as const, message: "unity CLI vanished mid-call" });
+          const spy = makeUnityPipelineClientSpy({ list });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.packageResolve).toBe("skipped_no_editor");
+          expect(spy.calls.map((call) => call.method)).toEqual(["install", "list"]);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  });
 
   it.effect("caps the project-title portion of the minted credential label", () =>
     Effect.gen(function* () {

@@ -87,6 +87,13 @@ function makeUnityPipelineClientSpy(input: {
         }
         return Effect.succeed(input.open);
       },
+      // Never exercised by this file's own tests (this route only checks
+      // liveness then cold-starts, never resolves packages) — present only
+      // because `UnityPipelineClient.of({...})`'s object literal is checked
+      // against the FULL service interface, same latent-gap pattern this
+      // file's own `install`/`open` fields close. `packageResolve` became a
+      // required member when task #130 landed.
+      packageResolve: () => Effect.die("unexpected packageResolve call"),
     }),
   );
   return { layer, calls };

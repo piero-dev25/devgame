@@ -337,6 +337,93 @@ describe("play/stop/pause — assert the EFFECT via a confirming status re-read,
   );
 });
 
+function packageResolveEnvelope(resultText: string): string {
+  return encodeJson({
+    success: true,
+    command: "command package_resolve",
+    data: {
+      command: "package_resolve",
+      parameters: { json: true },
+      result: resultText,
+      target: { host: "127.0.0.1", port: 7801, projectPath: PROJECT },
+      success: true,
+    },
+    errors: [],
+    warnings: [],
+  });
+}
+
+describe("packageResolve — task #130's zero-touch wire, no confirming status re-read", () => {
+  it.effect("a successful envelope maps to ok with no value to read (fire-and-forget)", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([packageResolveEnvelope("OK")]);
+      const result = yield* withClient(runner.run, (client) => client.packageResolve(PROJECT));
+      expect(result).toEqual({ _tag: "ok", value: undefined });
+      // A single call — unlike play/stop/pause, there is no confirming
+      // status re-read: the effect this kicks off (reimport → recompile →
+      // package load) has no `editor_status` field that reflects it.
+      expect(runner.callCount()).toBe(1);
+    }),
+  );
+
+  it.effect(
+    "invokes exactly `unity command package_resolve --project-path <root> --json`, cwd pinned to workspaceRoot",
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ProcessRunner.ProcessRunInput> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seen.push(input);
+          return okOutput(
+            commandFailedEnvelope("package_resolve", "unused"), // any envelope; only argv/cwd asserted
+          );
+        };
+        yield* withClient(runner, (client) => client.packageResolve(PROJECT));
+        expect(seen).toHaveLength(1);
+        expect(seen[0]?.args).toEqual([
+          "command",
+          "package_resolve",
+          "--project-path",
+          PROJECT,
+          "--json",
+        ]);
+        expect(seen[0]?.cwd).toBe(PROJECT);
+      }),
+  );
+
+  it.effect(
+    "maps 'No Pipeline instance found' to notReady — same folding as status/play/stop/pause",
+    () =>
+      Effect.gen(function* () {
+        const runner = callCountingRunner([
+          commandFailedEnvelope(
+            "package_resolve",
+            `No Pipeline instance found for project: ${PROJECT}. Make sure Unity Editor is running with the Pipeline package installed.`,
+          ),
+        ]);
+        const result = yield* withClient(runner.run, (client) => client.packageResolve(PROJECT));
+        expect(result).toEqual({ _tag: "notReady" });
+      }),
+  );
+
+  it.effect("an unrecognised CLI failure folds into a real error, not notReady", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner([
+        commandFailedEnvelope("package_resolve", "Something else went wrong"),
+      ]);
+      const result = yield* withClient(runner.run, (client) => client.packageResolve(PROJECT));
+      expect(result).toEqual({ _tag: "error", message: "Something else went wrong" });
+    }),
+  );
+
+  it.effect("unparseable stdout folds into error, never throws", () =>
+    Effect.gen(function* () {
+      const runner = callCountingRunner(["not json at all"]);
+      const result = yield* withClient(runner.run, (client) => client.packageResolve(PROJECT));
+      expect(result._tag).toBe("error");
+    }),
+  );
+});
+
 // `unity pipeline list --json`'s envelope is now VERIFIED against a real
 // captured sample (2026-08-04, from `Mafia Game`, a live Unity Editor with
 // no Pipeline package installed — supplied by team-lead, captured on the

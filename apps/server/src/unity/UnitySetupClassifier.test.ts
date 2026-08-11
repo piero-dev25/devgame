@@ -79,7 +79,7 @@ describe("classifyUnitySetup", () => {
     expect(classifyUnitySetup(input)).toEqual({
       state: "S1",
       message:
-        "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor.",
+        "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.",
     });
   });
 
@@ -293,7 +293,7 @@ describe("classifyUnitySetup", () => {
     expect(classifyUnitySetup(input)).toEqual({
       state: "S13",
       message:
-        "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it.",
+        "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it. If the package hasn't appeared after a minute, open the project in Unity and click Setup Unity Integrations again.",
     });
   });
 
