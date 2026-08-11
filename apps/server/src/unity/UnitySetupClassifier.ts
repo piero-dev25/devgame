@@ -103,6 +103,16 @@ export interface UnitySetupClassifierInput {
   /** Whether this classification is happening inside the grace window
    * after server start — plan §2's F3, the window S10′ exists for. */
   readonly withinPairingGraceWindow: boolean;
+  /** Whether a PRE-RENAME (`com.ironmind.editor-presence`) selection
+   * package directory is still on disk under `Packages/` — round-17's live
+   * finding (2026-08-11): the legacy package speaks the identical
+   * protocol, so a project paired under it reads every OTHER fact as green
+   * (`selectionPackageInstalled`/`selectionPublisherRegistered` both true,
+   * chips and Play genuinely working) and used to fall all the way through
+   * to S11. That made the already-built sweep+reinstall+re-pair migration
+   * UNREACHABLE for its entire target population — see `classifyUnitySetup`'s
+   * S14 branch. */
+  readonly legacySelectionPackagePresent: boolean;
 }
 
 export type UnitySetupPrimaryStateResult =
@@ -122,7 +132,8 @@ export type UnitySetupPrimaryStateResult =
   | { readonly state: "S10'"; readonly message: string }
   | { readonly state: "S11" }
   | { readonly state: "S12"; readonly message: string; readonly command: string }
-  | { readonly state: "S13"; readonly message: string };
+  | { readonly state: "S13"; readonly message: string }
+  | { readonly state: "S14"; readonly message: string };
 
 // Every sentence below is copied VERBATIM from plan §2's table — a reader
 // diffing this file against that table should find byte-identical text,
@@ -169,6 +180,17 @@ const S7B_MESSAGE = "Waiting for Unity to respond…";
  * state can finally say so instead of only ever promising to wait. */
 const S13_MESSAGE =
   "Pipeline is added to this project — Unity resolves it automatically, either right away if the project is already open, or the next time you open it. If the package hasn't appeared after a minute, open the project in Unity and click Setup Unity Integrations again.";
+/** Added 2026-08-11 (round-17 live finding), not in plan §2's original
+ * table — same reason S13 isn't: this state didn't exist when that table
+ * was written. Deliberately does NOT say anything is broken: chips and
+ * Play both genuinely work through the legacy package (it speaks the
+ * identical protocol) — this is an upgrade prompt, not an error. See
+ * `classifyUnitySetup`'s own S14 branch for why this check sits at the
+ * very end, intercepting ONLY the path that would otherwise reach S11
+ * (never overriding a real problem like S9's genuinely-missing selection
+ * package — the "S9 still wins over S14" test pins that priority). */
+const S14_MESSAGE =
+  "An older DevGame Unity package (com.ironmind.editor-presence) is installed. Chips and Play already work, but click Setup Unity Integrations to upgrade it and re-pair.";
 const S9_MESSAGE =
   "Unity selection chips are off — this project doesn't have DevGame's selection package.";
 const S10_MESSAGE =
@@ -279,6 +301,18 @@ export function classifyUnitySetup(input: UnitySetupClassifierInput): UnitySetup
       : { state: "S10", message: S10_MESSAGE };
   }
 
-  // 7. Everything checked is green.
+  // 7. Round-17 live finding: every check above just passed — this project
+  // would otherwise report S11 — but a pre-rename selection package is
+  // still on disk. Checked LAST, deliberately: S9's genuinely-missing-
+  // selection-package check (step 6, above) and every other real problem
+  // (S0-S8) already win over this on their own, since none of THIS
+  // branch's preconditions can be satisfied until every one of THOSE
+  // checks has already passed. This intercepts only the one path that used
+  // to hide the migration need behind a false "everything's fine."
+  if (input.legacySelectionPackagePresent) {
+    return { state: "S14", message: S14_MESSAGE };
+  }
+
+  // 8. Everything checked is green.
   return { state: "S11" };
 }

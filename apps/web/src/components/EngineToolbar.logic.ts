@@ -215,6 +215,19 @@ export function isUnityPlayReady(facts: UnitySetupFacts): boolean {
  *  - an installed selection package without a registered publisher — S10's
  *    recovery is a re-click, but only while a live Editor proves the absent
  *    publisher means unpaired rather than merely closed.
+ *  - `legacySelectionPackagePresent` — ADDED 2026-08-11 (round-17 live
+ *    finding, evidence/qa-round17/REPORT.md): a project paired under the
+ *    PRE-RENAME (`com.ironmind.editor-presence`) package speaks the
+ *    identical protocol, so it reads every ONE of the three checks above as
+ *    green — chips and Play both genuinely work through it — which made
+ *    this function return `false` for exactly the population the
+ *    sweep+reinstall+re-pair migration exists to reach: existing installs.
+ *    No Setup control ever rendered, so the migration was UNREACHABLE.
+ *    This is a fourth, INDEPENDENT reason to offer, not folded into
+ *    `selectionMissing`/`pairingMissing` above (both of which correctly
+ *    read `false` in this exact case — the fact this override is needed
+ *    for is that the SELECTION checks look satisfied by the wrong
+ *    package, not that they're unsatisfied).
  *
  * S8 (package installed, but an update is available) is a genuinely
  * DIFFERENT case this function does not attempt to cover: `isUnityPlayReady`
@@ -243,7 +256,12 @@ export function shouldOfferUnityPipelineInstall(facts: UnitySetupFacts): boolean
     facts.selectionPackage.installed &&
     !facts.selectionPublisherRegistered &&
     hasLiveUnityEditorMatch(facts);
-  return pipelineMissing || selectionMissing || pairingMissing;
+  // Round-17 live finding — see this function's own doc comment. `=== true`,
+  // never a bare truthy check: the field is optional on the wire (absent on
+  // any server build predating this check), and `undefined` must read the
+  // same as `false` here, never as an accidental offer.
+  const legacyPackagePresent = facts.legacySelectionPackagePresent === true;
+  return pipelineMissing || selectionMissing || pairingMissing || legacyPackagePresent;
 }
 
 /** The message to show when Unity's controls are disabled — `primary`'s own

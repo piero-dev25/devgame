@@ -145,6 +145,18 @@ export const UnitySetupFacts = Schema.Struct({
   lockfilePresent: Schema.Boolean,
   pipelinePackage: UnitySetupPackageLockState,
   selectionPackage: UnitySetupPackageLockState,
+  /** Whether a PRE-RENAME (`com.ironmind.editor-presence`) selection
+   * package directory is still present under `Packages/` — round-17's live
+   * finding (2026-08-11): the legacy package speaks the identical
+   * protocol, so a project paired under it reads every OTHER fact green
+   * (chips and Play both genuinely work through it), which made the
+   * already-built sweep+reinstall+re-pair migration UNREACHABLE for its
+   * entire target population — see `UnitySetupClassifier.ts`'s S14 state.
+   * `Schema.optionalKey`, mirroring `legacyCleanup`/`packageResolve`'s
+   * non-breaking pattern in `unityPipelineInstall.ts`: absent (not merely
+   * `undefined`) on any server build predating this check, and on every
+   * existing wire fixture that doesn't opt in. */
+  legacySelectionPackagePresent: Schema.optionalKey(Schema.Boolean),
   pipelineList: Schema.optionalKey(UnitySetupPipelineListOutcome),
   /** Whether `EditorPresenceRegistry` currently has a publisher registered
    * for this project's workspace root — the input S10/S10′ need (plan
@@ -203,6 +215,13 @@ export const UnitySetupPrimaryState = Schema.Union([
    * original table — see `UnitySetupClassifier.ts`'s own doc comment on
    * this state for why it exists and why it wins over both S4 and S5. */
   Schema.Struct({ state: Schema.Literal("S13"), message: Schema.String }),
+  /** Added 2026-08-11 (round-17 live finding), not in plan §2's original
+   * table — a project paired under the pre-rename legacy package id reads
+   * every OTHER fact green (chips/Play both genuinely work through it) and
+   * used to fall through to S11, hiding the migration entirely. See
+   * `UnitySetupClassifier.ts`'s own S14 branch. Never claims breakage —
+   * this is an upgrade prompt, not an error. */
+  Schema.Struct({ state: Schema.Literal("S14"), message: Schema.String }),
 ]);
 export type UnitySetupPrimaryState = typeof UnitySetupPrimaryState.Type;
 

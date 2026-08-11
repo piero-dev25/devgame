@@ -35,6 +35,7 @@ import {
   type UnitySetupClassifierInput,
   type UnitySetupClassifierPipelineList,
 } from "./UnitySetupClassifier.ts";
+import { LEGACY_UNITY_SELECTION_PACKAGE_ID } from "./UnityEmbeddedSelectionPackage.ts";
 import * as UnityPackageLock from "./UnityPackageLock.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 
@@ -45,6 +46,18 @@ const EMBEDDED_SELECTION_PACKAGE_MANIFEST_PATH = [
   "Packages",
   SELECTION_PACKAGE_ID,
   "package.json",
+] as const;
+/** The EXACT path `UnityEmbeddedSelectionPackage.ts`'s
+ * `removeLegacySelectionPackageArtifacts` sweeps — imported id, not
+ * re-hardcoded, so a future rename of either the id or the join can't
+ * silently desync detection from cleanup. Round-17's live finding: a
+ * project paired under this legacy id reads every OTHER fact as green
+ * (the legacy package speaks the identical protocol), so this presence
+ * check is the ONLY thing that can surface "this project still needs the
+ * migration" — see `UnitySetupClassifier.ts`'s S14 branch. */
+const LEGACY_SELECTION_PACKAGE_DIRECTORY_PATH = [
+  "Packages",
+  LEGACY_UNITY_SELECTION_PACKAGE_ID,
 ] as const;
 
 /** Plan §2's F3 default — tunable, per that section's own note. */
@@ -151,6 +164,12 @@ export const make = Effect.gen(function* () {
       pipelineList: { _tag: "notRun" },
       selectionPublisherRegistered: false,
       withinPairingGraceWindow: false,
+      // Same reasoning as `pipelinePackageDeclaredInManifest` above —
+      // structurally dead in this branch (S1/S2/S2' win before
+      // `classifyUnitySetup` ever reaches the S14 check this field gates),
+      // so a filesystem read here would cost real time for a value that
+      // can't affect the outcome.
+      legacySelectionPackagePresent: false,
     };
     const facts: UnitySetupFacts = {
       isUnityProject,
@@ -196,6 +215,18 @@ export const make = Effect.gen(function* () {
           Effect.orElseSucceed(() => false),
         );
       const selectionPackageInstalled = selectionEntry !== null || selectionPackagePresentOnDisk;
+      // Round-17 live finding: a DIRECT filesystem check, independent of
+      // `packages-lock.json`'s own (potentially stale or ambiguous) view —
+      // see `LEGACY_SELECTION_PACKAGE_DIRECTORY_PATH`'s own doc comment for
+      // why this can't just reuse `selectionPackageInstalled`'s existing
+      // lock-derived signal. `exists`, not `stat().type === "Directory"`:
+      // matches `UnityEmbeddedSelectionPackage.ts`'s own sweep check
+      // exactly (`removeLegacyDirectoryBestEffort`'s `fileSystem.exists`),
+      // so "does the probe see it" and "does the migration sweep it" can
+      // never silently disagree about what counts as present.
+      const legacySelectionPackagePresent = yield* fileSystem
+        .exists(path.join(workspaceRoot, ...LEGACY_SELECTION_PACKAGE_DIRECTORY_PATH))
+        .pipe(Effect.orElseSucceed(() => false));
       // Declared-intent read (manifest.json), NOT the installed-check —
       // see `UnityPackageLock.ts`'s own module doc. Exists so a successful
       // `unity pipeline install` (plan §5's increment 4a) doesn't report
@@ -277,6 +308,7 @@ export const make = Effect.gen(function* () {
         pipelineList: classifierPipelineList,
         selectionPublisherRegistered,
         withinPairingGraceWindow,
+        legacySelectionPackagePresent,
       };
 
       const facts: UnitySetupFacts = {
@@ -294,6 +326,7 @@ export const make = Effect.gen(function* () {
           resolvedVersion: selectionEntry?.version ?? null,
           declaredInManifest: selectionPackageDeclaredInManifest,
         },
+        legacySelectionPackagePresent,
         pipelineList: factsPipelineList,
         selectionPublisherRegistered,
         withinPairingGraceWindow,

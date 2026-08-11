@@ -661,6 +661,34 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
       expect(view.unityInstallOffered).toBe(false);
     });
 
+    // Round-17 live finding (2026-08-11): the exact end-to-end repro.
+    // Identical fixture to the "false once FULLY ready" test just above —
+    // pipeline installed, selection installed, publisher registered, S11
+    // — with ONLY `legacySelectionPackagePresent` added, proving the CTA
+    // now offers alongside a fully-working ready transport cluster (same
+    // "ready AND offered are not mutually exclusive" shape S9's own #129
+    // test below already established for a different reason).
+    it("S14 (round-17): STILL offered while play-ready when a legacy selection package is still on disk — the migration is now reachable", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(
+          readyFacts({
+            selectionPackage: {
+              installed: true,
+              resolvedVersion: "0.1.0",
+              declaredInManifest: false,
+            },
+            selectionPublisherRegistered: true,
+            legacySelectionPackagePresent: true,
+          }),
+          { state: "S14", message: "placeholder" },
+        ),
+      });
+      expect(view.availableActions).toEqual(["play", "pause", "stop"]);
+      expect(view.unityInstallOffered).toBe(true);
+    });
+
     it("S9 (#129): STILL offered while play-ready when only the selection package is missing — Play works, chips are off, and the click fixes it", () => {
       const view = resolveEngineToolbarView({
         engineType: "unity",
@@ -958,6 +986,59 @@ describe("shouldOfferUnityPipelineInstall — withheld (only for reasons an inst
             declaredInManifest: false,
           },
           selectionPublisherRegistered: true,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  // Round-17 live finding (2026-08-11): identical facts to the "withholds
+  // at S11" test just above — this IS the exact repro
+  // (evidence/qa-round17/REPORT.md, items 1-2). A project paired under the
+  // LEGACY package id reads every one of the three existing checks
+  // (pipeline missing / selection missing / pairing missing) as green,
+  // since the legacy package speaks the identical protocol and genuinely
+  // works — so the CTA never offered at all, making the already-built
+  // sweep+reinstall+re-pair migration unreachable for its entire target
+  // population: existing installs.
+  it("offers even at S11 when a legacy selection package is still on disk — the round-17 live repro", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
+          selectionPublisherRegistered: true,
+          legacySelectionPackagePresent: true,
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("still withholds at S11 with no legacy package present — the negative direction stays correct", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          selectionPackage: {
+            installed: true,
+            resolvedVersion: "0.1.0",
+            declaredInManifest: false,
+          },
+          selectionPublisherRegistered: true,
+          legacySelectionPackagePresent: false,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("withholds when the CLI isn't available even with a legacy package present — no working CLI, no install can run at all", () => {
+    expect(
+      shouldOfferUnityPipelineInstall(
+        readyFacts({
+          cliAvailable: false,
+          pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          legacySelectionPackagePresent: true,
         }),
       ),
     ).toBe(false);

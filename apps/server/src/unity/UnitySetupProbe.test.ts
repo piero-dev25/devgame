@@ -438,6 +438,90 @@ describe("UnitySetupProbe", () => {
         Effect.map((result) => {
           expect(result.primary.state).toBe("S11");
           expect(result.facts.selectionPublisherRegistered).toBe(true);
+          // Explicitly computed and `false` for a project with no legacy
+          // directory — never merely absent/`undefined` once the CLI is
+          // confirmed available (see UnitySetupProbe.ts's own doc comment
+          // for the one branch where it's genuinely omitted instead: CLI
+          // unavailable).
+          expect(result.facts.legacySelectionPackagePresent).toBe(false);
+        }),
+      ),
+  );
+
+  // Round-17 live finding (2026-08-11): a project paired under the
+  // PRE-RENAME (`com.ironmind.editor-presence`) package reads every OTHER
+  // fact as green — the legacy package speaks the identical protocol, so
+  // chips and Play both genuinely work through it — and used to reach S11,
+  // which made the already-built sweep+reinstall+re-pair migration
+  // UNREACHABLE for its entire target population (evidence/qa-round17/
+  // REPORT.md, items 1-2: no Setup control ever appeared to click).
+  // Identical fixture to the "everything green...reaches S11" test just
+  // above, with ONLY the legacy directory added.
+  it.effect(
+    "round-17 live repro: a legacy selection package DIRECTORY on disk reaches S14, even though every other fact is fully green",
+    () =>
+      runProbeTest(
+        (cwd) =>
+          stubPipelineClient({
+            list: () =>
+              Effect.succeed({
+                _tag: "ok",
+                value: {
+                  instances: [
+                    {
+                      projectPath: cwd,
+                      pid: 445,
+                      isRunning: true,
+                      hasPipelinePackage: true,
+                      isReachable: true,
+                      pipelineVersion: "0.4.0",
+                      updateAvailable: false,
+                      safeMode: false,
+                    },
+                  ],
+                  latestVersion: null,
+                  unparseableInstanceCount: 0,
+                },
+              }),
+          }),
+        (cwd) =>
+          Effect.gen(function* () {
+            yield* writeTextFile(
+              cwd,
+              "Packages/packages-lock.json",
+              encodeJson({
+                dependencies: {
+                  "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
+                  "com.devgame.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                },
+              }),
+            );
+            // The migration sweeps EXACTLY this path
+            // (UnityEmbeddedSelectionPackage.ts's `removeLegacySelectionPackageArtifacts`) —
+            // reused verbatim here, not re-derived, so a future rename of
+            // either the id or the join can't silently desync the two.
+            yield* writeTextFile(
+              cwd,
+              "Packages/com.ironmind.editor-presence/package.json",
+              encodeJson({ name: "com.ironmind.editor-presence", version: "0.3.1" }),
+            );
+            const registry = yield* EditorPresenceRegistry.EditorPresenceRegistry;
+            const token = registry.newConnectionToken();
+            yield* registry.registerPublisher(
+              "test-session",
+              token,
+              {
+                editor: { id: "unity", name: "Unity", version: "6000.3.14f1" },
+                workspace: { root: cwd },
+              },
+              { claimantSessionId: undefined },
+            );
+            return yield* runProbe(cwd);
+          }),
+      ).pipe(
+        Effect.map((result) => {
+          expect(result.facts.legacySelectionPackagePresent).toBe(true);
+          expect(result.primary.state).toBe("S14");
         }),
       ),
   );
