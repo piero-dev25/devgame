@@ -196,7 +196,12 @@ function getWindowTitleBarOptions(
   if (platform === "darwin") {
     return {
       titleBarStyle: "hiddenInset",
-      trafficLightPosition: { x: 16, y: 18 },
+      // docs/specs/unified-topband.md, Section B (critique m3): y:10 for the
+      // new 36px band, not guessed — the shipped y:18 against the old 52px
+      // strip satisfies y = (band - 16) / 2 exactly ((52 - 16) / 2 = 18), so
+      // the same grounded model gives y:10 for the 36px band
+      // ((36 - 16) / 2 = 10). Screenshot-confirmed round 12.
+      trafficLightPosition: { x: 16, y: 10 },
     };
   }
 

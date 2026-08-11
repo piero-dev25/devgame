@@ -85,3 +85,11 @@ export {
   type PanelDefinition,
   type PanelProps,
 } from "./types";
+// docs/specs/unified-topband.md, Section A: which groups sit in the band's
+// top row and which one owns the (0,0) corner — same "no jsdom to drive
+// the ref" extraction reason as the others above.
+export {
+  computeTopBandLayout,
+  type TopBandGroupInput,
+  type TopBandLayoutResult,
+} from "./topBandLayout";

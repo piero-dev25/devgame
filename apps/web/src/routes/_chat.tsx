@@ -1,6 +1,12 @@
 import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import {
+  useEffect,
+  useMemo,
+  useSyncExternalStore,
+  type CSSProperties,
+  type ReactNode,
+} from "react";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { isElectron } from "../env";
@@ -221,38 +227,88 @@ function ChatRouteGlobalShortcuts() {
 }
 
 /**
- * dock-chrome-strip.md, Section A: the hoisted chrome row — problem (1)/(2)
- * from the owner's report (traffic lights overlapping a dock tab; no
- * draggable top-strip area). Renders `SidebarChromeHeader` (brand, as
- * today) with the strip-specific ALWAYS-visible sidebar toggle wired to the
- * dock-side hide/show (Section C), instead of the header's default
- * mobile-only/`SidebarProvider`-toggling trigger.
+ * The corner cell's positioning/sizing SHELL, pulled out into its own
+ * named, exported, hook-free component for the same reason
+ * `DockviewLayout.tsx`'s `DockControlsCluster` and `SidebarChrome.tsx`'s
+ * `SidebarChromeToggle` were: `WorkspaceChromeStrip` below cannot render
+ * under this repo's `renderToStaticMarkup`-only harness — verified
+ * empirically (not assumed from the old comment this file's `dock-chrome-
+ * strip.md` doc used to carry): its own `useSyncExternalStore` call throws
+ * without a `getServerSnapshot` third argument, and even past that,
+ * `SidebarChromeHeader` unconditionally renders `SidebarBrand`'s router
+ * `<Link>`, which throws with no `RouterProvider` ancestor (the same
+ * limitation `SidebarChromeHeader.test.tsx` already documents). This shell
+ * carries neither: no hooks, no Link, just the corner's own
+ * absolute-position / fixed-width / height-override styling — so
+ * `WorkspaceChromeCornerShell.test.tsx` can render it directly (with a
+ * stand-in child) and prove that structure survived the strip -> corner
+ * change, including that the OLD full-width strip's own accommodations
+ * (`wco:pr-[...]`) are genuinely gone, not just visually invisible. See
+ * `WorkspaceChromeStrip`'s own doc comment below for the full design
+ * reasoning behind what this shell now measures.
  */
-function WorkspaceChromeStrip() {
+export function WorkspaceChromeCornerShell({ children }: { children: ReactNode }) {
+  return (
+    <div
+      className="absolute top-0 left-0 z-20 w-[var(--workspace-corner-width)]"
+      style={{ "--workspace-topbar-height": "36px" } as CSSProperties}
+    >
+      {children}
+    </div>
+  );
+}
+
+/**
+ * docs/specs/unified-topband.md, Section B (rev 4 — SUPERSEDES the
+ * full-width row this component originally rendered, shipped in
+ * ffafc3728): the corner cell, not a strip. Owner iteration: ONE top band —
+ * traffic lights + brand + the dock's own tab strips in the same row, with
+ * the dock's tabs starting right where this cell ends rather than sitting
+ * in a second row underneath it. Empty band space (inside the dock, to the
+ * right of this cell) now drags the window via dockviewTheme.css's
+ * band-scoped `app-region` rule + DockviewLayout.tsx's `data-dv-topband`
+ * stamping — this cell no longer owns the window's ENTIRE draggable area
+ * the way the old full-width strip did, only its own fixed-width slice
+ * (still real: `SidebarChromeHeader`'s own `drag-region` class, unchanged).
+ *
+ * `absolute top-0 left-0` + a fixed `--workspace-corner-width` (index.css,
+ * also read live by DockviewLayout.tsx's `applyTopBandLayout` so the dock's
+ * own tab-strip clearance never drifts out of sync with this cell's actual
+ * width) OVERLAYS the dock instead of pushing it down a row — see
+ * `ChatRouteLayout` below for the provider-side half of this (the strip ROW
+ * is dropped; the dock returns to full height).
+ *
+ * `--workspace-topbar-height` is overridden to 36px, a literal duplicate of
+ * dockviewTheme.css's `--dv-tabs-and-actions-container-height` (NOT a
+ * `var()` reference to it: dockview stamps that custom property on its OWN
+ * root, a DOM subtree this cell sits OUTSIDE of as a sibling of `<Outlet/>`,
+ * not a descendant — CSS custom properties cascade down the real DOM tree,
+ * not across siblings, so referencing it here would resolve to nothing).
+ * `SidebarChromeHeader`'s own `h-[var(--workspace-topbar-height)]` already
+ * reads this override with no further change needed there — the GLOBAL
+ * `--workspace-topbar-height` token (index.css, 52px) is untouched, since
+ * ChatView's panel-internal topbar, RightPanelTabs, settings and more still
+ * consume it (critique M3 — changing it globally was explicitly forbidden).
+ *
+ * `wco:pr-[...]` (the old right-edge padding clearing Windows/Linux's WCO
+ * overlay buttons) is GONE, not carried over: that padding existed only
+ * because the OLD strip spanned the window's full width and its own right
+ * edge collided with those buttons. This cell is fixed-width at the LEFT
+ * edge only and never reaches that far right in the new geometry.
+ */
+export function WorkspaceChromeStrip() {
   const sidebarVisible = useSyncExternalStore(
     subscribeChatDockSidebarVisible,
     getChatDockSidebarVisible,
   );
 
   return (
-    // `wco:pr-[...]` (Windows/Linux WCO overlay buttons, index.css:135-144):
-    // the strip's own right-edge padding so those native controls don't
-    // collide with strip content. The `wco` custom variant (`windowControlsOverlay.ts`)
-    // only ever toggles `.wco` on `<html>` when `navigator.windowControlsOverlay`
-    // reports visible — a real browser API that is simply never true on mac
-    // (which uses `hiddenInset`, not `titleBarOverlay` — DesktopWindow.ts's
-    // `getWindowTitleBarOptions`), so this is unconditional here rather than
-    // gated on platform in JS; the CSS variant already does that gating.
-    // Separate from the mac-only 90px inset, which
-    // `resolveWorkspaceChromeInsetStyle` applies via `--workspace-controls-left`
-    // on the provider itself (critique m11: the 90px reservation is mac-only,
-    // this padding is the non-mac half).
-    <div className="wco:pr-[var(--workspace-native-controls-inset)]">
+    <WorkspaceChromeCornerShell>
       <SidebarChromeHeader
         isElectron
         sidebarToggle={{ onToggle: toggleChatDockSidebarVisibility, pressed: sidebarVisible }}
       />
-    </div>
+    </WorkspaceChromeCornerShell>
   );
 }
 
@@ -286,19 +342,30 @@ function WorkspaceChromeStrip() {
  * non-growing height is what keeps dockview from collapsing to zero height,
  * per spec-dock-step-1.md's mount-point warning.
  *
- * dock-chrome-strip.md, Section A: `SidebarProvider` gains `flex-col` — its
- * base wrapper is a flex ROW (ui/sidebar.tsx's `SidebarProvider`), so
- * without this the strip below would become a left COLUMN instead of a top
- * row (critique M4) — plus the mac inset style, computed the same way
+ * docs/specs/unified-topband.md, Section B (SUPERSEDES the ffafc3728
+ * strip-row wiring this comment used to describe): `SidebarProvider` keeps
+ * `flex-col` (its base wrapper is a flex ROW, ui/sidebar.tsx) — no longer
+ * because a strip needs to be a top row (the corner cell is
+ * `position: absolute`, out of flow, indifferent to the container's flex
+ * direction), but because `<Outlet/>` is still this provider's one
+ * meaningful flex child and a stray flex-ROW would let it shrink to
+ * content width instead of filling the viewport. NEW: `relative` — the
+ * corner cell's `absolute top-0 left-0` needs a positioned ancestor to
+ * anchor against, and `SidebarProvider`'s own base wrapper
+ * (`group/sidebar-wrapper flex min-h-svh w-full`, ui/sidebar.tsx) declares
+ * none. Also plus the mac inset style, computed the same way
  * `AppSidebarLayout` does (`resolveWorkspaceChromeInsetStyle`, shared, no
- * behavior drift between the two). The strip itself renders as the
- * provider's FIRST child, above `<Outlet/>`, so it covers every `_chat`
- * child route — thread, index (including its loading/empty states,
- * critique M6), and draft — gated on `isElectron` alone (it self-sizes on
- * Windows/Linux via `.wco`'s `--workspace-topbar-height` override,
- * index.css:135-144); only the 90px mac inset additionally gates on
- * `isMacosDesktop` (critique m11). Web/non-Electron: strip absent, today's
- * behavior exactly.
+ * behavior drift between the two). The corner cell renders as the
+ * provider's FIRST child so it paints above `<Outlet/>` (z-20, `WorkspaceChromeStrip`'s
+ * own className) — it covers every `_chat` child route the exact same way
+ * the old strip did (thread, index including its loading/empty states,
+ * critique M6, and draft), gated on `isElectron` alone; only the 90px mac
+ * inset additionally gates on `isMacosDesktop` (critique m11). Web/
+ * non-Electron: corner absent, today's behavior exactly. The strip ROW
+ * itself is gone — `<Outlet/>` (and therefore the dock inside it) no
+ * longer shares vertical flex space with anything above it, returning the
+ * dock to full height (acceptance check 1: dock bottom edge == viewport
+ * bottom edge).
  */
 function ChatRouteLayout() {
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
@@ -309,7 +376,11 @@ function ChatRouteLayout() {
   });
 
   return (
-    <SidebarProvider className="h-dvh! min-h-0! flex-col" defaultOpen style={chromeInsetStyle}>
+    <SidebarProvider
+      className="h-dvh! min-h-0! relative flex-col"
+      defaultOpen
+      style={chromeInsetStyle}
+    >
       {isElectron ? <WorkspaceChromeStrip /> : null}
       <ChatRouteGlobalShortcuts />
       <Outlet />

@@ -18,23 +18,37 @@
  * --dv-floating-box-shadow: none, and every fill mapped straight to
  * --wb-surface rather than a lighter tier.
  *
- * VOID-SPACE TRAP (dock-chrome-strip.md): a blanket `app-region: drag` on
- * dockview's own void/group space is FORBIDDEN in this file and everywhere
- * else in this app — do not add one. Dockview's `.dv-void-container` (the
- * "empty" area of a group, between/around tabs and floating splits) is
- * ALREADY a real interactive surface of its own: it is a drag SOURCE, a
- * drop TARGET, and a click-to-activate control simultaneously
- * (voidContainer.js:22-71), and it ships its own `cursor: grab`
- * (dockview.css:3419-3421). Marking it `app-region: drag` would fight
- * Electron's OS-level window-drag gesture against dockview's own
- * pointer-driven group-drag gesture on the exact same pixels — at best one
- * silently wins and breaks the other; the owner's actual release blocker
- * (grabbing void space starts a dockview group drag, which renders the
- * layout-preview drop-target overlays) is dockview's INTENDED affordance
- * for that space, kept by design rather than "fixed" by drag-region here.
- * The window's own draggable area is `_chat.tsx`'s hoisted chrome strip
- * instead — a real region OUTSIDE the dock entirely, not a property on any
- * dockview element.
+ * VOID-SPACE TRAP (dock-chrome-strip.md) — DEFUSED (docs/specs/unified-
+ * topband.md rev 4, live Electron probe 2026-08-11): the blanket-rule
+ * concern below is still real and still forbidden (a global
+ * `app-region: drag` on every `.dv-void-container` would still fight
+ * dockview's own group-drag gesture everywhere), but the owner's rev-4
+ * design deliberately DOES mark void space `app-region: drag` — SCOPED to
+ * the band's top-row groups only (`[data-dv-topband]`, stamped by
+ * DockviewLayout.tsx's `onDidLayoutChange` handler off
+ * `computeTopBandLayout`/`group.api.boundingBox`), never globally. The
+ * probe (real Electron 41.5.0, real-mouse driver) settled what static
+ * reading alone couldn't: `-webkit-app-region: drag` swallows
+ * pointerdown/mousedown/click at the OS layer BEFORE dockview's own
+ * click-to-activate and shift+drag float-detach handlers ever see the
+ * event (probe checks 3-4 — zero band-scoped drag events, SHIFT gestures
+ * swallowed too), so in the band specifically there is no "which one wins"
+ * race to lose — window-drag wins by construction, and `disableFloatingGroups:
+ * true` (DockviewLayout.tsx's `createDockview` options) removes the
+ * float-detach gesture entirely, band or not. The original problem this
+ * comment described — a global rule turning EVERY group's blank space,
+ * including bottom groups outside the band, into a dead window-drag handle
+ * — remains exactly as forbidden as before; only the band's own top-row
+ * void space is exempted, and only via the scoped selector below, never a
+ * bare `.dv-void-container` rule.
+ *
+ * Historical context (unchanged): dockview's `.dv-void-container` (the
+ * "empty" area of a group, between/around tabs and floating splits) is a
+ * drag SOURCE, a drop TARGET, and a click-to-activate control simultaneously
+ * (voidContainer.js, installed dockview-core@7.0.4 dist/esm), and ships its
+ * own `cursor: grab` (dockview.css). `cursor: default` below overrides that
+ * for the band specifically (critique m1) — without it, the band advertises
+ * a drag affordance that app-region has already made dead.
  */
 
 .dockview-theme-workbench {
@@ -92,6 +106,35 @@
      colours a group happens to have. */
   --dv-tab-group-line-height: 2px;
   --dv-tab-group-line-opacity: 1;
+}
+
+/* ---- Unified top band (docs/specs/unified-topband.md, Section A) --------------- */
+
+/* SCOPED to top-row groups only — `data-dv-topband` is stamped by
+   DockviewLayout.tsx's onDidLayoutChange handler on exactly the groups
+   `computeTopBandLayout` reports as top-row (boundingBox.top === 0), never
+   applied blanket-wide. See the VOID-SPACE TRAP comment above (now DEFUSED)
+   for why a global version of this rule stays forbidden. `cursor: default`
+   overrides dockview's own `.dv-draggable { cursor: grab }` (critique m1) —
+   that class stays applied by the library regardless of app-region, so
+   without this override the band would visibly advertise a drag affordance
+   app-region has already made inert. */
+[data-dv-topband] .dv-void-container {
+  -webkit-app-region: drag;
+  cursor: default;
+}
+
+/* Explicit no-drag on every interactive element inside a band tab strip —
+   app-region does not stop at element boundaries by ancestry alone; without
+   this, a tab or the overflow dropdown living inside a `drag`-region parent
+   would be unclickable the same way `.drag-region`'s own button/input/etc.
+   carve-outs exist in index.css. `.dv-left-actions-container` is included
+   for symmetry with `.dv-right-actions-container` (the overflow dropdown's
+   actual home) even though this app does not currently populate it. */
+[data-dv-topband] .dv-tab,
+[data-dv-topband] .dv-left-actions-container,
+[data-dv-topband] .dv-right-actions-container {
+  -webkit-app-region: no-drag;
 }
 
 /* ---- Group / tab-strip chrome ------------------------------------------------- */

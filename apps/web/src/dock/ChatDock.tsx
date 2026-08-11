@@ -184,6 +184,19 @@ chatDockPanelRegistry.register({
   // listeners (thread prev/next, Cmd+1..9) only exist while this panel
   // stays mounted — see this file's own comment further down.
   closeable: false,
+  // docs/specs/unified-topband.md, Section B, NARROW-COLUMN RULE (critique
+  // M4): matches `--workspace-corner-width` (index.css) — this Sidebar
+  // panel is always the (0,0) group in the default preset, so a floating
+  // Sidebar window can never render narrower than the corner cell it sits
+  // under while docked. This is the ADVISORY half of the rule (honoured
+  // only while floating — `PanelDefinition.minWidth`'s own doc comment,
+  // `lib/types.ts`); the DOCKED half is enforced separately and more
+  // strongly by DockviewLayout.tsx's `applyTopBandLayout`, which caps the
+  // corner's own padding at the (0,0) group's live width regardless of
+  // whether the sash respects this minimum — see that function's own
+  // comment for why a group-level docked `minimumWidth` constraint is
+  // reapplied every layout tick instead of being set here once.
+  minWidth: 220,
 });
 
 chatDockPanelRegistry.register({

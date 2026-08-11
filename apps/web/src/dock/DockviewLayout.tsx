@@ -65,6 +65,7 @@ import {
   restoreActivePanelForThread,
   subscribePanelGroupVisibility,
   syncFloatingConstraints,
+  computeTopBandLayout,
   togglePanelGroupVisibility,
   togglePanelInDock,
   type LayoutPresetFactory,
@@ -659,8 +660,46 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           createReactTabRenderer(options.name !== TAB_COMPONENT_NO_CLOSE),
         getTabContextMenuItems: ({ panel, group }) =>
           buildTabContextMenuItems({ panel, group, api, registry: panelRegistry }),
+        // docs/specs/unified-topband.md, Section A (critique B2 — this was
+        // NOT set before rev 4; grep proves it): kills the shift+drag
+        // float-detach gesture everywhere (band or not) and removes "Float"
+        // from tab context menus. Owner ruling recorded here, not just in
+        // the spec: floating windows were never part of this fork's dock
+        // design, and this is what the owner's original complaint ("empty
+        // space starts a dockview group drag, which renders a 'multiple
+        // panels sort of view'") actually names. Reversible in one line.
+        disableFloatingGroups: true,
       });
       apiRef.current = api;
+
+      // docs/specs/unified-topband.md, Section A: defense-in-depth for the
+      // web build (no Electron app-region) and any pointer-backend path
+      // where app-region is absent or inert. CAPTURE phase so this runs
+      // before dockview's own bubble-phase dragstart listener on the void
+      // container's own element (dnd/backend.js's Html5DragSource — checks
+      // `event.defaultPrevented` FIRST, before calling `getData()`, which is
+      // what populates `LocalSelectionTransfer` — confirmed against the
+      // installed dockview-core@7.0.4 dist/esm source, not assumed). Scoped
+      // to band void containers only via the same `data-dv-topband`
+      // ancestor stamp dockviewTheme.css's CSS rules key off — a band tab
+      // itself must keep firing its own drag (tab-to-tab reorder / drag onto
+      // another group's tab, acceptance check 2), so this must NOT catch
+      // `.dv-tab` dragstarts, only `.dv-void-container` ones. Red-first
+      // headless proof against the real dockview-core@7.0.4 dist/esm build
+      // (not just source reading): evidence/task-137-topband-headless-repro/
+      // — same jsdom+dockview harness precedent as
+      // evidence/task-108-f7-headless-repro/, run against a dock with NO
+      // guard installed first (asserts the drag DOES leak, proving the repro
+      // exercises the real path) and then WITH this exact logic installed
+      // (asserts defaultPrevented + empty LocalSelectionTransfer).
+      const handleTopBandDragStartCapture = (event: DragEvent) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.closest("[data-dv-topband] .dv-void-container")) {
+          event.preventDefault();
+        }
+      };
+      container.addEventListener("dragstart", handleTopBandDragStartCapture, true);
 
       // Fix round, finding #6: a maximized group hides the sidebar, every
       // other tab, and any navigation — indistinguishable, at a glance,
@@ -741,6 +780,14 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // Task #109: drives both the visible Restore button and the
       // hidden-from-assistive-tech attributes on every non-maximized group.
       let maximizedGroupSub: ReturnType<DockviewApi["onDidMaximizedGroupChange"]> | undefined;
+      // docs/specs/unified-topband.md, Section A: stamps `data-dv-topband`
+      // on top-row groups and applies the corner owner's clearance — see
+      // `applyTopBandLayout` below for the full reasoning, including why
+      // this subscribes to BOTH `onDidLayoutChange` and `onDidMutateLayout`
+      // and why registration ORDER (after `layoutChangeSub`/`mutateLayoutSub`
+      // below) is load-bearing, not incidental.
+      let topBandLayoutSub: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
+      let topBandMutateSub: ReturnType<DockviewApi["onDidMutateLayout"]> | undefined;
       let persistTimer: ReturnType<typeof setTimeout> | undefined;
       // Tracks whether a debounced save is currently outstanding — separate
       // from `persistTimer` itself, which still holds the last timer id even
@@ -805,6 +852,84 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           }
           maybePersist();
         }, PERSIST_DEBOUNCE_MS);
+      };
+
+      // docs/specs/unified-topband.md, Section A/B: computes the band's
+      // structural facts (computeTopBandLayout, topBandLayout.ts) off each
+      // group's LIVE `boundingBox` (dockview-root-relative — only
+      // meaningful once the layout has actually been sized, per
+      // DockviewGroupPanelApiImpl.boundingBox's own doc comment) and applies
+      // them to the DOM: `data-dv-topband` on every top-row group's
+      // `.dv-tabs-and-actions-container` (dockviewTheme.css's band-scoped
+      // app-region rules key off this), and on the (0,0) corner owner
+      // specifically, the tab-strip clearance (padding-left, capped at the
+      // group's own width — NARROW-COLUMN RULE) plus a DOCKED minimum width
+      // so a sash drag can't pull that column narrower than the corner cell
+      // it sits under.
+      //
+      // Reads `--workspace-corner-width` live off `container` (single
+      // source shared with the corner cell's own CSS, index.css) rather
+      // than a hardcoded duplicate — a designer widening the corner in CSS
+      // needs no matching code change here.
+      //
+      // ORDERING (why this is a SEPARATE subscription registered AFTER
+      // `layoutChangeSub`/`mutateLayoutSub` below, not folded into
+      // `scheduleSave` itself): `scheduleSave`'s own `syncFloatingConstraints`
+      // loop (constraints.ts) resets EVERY group's explicit constraints to
+      // `{minimumWidth: 0, minimumHeight: 0}` while docked — an existing,
+      // load-bearing contract this function must not fight, only follow.
+      // Both `onDidLayoutChange` and `onDidMutateLayout` fire their
+      // listeners in subscription order within the same dispatch, so
+      // registering this listener SECOND on both events guarantees it always
+      // runs after that reset, on the same tick — the corner owner's docked
+      // minimum is re-applied fresh every time, which is also what makes
+      // ownership changes (dragging the Sidebar tab elsewhere, acceptance
+      // check 4) "just work": whichever group is at (0,0) THIS tick gets the
+      // constraint, and the group that lost it was already reset to 0 by
+      // the same tick's `syncFloatingConstraints` pass.
+      const applyTopBandLayout = () => {
+        const rawCornerWidth = getComputedStyle(container)
+          .getPropertyValue("--workspace-corner-width")
+          .trim();
+        const parsedCornerWidth = Number.parseFloat(rawCornerWidth);
+        const cornerWidthPx =
+          Number.isFinite(parsedCornerWidth) && parsedCornerWidth > 0 ? parsedCornerWidth : 220;
+
+        const { topRowGroupIds, cornerOwnerGroupId, cornerPaddingPx } = computeTopBandLayout(
+          api.groups.map((group) => ({ id: group.id, boundingBox: group.api.boundingBox })),
+          cornerWidthPx,
+        );
+
+        for (const group of api.groups) {
+          // `group.header` is typed as the narrow public `IHeader`
+          // (`hidden`/`direction` only — dockviewGroupPanelModel.d.ts), which
+          // does NOT expose `.element` even though the concrete
+          // `TabsContainer` instance it wraps has one at runtime. `group`
+          // itself, though, is typed `DockviewGroupPanel` (the concrete
+          // class — `DockviewApi.groups: DockviewGroupPanel[]`, not the
+          // narrower `IDockviewGroupPanel`), which DOES publicly expose
+          // `.element` (`BasePanelView`'s `get element(): HTMLElement`) —
+          // the group's own `.dv-groupview` root. Querying within it for its
+          // own `.dv-tabs-and-actions-container` child (always exactly one,
+          // appended unconditionally in dockviewGroupPanelModel.js's
+          // constructor) reaches the same DOM node without relying on a
+          // non-exported internal type.
+          const headerElement = group.element.querySelector<HTMLElement>(
+            ".dv-tabs-and-actions-container",
+          );
+          if (!headerElement) continue;
+          if (topRowGroupIds.has(group.id)) {
+            headerElement.setAttribute("data-dv-topband", "");
+          } else {
+            headerElement.removeAttribute("data-dv-topband");
+          }
+          if (group.id === cornerOwnerGroupId) {
+            headerElement.style.paddingLeft = `${cornerPaddingPx}px`;
+            group.api.setConstraints({ minimumWidth: cornerWidthPx });
+          } else {
+            headerElement.style.paddingLeft = "";
+          }
+        }
       };
 
       async function loadInitialLayout() {
@@ -964,6 +1089,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // to follow it.
         layoutChangeSub = api.onDidLayoutChange(scheduleSave);
         mutateLayoutSub = api.onDidMutateLayout(scheduleSave);
+        // Registered AFTER the two subscriptions above — see
+        // `applyTopBandLayout`'s own doc comment for why this ordering,
+        // on BOTH events, is load-bearing.
+        topBandLayoutSub = api.onDidLayoutChange(applyTopBandLayout);
+        topBandMutateSub = api.onDidMutateLayout(applyTopBandLayout);
         // Task #108: records which panel is active RIGHT NOW under the
         // CURRENT thread's key — fires for every activation, whatever
         // triggered it (a genuine tab click, or the initial load applying a
@@ -1032,6 +1162,14 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         const initiallyMaximized = api.groups.find((group) => group.api.isMaximized());
         setMaximizedGroupId(initiallyMaximized?.id ?? null);
         applyMaximizedGroupAccessibility(api.groups, initiallyMaximized?.id ?? null);
+
+        // Same reasoning as `initiallyMaximized` immediately above: the
+        // topband subscriptions just wired up don't cover the tree
+        // `api.fromJSON()`/`applyPreset()` already applied earlier in this
+        // same function — run it once explicitly so the very first paint
+        // already has `data-dv-topband`/corner clearance applied, not just
+        // whichever layout change happens to fire next.
+        applyTopBandLayout();
       }
 
       void loadInitialLayout();
@@ -1060,8 +1198,11 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           maybePersist();
         }
         window.removeEventListener("keydown", handleEscape);
+        container.removeEventListener("dragstart", handleTopBandDragStartCapture, true);
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
+        topBandLayoutSub?.dispose();
+        topBandMutateSub?.dispose();
         activePanelChangeSub?.dispose();
         for (const sub of groupActivePanelChangeSubs.values()) sub.dispose();
         groupActivePanelChangeSubs.clear();
