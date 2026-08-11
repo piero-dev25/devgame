@@ -238,6 +238,18 @@ function ThreeJsPlayButton(props: {
 }
 
 /**
+ * The literal command S1's remedy tells a user to run — copied verbatim
+ * from `UnitySetupClassifier.ts`'s own S1_MESSAGE (server) and this repo's
+ * onboarding docs (README.md, docs/user/install.md), so the three don't
+ * drift. Extracted as a constant, not parsed out of `disabledReason`: the
+ * displayed message's WORDING is free to change (still asserted verbatim
+ * elsewhere against the classifier's own S1_MESSAGE), but the copy
+ * button's payload must stay pinned to exactly this string regardless —
+ * see the merge-gate finding this constant closes, below.
+ */
+const UNITY_CLI_INSTALL_COMMAND = "brew install --cask unity-cli";
+
+/**
  * Merge-gate W1: S1's remedy (`brew install --cask unity-cli`, baked into
  * `EngineToolbarView.disabledReason` as of task #130) used to be delivered
  * ONLY through the Unity badge's aria-label + hover tooltip
@@ -253,12 +265,24 @@ function ThreeJsPlayButton(props: {
  * against this exact primitive, is NOT present in static markup when
  * closed, so hiding the remedy inside one would have made it untestable
  * AND reintroduced the "have to interact to see it" problem this exists to
- * fix) plus an explicit copy button that copies the exact string shown,
- * independent of `useCopyToClipboard`'s own cleanup-only effect (which
- * never runs during static rendering and isn't needed for the initial
- * markup either way).
+ * fix) plus an explicit copy button.
+ *
+ * MERGE-GATE FOLLOW-UP (post-W1): the copy button used to call
+ * `copyToClipboard(props.message, ...)` — the ENTIRE ~300-char S1
+ * sentence, backticks/docs-URL/"restart DevGame" and all, despite its
+ * aria-label promising "Copy Unity CLI install command." A user pasting
+ * that into a terminal had to hand-edit it before it would run, which
+ * defeated the whole point of a copy button here. Fixed by copying
+ * `UNITY_CLI_INSTALL_COMMAND` — the exact literal, not derived from
+ * `props.message` in any way (no parsing: the command is a fixed string
+ * regardless of how the surrounding sentence is worded). See
+ * `UnityCliMissingRemedy.test.tsx` for why this can't be proven via
+ * `renderToStaticMarkup` (event handlers never serialize into static
+ * markup) — that file mocks `useCopyToClipboard` and calls this component
+ * directly, mirroring `ServerUpdateAction.test.tsx`'s own established
+ * technique for the identical problem.
  */
-function UnityCliMissingRemedy(props: { readonly message: string }) {
+export function UnityCliMissingRemedy(props: { readonly message: string }) {
   const { copyToClipboard, isCopied } = useCopyToClipboard<void>({ target: "install command" });
   return (
     <div className="flex max-w-sm items-start gap-1.5 rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
@@ -269,7 +293,7 @@ function UnityCliMissingRemedy(props: { readonly message: string }) {
         variant="ghost"
         aria-label="Copy Unity CLI install command"
         className="shrink-0"
-        onClick={() => copyToClipboard(props.message, undefined)}
+        onClick={() => copyToClipboard(UNITY_CLI_INSTALL_COMMAND, undefined)}
       >
         {isCopied ? <CheckIcon className="size-3 text-primary" /> : <CopyIcon className="size-3" />}
       </Button>
