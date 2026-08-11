@@ -115,13 +115,45 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   // brand, and (if present) the pill; brand's own baked-in margin is
   // disabled via `applyContentInset={false}` since the container's padding
   // already does that job.
+  //
+  // FIX ROUND 3 (real regression, round-14 owner review — root cause found
+  // by reading index.css, not guessed): this element establishes the named
+  // CSS container `@container/sidebar-header` (the class right below).
+  // `.sidebar-brand` (index.css) defaults to `display: none` and only
+  // becomes `display: flex` inside `@container sidebar-header (min-width:
+  // 13.5rem)` — a rule that predates this file's corner work entirely. In
+  // the settings-nav usage this container's width comes from
+  // `AppSidebarLayout`'s fixed `<Sidebar>` (`--sidebar-width`, 256px, an
+  // INDEPENDENT source unrelated to this header's own content), so the
+  // query was always satisfied there. `_chat.tsx`'s
+  // `WorkspaceChromeCornerShell` fix round 2 made the corner CONTENT-SIZED
+  // (`w-fit`, sized to what's INSIDE `SidebarHeader`) — which is brand
+  // ITSELF, creating a genuine circular dependency: brand needs the
+  // container to already be >= 216px to become visible, but with brand
+  // hidden it contributes ZERO width, so the container never reaches
+  // 216px, so brand stays hidden — a stable, self-perpetuating collapse
+  // (empirically confirmed: round 13, BEFORE the w-fit change, still had
+  // the OLD fixed-220px shell and brand rendered fine — "8 link
+  // Description: Go to threads" in that round's own evidence; round 14,
+  // AFTER the w-fit change, brand is gone). `min-w-[14rem]` (224px) below
+  // is a STATIC floor, independent of brand's own content, that
+  // unconditionally clears the 13.5rem/216px threshold — breaking the
+  // cycle at its root. It also correctly propagates up into the shell's
+  // OWN `fit-content` computation (an element's `min-width` participates
+  // in its ancestor's intrinsic-size contribution), so the shell itself
+  // becomes >= 224px too, no separate fix needed there. Once brand is
+  // visible, its REAL content width (toggle + gaps + text + lights inset)
+  // exceeds 224px anyway, so the final measured width is still genuinely
+  // content-driven, not artificially capped at the floor — see
+  // `_chat.tsx`'s `WorkspaceChromeCornerShell` for where that measurement
+  // happens.
   const hasToggle = sidebarToggle !== undefined;
 
   return (
     <SidebarHeader
       className={cn(
         "@container/sidebar-header relative h-[var(--workspace-topbar-height)] shrink-0 flex-row items-center py-0",
-        hasToggle ? "gap-2 pr-5 pl-[var(--workspace-controls-left)]" : "px-3 md:px-0",
+        hasToggle ? "min-w-[14rem] gap-2 pr-5 pl-[var(--workspace-controls-left)]" : "px-3 md:px-0",
         isElectron && "drag-region",
       )}
     >

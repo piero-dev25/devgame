@@ -270,19 +270,33 @@ function ChatRouteGlobalShortcuts() {
  * apply, and CSS custom properties cascade from `SidebarProvider` down to
  * its `container` descendant same as any other inherited value.
  *
- * NO FEEDBACK LOOP (asserted, not just claimed): the shell's OWN width is
- * `w-fit` — content-sized, independent of `--workspace-corner-width`, which
- * this effect only ever WRITES, never reads for layout. Its children
- * (`SidebarChromeToggle`: fixed `size-[--workspace-titlebar-control-size]`;
- * `SidebarBrand`: `w-fit`, sized by its own text) are equally independent
- * of that variable. Downstream, `applyTopBandLayout` consumes the written
- * value only to set `padding-left` on the corner-OWNER GROUP's tab strip
- * (a sibling subtree entirely outside this shell) — that padding changes
- * the tab strip's CONTENT area, not `group.element`'s own outer
- * `boundingBox` (dockview's splitview owns that size), so it does not
- * retrigger DockviewLayout.tsx's own per-group `ResizeObserver` either.
- * Every step in the chain terminates without looping back to a
- * `--workspace-corner-width` write.
+ * NO FEEDBACK LOOP with `--workspace-corner-width` itself (asserted, not
+ * just claimed): the shell's OWN width is `w-fit` — content-sized,
+ * independent of `--workspace-corner-width`, which this effect only ever
+ * WRITES, never reads for layout. Its children (`SidebarChromeToggle`:
+ * fixed `size-[--workspace-titlebar-control-size]`; `SidebarBrand`: `w-fit`,
+ * sized by its own text) are equally independent of that variable.
+ * Downstream, `applyTopBandLayout` consumes the written value only to set
+ * `padding-left` on the corner-OWNER GROUP's tab strip (a sibling subtree
+ * entirely outside this shell) — that padding changes the tab strip's
+ * CONTENT area, not `group.element`'s own outer `boundingBox` (dockview's
+ * splitview owns that size), so it does not retrigger DockviewLayout.tsx's
+ * own per-group `ResizeObserver` either. Every step in the chain
+ * terminates without looping back to a `--workspace-corner-width` write.
+ *
+ * A DIFFERENT circular dependency DID exist here, real, found live (round
+ * 14 regression) and fixed at its source: `SidebarBrand` renders through a
+ * CSS container query (`.sidebar-brand { display: none }` by default,
+ * `display: flex` only once `SidebarChromeHeader`'s own
+ * `@container/sidebar-header` reaches 13.5rem/216px — index.css). Making
+ * this shell content-sized meant brand's OWN visibility depended on this
+ * shell already being wide enough, while brand contributes nothing to that
+ * width while hidden — a stable collapse with no event to break it. Fixed
+ * in `SidebarChrome.tsx` (`SidebarHeader`'s `min-w-[14rem]` in the
+ * `hasToggle` branch), NOT here: a static width floor, independent of any
+ * child's own content, that unconditionally clears the query threshold.
+ * See that file's own comment for the full mechanism and the round-13-vs-
+ * round-14 evidence that pinned it down.
  */
 export function WorkspaceChromeCornerShell({ children }: { children: ReactNode }) {
   const shellRef = useRef<HTMLDivElement>(null);
