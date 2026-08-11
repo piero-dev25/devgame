@@ -1,0 +1,64 @@
+# Fork-owned multi-platform artifact builder (DevGame). Upstream's
+# release.yml targets paid Blacksmith runners this fork does not have;
+# this workflow builds the same desktop artifacts on GitHub-hosted
+# runners, on demand. Artifacts are uploaded as workflow artifacts and
+# attached to a GitHub Release manually by the maintainer.
+
+name: DevGame release artifacts
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            script: dist:desktop:linux
+          - name: win-x64
+            os: windows-2022
+            script: dist:desktop:win:x64
+          - name: mac-x64
+            os: macos-13
+            script: dist:desktop:dmg:x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: true
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ensure Electron runtime is installed
+        run: vp run --filter @t3tools/desktop ensure:electron
+
+      - name: Build desktop artifact
+        run: vp run ${{ matrix.script }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: devgame-${{ matrix.name }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.AppImage
+            release/*.exe
+          if-no-files-found: error
