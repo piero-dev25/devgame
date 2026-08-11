@@ -21,6 +21,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -890,52 +891,229 @@ describe("dispatchUnityPipelineInstall", () => {
     );
 
     it.effect(
-      "an EXISTS-probe failure during legacy cleanup degrades to a best-effort remove attempt, never fails the install",
+      "merge-gate R1 (three-way ruling): a probe error whose fallback remove SUCCEEDS reports removed",
       () =>
         Effect.gen(function* () {
           const fileSystem = yield* FileSystem.FileSystem;
           const path = yield* Path.Path;
           const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
-            prefix: "t3code-unity-pipeline-install-legacy-exists-fails-",
+            prefix: "t3code-unity-pipeline-install-legacy-exists-fails-removes-",
           });
-          // A plain FILE at "Library" makes `fileSystem.exists(Library/<legacy
-          // id>)` itself throw (ENOTDIR -> PlatformError tag "BadResource",
-          // not "NotFound") rather than resolve to `false` — confirmed live
-          // against the real NodeFileSystem before writing this test. Merge-
-          // gate R1: the OLD code only wrapped `remove`'s failure, not
-          // `exists`'s, so this exact fixture used to propagate out of
-          // `removeLegacyDirectoryBestEffort` and fail the WHOLE install —
-          // see "an unwritable Library path reports pairing as a typed
-          // partial failure" below, whose own `if (... return)` guard was
-          // silently absorbing that regression without ever reaching its
-          // assertions.
-          //
-          // Expected outcome is "absent", not "failed": merge-gate R2 folds
-          // "exists() returned false" and "exists() couldn't confirm" into
-          // the SAME best-effort-remove-then-report-absent path (a dangling
-          // legacy symlink needs exactly this fold — see the dedicated
-          // dangling-symlink test below). "failed" is reserved for a
-          // CONFIRMED-present directory whose remove() itself fails — see
-          // "a legacy directory the process cannot delete" above. What this
-          // test actually proves is narrower and load-bearing regardless of
-          // which outcome string comes back: the probe error does not
-          // propagate and crash the whole install (RED-proofed: this exact
-          // fixture used to throw out of `installUnityEmbeddedSelectionPackage`
-          // entirely before any of these assertions could even run).
-          yield* fileSystem.writeFileString(path.join(workspaceRoot, "Library"), "not a directory");
+          const legacyLibraryDirectory = path.join(
+            workspaceRoot,
+            "Library",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          // A REAL legacy directory, so that once the probe error falls
+          // through to the same attempt-and-decide `remove` the confirmed-
+          // present branch uses, there is genuinely something there for it
+          // to remove — `remove` itself is NOT stubbed here.
+          yield* fileSystem.makeDirectory(legacyLibraryDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyLibraryDirectory, "pairing.json"),
+            "stale",
+          );
+          const flakyExistsFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            exists: (existsPath) =>
+              existsPath === legacyLibraryDirectory
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "access",
+                      pathOrDescriptor: existsPath,
+                    }),
+                  )
+                : fileSystem.exists(existsPath),
+          };
 
-          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot);
+          // Calling the install function directly (bypassing the full HTTP
+          // dispatch) is the only way to inject a FileSystem override for
+          // just this one path while every other operation — including the
+          // REAL source-package copy — still runs for real.
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot).pipe(
+            Effect.provideService(FileSystem.FileSystem, flakyExistsFileSystem),
+          );
 
           expect(outcome.operation).toBe("installed");
+          // The reviewer's ruling: a probe error is NOT "failed" on its
+          // own — it falls through to a real remove attempt. That attempt
+          // genuinely succeeded (the directory really was there), which is
+          // a real mutation of the user's project and must surface as
+          // "removed" so the install report's "removed the old package"
+          // line actually fires.
           expect(outcome.legacyCleanup).toEqual({
             packagesDirectory: "absent",
-            libraryDirectory: "absent",
+            libraryDirectory: "removed",
           });
+          expect(yield* fileSystem.exists(legacyLibraryDirectory)).toBe(false);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "merge-gate R1 (three-way ruling): a probe error over a PRESENT, UNREMOVABLE directory reports failed, and the cause is actually logged (not silently swallowed)",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-exists-fails-remove-fails-",
+          });
+          const legacyLibraryDirectory = path.join(
+            workspaceRoot,
+            "Library",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(legacyLibraryDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyLibraryDirectory, "pairing.json"),
+            "stale",
+          );
+          const undeletableFlakyFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            exists: (existsPath) =>
+              existsPath === legacyLibraryDirectory
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "access",
+                      pathOrDescriptor: existsPath,
+                    }),
+                  )
+                : fileSystem.exists(existsPath),
+            remove: (removePath, options) =>
+              removePath === legacyLibraryDirectory
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "remove",
+                      pathOrDescriptor: removePath,
+                    }),
+                  )
+                : fileSystem.remove(removePath, options),
+          };
+
+          // Captured-logger pattern — auth/http.test.ts precedent. A
+          // branch-result assertion alone passes even with the log call
+          // deleted; this repo has proven that exact mutation. This test
+          // red-proves the LOGGING assertion specifically, not just the
+          // outcome string.
+          const messages: Array<unknown> = [];
+          const logger = Logger.make<unknown, void>((options) => {
+            if (Array.isArray(options.message)) {
+              messages.push(...options.message);
+            } else {
+              messages.push(options.message);
+            }
+          });
+
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot).pipe(
+            Effect.provideService(FileSystem.FileSystem, undeletableFlakyFileSystem),
+            Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          );
+
+          expect(outcome.operation).toBe("installed");
+          // Neither the probe nor the fallback remove could confirm or
+          // clear this directory — "failed" is what lets a human find and
+          // clear it, per the ruling. NEVER "absent" from this branch: it
+          // is the one branch entered precisely because absence could not
+          // be established.
+          expect(outcome.legacyCleanup).toEqual({
+            packagesDirectory: "absent",
+            libraryDirectory: "failed",
+          });
+          // Left in place, not silently lost.
+          expect(yield* fileSystem.exists(legacyLibraryDirectory)).toBe(true);
+
+          // NOT a bare `"cause" in message` search: the exists PROBE's own
+          // failure is ALSO logged with a `{cause, directory}` shape (same
+          // directory, unchanged, upstream of this branch) — a generic
+          // search matches THAT log too and stays green even with the
+          // remove-failure's own log call deleted entirely. Distinguish by
+          // the underlying `PlatformError`'s `method`: "access" is the
+          // probe, "remove" is what this test is actually about.
+          const removeFailureLog = messages.find(
+            (message): message is Record<string, unknown> =>
+              typeof message === "object" &&
+              message !== null &&
+              "cause" in message &&
+              (message as { cause?: { reason?: { method?: unknown } } }).cause?.reason?.method ===
+                "remove",
+          );
+          expect(removeFailureLog).toBeDefined();
+          expect(removeFailureLog?.directory).toBe(legacyLibraryDirectory);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "merge-gate R1 (three-way ruling): a probe error over a directory that was never there reports failed, distinguishably logged",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-exists-fails-nothing-there-",
+          });
+          const legacyLibraryDirectory = path.join(
+            workspaceRoot,
+            "Library",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          // Deliberately NOT creating this directory — the probe errors,
+          // but nothing is genuinely there for the fallback
+          // `remove(..., force: false)` to find either. Only `exists` is
+          // stubbed; `remove` runs for real and hits a real ENOENT.
+          const flakyExistsNothingThereFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            exists: (existsPath) =>
+              existsPath === legacyLibraryDirectory
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "access",
+                      pathOrDescriptor: existsPath,
+                    }),
+                  )
+                : fileSystem.exists(existsPath),
+          };
+          const messages: Array<unknown> = [];
+          const logger = Logger.make<unknown, void>((options) => {
+            if (Array.isArray(options.message)) {
+              messages.push(...options.message);
+            } else {
+              messages.push(options.message);
+            }
+          });
+
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot).pipe(
+            Effect.provideService(FileSystem.FileSystem, flakyExistsNothingThereFileSystem),
+            Effect.provide(Logger.layer([logger], { mergeWithExisting: false })),
+          );
+
+          expect(outcome.operation).toBe("installed");
+          // Conflicting signals (the probe couldn't confirm, the fallback
+          // remove found nothing) resolve to "failed", NEVER "absent" —
+          // this branch is entered precisely because absence could not be
+          // established on the probe's own say-so.
+          expect(outcome.legacyCleanup).toEqual({
+            packagesDirectory: "absent",
+            libraryDirectory: "failed",
+          });
+
+          const loggedTexts = messages.filter((message): message is string => {
+            return typeof message === "string";
+          });
+          expect(loggedTexts.some((text) => text.includes("turned out to be absent"))).toBe(true);
+          // Distinguishable from a REAL deletion failure's message — nobody
+          // reading this log should go looking for a directory that was
+          // never there.
           expect(
-            yield* fileSystem.exists(
-              path.join(workspaceRoot, "Packages", UNITY_SELECTION_PACKAGE_ID, "package.json"),
-            ),
-          ).toBe(true);
+            loggedTexts.some((text) => text.includes("legacy cleanup failed after a probe error")),
+          ).toBe(false);
         }).pipe(Effect.provide(NodeServices.layer)),
     );
 
