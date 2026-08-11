@@ -7,7 +7,8 @@ packaging a desktop artifact. There's no package registry install yet (see
 ## Prerequisites
 
 - **Node.js `^24.13.1`** (pinned in the root `package.json`'s `engines` field).
-- **The `vp` (Vite+) CLI**, or plain `pnpm@11.10.0` (the pinned `packageManager`).
+- **The `vp` (Vite+) CLI.** DevGame's `packageManager` is pinned to `pnpm@11.10.0`, but `vp`
+  wraps it and is what every command below uses.
 - **macOS only: Xcode Command Line Tools.** `apps/server` depends on `node-pty`, which compiles
   a native addon. Install with `xcode-select --install` if you don't already have them.
 - **A Rust toolchain (`cargo`).** Desktop artifact builds compile
@@ -90,10 +91,11 @@ on first launch: _"cannot be opened because Apple cannot check it for malicious 
 
 Work around it one of these ways:
 
-- Right-click the `.app` → **Open** → **Open** in the dialog that appears.
+- Right-click the `.app` (e.g. `"DevGame (Alpha).app"`) → **Open** → **Open** in the dialog
+  that appears.
 - Or launch it once (it will be blocked), then go to **System Settings → Privacy & Security**
   and click **Open Anyway** next to the app's entry.
-- Or strip the quarantine flag directly: `xattr -d com.apple.quarantine /path/to/DevGame.app`
+- Or strip the quarantine flag directly: `xattr -d com.apple.quarantine "/path/to/DevGame (Alpha).app"`
 
 ## Next Steps
 

@@ -12,9 +12,14 @@
 > **use [T3 Code](https://github.com/pingdotgg/t3code)** — it is the better tool
 > for that job and it is where this came from.
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+T3 Code (below) is an "agent harness control surface". It enables control of the agents on your
+machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824),
+[Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes)
+and [Electron-based desktop app](https://t3.codes). Those store listings and hosted apps are
+**T3 Code's**, not DevGame's — DevGame today ships as a desktop app you download or build
+yourself; see Installation below.
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, DevGame can control them.
 
 ## "Wait, what are you selling me?"
 
@@ -42,10 +47,10 @@ Grab the latest build from [GitHub Releases](https://github.com/piero-dev25/devg
 > to open the app on first launch ("cannot be opened because Apple cannot
 > check it for malicious software"). Work around it one of these ways:
 >
-> - Right-click `DevGame.app` → **Open** → **Open** in the dialog that appears.
+> - Right-click `"DevGame (Alpha).app"` → **Open** → **Open** in the dialog that appears.
 > - Or launch it once (it will be blocked), then go to **System Settings →
->   Privacy & Security** and click **Open Anyway** next to the DevGame entry.
-> - Or strip the quarantine flag directly: `xattr -d com.apple.quarantine /path/to/DevGame.app`
+>   Privacy & Security** and click **Open Anyway** next to the DevGame (Alpha) entry.
+> - Or strip the quarantine flag directly: `xattr -d com.apple.quarantine "/path/to/DevGame (Alpha).app"`
 
 ### Build from source
 
@@ -96,9 +101,11 @@ For the architecture behind it, see [docs/internals/overview.md](./docs/internal
 
 ## If you REALLY want to contribute still.... read this first
 
+The canonical build walkthrough lives at [docs/user/build-from-source.md](./docs/user/build-from-source.md); the steps below are the short version.
+
 ### Install `vp`
 
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
+DevGame uses Vite+ so you'll need to install the global `vp` command-line tool.
 
 #### macOS / Linux
 

@@ -12,10 +12,10 @@ Releases are currently an **unsigned alpha**. macOS Gatekeeper will refuse to op
 first launch ("cannot be opened because Apple cannot check it for malicious software"). Work
 around it one of these ways:
 
-- Right-click `DevGame.app` → **Open** → **Open** in the dialog that appears.
+- Right-click `"DevGame (Alpha).app"` → **Open** → **Open** in the dialog that appears.
 - Or launch it once (it will be blocked), then go to **System Settings → Privacy & Security**
-  and click **Open Anyway** next to the DevGame entry.
-- Or strip the quarantine flag directly: `xattr -d com.apple.quarantine /path/to/DevGame.app`
+  and click **Open Anyway** next to the DevGame (Alpha) entry.
+- Or strip the quarantine flag directly: `xattr -d com.apple.quarantine "/path/to/DevGame (Alpha).app"`
 
 ## No Package Registry Yet
 
