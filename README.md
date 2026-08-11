@@ -70,7 +70,8 @@ brew install --cask unity-cli
 ```
 
 (macOS; see [Unity's own CLI docs](https://docs.unity.com/en-us/unity-cli) for
-other platforms.) You may also need to run `unity auth login` once. Without
+other platforms.) No Unity sign-in is needed for this — Setup Integrations
+works with a signed-out CLI (verified against a clean identity). Without
 the CLI installed, the **Setup Integrations** button in the engine toolbar
 does not appear. With it installed, open a Unity project as your DevGame
 project and click **Setup Integrations** — it installs Unity's own
