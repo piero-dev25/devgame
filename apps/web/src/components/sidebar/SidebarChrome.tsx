@@ -136,17 +136,24 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
   // the OLD fixed-220px shell and brand rendered fine — "8 link
   // Description: Go to threads" in that round's own evidence; round 14,
   // AFTER the w-fit change, brand is gone). `min-w-[14rem]` (224px) below
-  // is a STATIC floor, independent of brand's own content, that
-  // unconditionally clears the 13.5rem/216px threshold — breaking the
-  // cycle at its root. It also correctly propagates up into the shell's
-  // OWN `fit-content` computation (an element's `min-width` participates
-  // in its ancestor's intrinsic-size contribution), so the shell itself
-  // becomes >= 224px too, no separate fix needed there. Once brand is
-  // visible, its REAL content width (toggle + gaps + text + lights inset)
-  // exceeds 224px anyway, so the final measured width is still genuinely
-  // content-driven, not artificially capped at the floor — see
-  // `_chat.tsx`'s `WorkspaceChromeCornerShell` for where that measurement
-  // happens.
+  // is a STATIC floor, independent of brand's own content, that keeps the
+  // corner's measured width consistent cross-platform.
+  //
+  // FIX ROUND 4 (round-15 live CDP evidence, 2026-08-11): the floor alone
+  // did NOT satisfy the container query, because container size queries
+  // measure the CONTENT box — and this branch's own padding (90px lights
+  // inset + 20px trailing) leaves 224 − 110 = 114px of content box against
+  // the 216px threshold. Live-measured on the packaged build: header used
+  // width 224px, brand computed display still "none"; injecting a
+  // display override painted the brand at exactly x=126 (inset 90 +
+  // toggle 28 + gap 8) — the intended composition. A content-sized corner
+  // can NEVER honestly satisfy a 216px CONTENT-box threshold that was
+  // designed for the fixed-width sidebar context, so the corner stops
+  // fighting the query: `forceVisible` below applies `flex!` directly on
+  // the brand (important-suffixed — the `.sidebar-brand` base rule is
+  // unlayered author CSS, which beats layered utilities UNLESS the
+  // utility is !important). The settings-nav usage keeps the container
+  // query untouched (its 256px fixed sidebar satisfies it for real).
   const hasToggle = sidebarToggle !== undefined;
 
   return (
@@ -162,7 +169,11 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
         backdropVariant={backdropVariant}
         {...(sidebarToggle ? { sidebarToggle } : {})}
       />
-      <SidebarBrand applyContentInset={!hasToggle} onBackdrop={backdropVariant !== null} />
+      <SidebarBrand
+        applyContentInset={!hasToggle}
+        forceVisible={hasToggle}
+        onBackdrop={backdropVariant !== null}
+      />
       {pillLabel ? (
         <Badge
           className="relative z-10 ml-1 rounded-full px-1.5 text-muted-foreground"
@@ -180,8 +191,22 @@ export const SidebarChromeHeader = memo(function SidebarChromeHeader({
 function SidebarBrand({
   onBackdrop,
   applyContentInset = true,
+  forceVisible = false,
 }: {
   onBackdrop: boolean;
+  /**
+   * Fix round 4 (round-15 live CDP evidence — see `SidebarChromeHeader`'s
+   * own comment for the measurements): `.sidebar-brand` defaults
+   * `display: none` behind a `@container sidebar-header (min-width:
+   * 13.5rem)` query that measures the container's CONTENT box — which the
+   * corner's own padding (lights inset + trailing gap) makes structurally
+   * unsatisfiable there. `true` applies `flex!` directly: important-
+   * suffixed because the base `.sidebar-brand` rule is unlayered author
+   * CSS, which beats layered Tailwind utilities unless the utility is
+   * `!important`. Defaults `false` so the settings-nav usage keeps the
+   * container query it genuinely satisfies (256px fixed sidebar).
+   */
+  forceVisible?: boolean;
   /**
    * docs/specs/unified-topband.md, Section B, fix round 2: the built-in
    * `ml-[var(--workspace-titlebar-content-left)]` margin assumes brand is
@@ -204,6 +229,7 @@ function SidebarBrand({
       aria-label="Go to threads"
       className={cn(
         "sidebar-brand relative z-10 h-7 w-fit min-w-0 shrink-0 items-center gap-1 overflow-hidden rounded-md outline-hidden ring-ring focus-visible:ring-2",
+        forceVisible && "flex!",
         applyContentInset && "ml-[var(--workspace-titlebar-content-left)]",
         onBackdrop ? "text-white" : "text-foreground",
       )}

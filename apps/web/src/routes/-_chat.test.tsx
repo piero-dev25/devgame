@@ -171,4 +171,17 @@ describe("SidebarChromeHeader (corner usage) — brand presence and the width fl
     expect(html).toContain("sidebar-brand");
     expect(html).toContain(">DevGame<");
   });
+
+  // Fix round 4 (round-15 live CDP evidence): the width floor CANNOT satisfy
+  // the .sidebar-brand container query — container size queries measure the
+  // CONTENT box, and the corner's own padding (90px lights inset + 20px
+  // trailing) leaves 114px against the 216px threshold. The corner instead
+  // FORCES the brand visible with an important-suffixed `flex!` on the brand
+  // itself. This assertion is markup-visible (unlike the display:none it
+  // cures), so it genuinely guards the wiring: remove `forceVisible` from
+  // the corner call site and this goes red.
+  it("the corner's SidebarBrand carries the force-visible override (flex!) — the container query is structurally unsatisfiable in a padded, content-sized corner", () => {
+    const html = renderCornerHeader();
+    expect(html).toMatch(/sidebar-brand[^"]*flex!|flex![^"]*sidebar-brand/);
+  });
 });
