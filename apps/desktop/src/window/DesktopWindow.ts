@@ -619,7 +619,60 @@ export const make = Effect.gen(function* () {
     // `ElectronShell.shouldAllowExternalDeflect` (F-3) so a hostile page
     // can't spam external tabs by looping a navigation.
     window.webContents.on("did-attach-webview", (_event, guestWebContents) => {
+      // FIRST-NAVIGATION EXEMPTION (owner bug report 2026-08-11: typing a
+      // URL in the Browser panel opened the user's EXTERNAL Chrome): a
+      // freshly-attached guest whose `<webview src>` was set directly to a
+      // real target URL fires `will-navigate` for that very first load
+      // while no page has committed yet, so the same-origin check below
+      // compared the target against a blank baseline and classified the
+      // app's own requested URL as a hostile cross-origin redirect,
+      // deflecting it externally. A guest with no committed page has NO
+      // origin baseline to defend: the first navigation is by construction
+      // the URL our own renderer mounted the tab with, and there is no
+      // guest-page content yet that could have initiated anything.
+      // Allowing it grants nothing an attacker doesn't already have — the
+      // IPC path (`previewBridge.navigate` -> Manager.ts `wc.loadURL`)
+      // never fires `will-navigate` at all per Electron's own semantics.
+      // Enforcement starts once a real page has COMMITTED (the latch
+      // below). Reviewed 2026-08-11 (fresh Opus security review:
+      // SHIP-WITH-CHANGES, all adopted — the latch, the F6 app-initiated
+      // in-flight exemption, the F7 budget-order swap, the F8 main-frame
+      // gate).
+      // MONOTONIC LATCH (guard security review F1, 2026-08-11): the
+      // exemption is a one-way gate armed until the guest COMMITS its
+      // first real page, tracked via `did-navigate` below rather than
+      // re-reading `getURL()` per event. A state-based blank check would
+      // re-arm if the top frame ever returned to about:blank; no exploit
+      // chain was found through that (a blank document is unscriptable by
+      // guest content), but the latch is strictly stronger, costs three
+      // lines, and drops that argument from the trust base entirely.
+      // Nothing in this app ever loads about:blank into an EXISTING guest
+      // (grep-verified), so the latch has no false-positive cost.
+      let hasCommittedRealPage = false;
+      guestWebContents.on("did-navigate", (_navEvent, committedUrl) => {
+        // A completed load also ends any app-initiated in-flight window
+        // (F6) — success or not, the redirect chain it exempted is over.
+        ElectronShell.clearAppInitiatedLoad(guestWebContents.id);
+        if (committedUrl !== "" && committedUrl !== "about:blank") {
+          hasCommittedRealPage = true;
+        }
+      });
+      guestWebContents.on("did-fail-load", () => {
+        ElectronShell.clearAppInitiatedLoad(guestWebContents.id);
+      });
       guestWebContents.on("will-navigate", (event, url) => {
+        // F8: enforce main-frame navigations only. `will-navigate` is
+        // documented main-frame-only, but `will-redirect` (below, same
+        // policy) is not — and deflecting a SUBFRAME's cross-origin
+        // redirect (an ad, an OAuth widget) would pop external tabs while
+        // loading one ordinary page. `=== false` so fixtures/events
+        // without the field keep today's enforcement.
+        if ((event as { isMainFrame?: boolean }).isMainFrame === false) {
+          return;
+        }
+        if (!hasCommittedRealPage) {
+          return;
+        }
         if (
           isSameOriginRendererNavigation({
             applicationUrl: guestWebContents.getURL(),
@@ -629,9 +682,12 @@ export const make = Effect.gen(function* () {
           return;
         }
         event.preventDefault();
+        // F7: parse BEFORE consuming the deflect budget — a navigation to
+        // an un-openable scheme (about:, mailto:) must not burn the 3s
+        // cooldown and suppress a legitimate deflect behind it.
         if (
-          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
         ) {
           void runPromise(electronShell.openExternal(url));
         }
@@ -648,6 +704,27 @@ export const make = Effect.gen(function* () {
       // same-origin redirect target is allowed silently, cross-origin is
       // denied and deflected, same rate limit.
       guestWebContents.on("will-redirect", (event, url) => {
+        // Same latch exemption as `will-navigate`, for the same reason
+        // plus one more: most real sites 302 on their FIRST load (apex ->
+        // www, http -> https) before anything commits — without this,
+        // typing "google.com" passes `will-navigate` and then deflects on
+        // the redirect anyway. Additionally (F6): `will-redirect` fires
+        // for APP-INITIATED loads too (`wc.loadURL` skips `will-navigate`
+        // but not this), so a user typing a URL into a tab with a page
+        // already loaded used to deflect on the target's own redirect —
+        // the second half of the owner's bug. While Manager marks an
+        // app-initiated load in flight, its redirect chain is the server
+        // the USER asked for doing standard redirect behavior; skip
+        // enforcement until did-navigate/did-fail-load clears it.
+        if ((event as { isMainFrame?: boolean }).isMainFrame === false) {
+          return;
+        }
+        if (!hasCommittedRealPage) {
+          return;
+        }
+        if (ElectronShell.isAppInitiatedLoadInFlight(guestWebContents.id)) {
+          return;
+        }
         if (
           isSameOriginRendererNavigation({
             applicationUrl: guestWebContents.getURL(),
@@ -658,8 +735,8 @@ export const make = Effect.gen(function* () {
         }
         event.preventDefault();
         if (
-          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id) &&
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url))
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
         ) {
           void runPromise(electronShell.openExternal(url));
         }

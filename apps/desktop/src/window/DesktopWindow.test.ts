@@ -44,6 +44,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as DesktopServerExposure from "../backend/DesktopServerExposure.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
+import * as ElectronShellModule from "../electron/ElectronShell.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import { PREVIEW_WEBVIEW_PREFERENCES } from "../preview/WebviewPreferences.ts";
 
@@ -1093,6 +1094,10 @@ describe("DesktopWindow", () => {
           },
         };
         didAttachWebview({}, guestWebContents);
+        // The guard's monotonic latch (2026-08-11): enforcement starts
+        // only once the guest has COMMITTED a real page — simulate that
+        // commit before exercising the guard, as a real loaded tab has.
+        guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
         const willNavigate = guestListeners.get("will-navigate");
         if (!willNavigate) {
@@ -1107,6 +1112,277 @@ describe("DesktopWindow", () => {
         assert.isFalse(prevented);
       }).pipe(Effect.provide(layer));
     }),
+  );
+
+  it.effect(
+    "guest FIRST navigation is allowed even to an arbitrary https URL — a blank guest has no origin baseline (owner bug 2026-08-11: typed URLs deflected to external Chrome)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          // The case every pre-existing guard test omitted: a
+          // freshly-attached guest whose <webview src> IS its first
+          // navigation — nothing has loaded, getURL() is still blank.
+          const guestWebContents = {
+            getURL: () => "",
+            id: 4242,
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+
+          const willNavigate = guestListeners.get("will-navigate");
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willNavigate || !willRedirect) {
+            return yield* Effect.die("guest navigation listeners were not registered");
+          }
+          let prevented = false;
+          willNavigate({ preventDefault: () => (prevented = true) }, "https://www.google.com/");
+          assert.isFalse(prevented, "first navigation must load in-panel, not deflect");
+
+          // The first LOAD's redirect leg (apex -> www, http -> https)
+          // fires will-redirect while getURL() is still blank — it must
+          // pass for the same reason, or typing "google.com" deflects on
+          // the redirect even after will-navigate allowed it.
+          let redirectPrevented = false;
+          willRedirect(
+            { preventDefault: () => (redirectPrevented = true) },
+            "https://consent.google.com/",
+          );
+          assert.isFalse(redirectPrevented, "first-load redirects must stay in-panel");
+          assert.lengthOf(openedExternalUrls, 0, "nothing may deflect externally");
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "latch re-entry is impossible: after a real page committed, a blank getURL cannot re-arm the exemption (review F1 — monotonic latch)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          // getURL returns about:blank AFTER a real commit — the exact
+          // re-entry shape a state-based blank check would exempt. The
+          // monotonic latch must keep enforcing.
+          const guestWebContents = {
+            id: 4243,
+            getURL: () => "about:blank",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
+
+          const willNavigate = guestListeners.get("will-navigate");
+          if (!willNavigate) {
+            return yield* Effect.die("guest will-navigate listener was not registered");
+          }
+          let prevented = false;
+          willNavigate(
+            { preventDefault: () => (prevented = true) },
+            "https://attacker.example.com/evil",
+          );
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.isTrue(prevented, "post-commit navigation must stay enforced");
+          assert.deepEqual(openedExternalUrls, ["https://attacker.example.com/evil"]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "app-initiated load in flight exempts will-redirect (review F6 — typing a URL into a loaded tab must not deflect on the target's redirect), and enforcement resumes after did-navigate clears it",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 4244,
+            getURL: () => "http://127.0.0.1:5733/game",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
+
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willRedirect) {
+            return yield* Effect.die("guest will-redirect listener was not registered");
+          }
+
+          // Manager marks the load before wc.loadURL (the user typed a URL).
+          ElectronShellModule.markAppInitiatedLoad(4244);
+          let prevented = false;
+          willRedirect({ preventDefault: () => (prevented = true) }, "https://www.reddit.com/");
+          assert.isFalse(prevented, "the typed URL's own redirect must stay in-panel");
+
+          // did-navigate ends the in-flight window; a GUEST-initiated
+          // cross-origin redirect afterwards is enforced again.
+          guestListeners.get("did-navigate")?.({}, "https://www.reddit.com/");
+          let laterPrevented = false;
+          willRedirect(
+            { preventDefault: () => (laterPrevented = true) },
+            "https://attacker.example.com/evil",
+          );
+          assert.isTrue(laterPrevented, "enforcement must resume after the load settles");
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "subframe redirects are not enforced (review F8 — an iframe's cross-origin redirect must not pop external tabs)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 4245,
+            getURL: () => "http://127.0.0.1:5733/game",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
+
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willRedirect) {
+            return yield* Effect.die("guest will-redirect listener was not registered");
+          }
+          let prevented = false;
+          willRedirect(
+            { isMainFrame: false, preventDefault: () => (prevented = true) },
+            "https://ads.example.com/track",
+          );
+          assert.isFalse(prevented, "subframe redirects are the page's own business");
+          assert.lengthOf(openedExternalUrls, 0);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
+    "un-openable schemes do not burn the deflect budget (review F7 — parse before consuming the cooldown)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 4246,
+            getURL: () => "http://127.0.0.1:5733/game",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
+
+          const willNavigate = guestListeners.get("will-navigate");
+          if (!willNavigate) {
+            return yield* Effect.die("guest will-navigate listener was not registered");
+          }
+          // A mailto: navigation is cancelled but must NOT consume the
+          // 3s deflect cooldown...
+          willNavigate({ preventDefault: () => {} }, "mailto:x@example.com");
+          // ...so a legitimate cross-origin deflect right after still opens.
+          willNavigate({ preventDefault: () => {} }, "https://sso.example.com/login");
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.deepEqual(openedExternalUrls, ["https://sso.example.com/login"]);
+        }).pipe(Effect.provide(layer));
+      }),
   );
 
   it.effect("wires a guest will-navigate guard: cross-origin denied and deflected externally", () =>
@@ -1143,6 +1419,10 @@ describe("DesktopWindow", () => {
           },
         };
         didAttachWebview({}, guestWebContents);
+        // The guard's monotonic latch (2026-08-11): enforcement starts
+        // only once the guest has COMMITTED a real page — simulate that
+        // commit before exercising the guard, as a real loaded tab has.
+        guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
         const willNavigate = guestListeners.get("will-navigate");
         if (!willNavigate) {
@@ -1196,6 +1476,10 @@ describe("DesktopWindow", () => {
           },
         };
         didAttachWebview({}, guestWebContents);
+        // The guard's monotonic latch (2026-08-11): enforcement starts
+        // only once the guest has COMMITTED a real page — simulate that
+        // commit before exercising the guard, as a real loaded tab has.
+        guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
         const willRedirect = guestListeners.get("will-redirect");
         if (!willRedirect) {
@@ -1246,6 +1530,10 @@ describe("DesktopWindow", () => {
             },
           };
           didAttachWebview({}, guestWebContents);
+          // The guard's monotonic latch (2026-08-11): enforcement starts
+          // only once the guest has COMMITTED a real page — simulate that
+          // commit before exercising the guard, as a real loaded tab has.
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
           const willRedirect = guestListeners.get("will-redirect");
           if (!willRedirect) {
@@ -1299,6 +1587,10 @@ describe("DesktopWindow", () => {
           },
         };
         didAttachWebview({}, guestWebContents);
+        // The guard's monotonic latch (2026-08-11): enforcement starts
+        // only once the guest has COMMITTED a real page — simulate that
+        // commit before exercising the guard, as a real loaded tab has.
+        guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
         const willRedirect = guestListeners.get("will-redirect");
         if (!willRedirect) {
@@ -1337,6 +1629,10 @@ describe("DesktopWindow", () => {
           },
         };
         didAttachWebview({}, guestWebContents);
+        // The guard's monotonic latch (2026-08-11): enforcement starts
+        // only once the guest has COMMITTED a real page — simulate that
+        // commit before exercising the guard, as a real loaded tab has.
+        guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
 
         const contextMenu = guestListeners.get("context-menu");
         if (!contextMenu) {

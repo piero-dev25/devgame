@@ -58,6 +58,7 @@ import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import { parseSafeExternalUrl, shouldAllowExternalDeflect } from "../electron/ElectronShell.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
 import { isSameOriginRendererNavigation } from "../window/DesktopWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
@@ -1782,8 +1783,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       wc.getURL() !== pendingUrl
     ) {
       runFork(
-        attemptPromise({ operation: "registerWebview.loadPendingUrl", tabId, webContentsId }, () =>
-          wc.loadURL(pendingUrl),
+        attemptPromise(
+          { operation: "registerWebview.loadPendingUrl", tabId, webContentsId },
+          () => {
+            // F6: app-initiated load — exempt its redirect chain from the
+            // guest will-redirect guard (see ElectronShell.markAppInitiatedLoad).
+            ElectronShell.markAppInitiatedLoad(wc.id);
+            return wc.loadURL(pendingUrl);
+          },
         ).pipe(Effect.ignore),
       );
     }
@@ -1846,14 +1853,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return;
     }
     if (wc.getURL() === url) {
-      yield* attempt({ operation: "navigate.reload", tabId, webContentsId: wc.id }, () =>
-        wc.reload(),
-      );
+      yield* attempt({ operation: "navigate.reload", tabId, webContentsId: wc.id }, () => {
+        // F6: a user-driven reload is app-initiated too — the page's server
+        // may redirect somewhere new since the last load.
+        ElectronShell.markAppInitiatedLoad(wc.id);
+        wc.reload();
+      });
       return;
     }
-    yield* attemptPromise({ operation: "navigate.loadURL", tabId, webContentsId: wc.id }, () =>
-      wc.loadURL(url),
-    );
+    yield* attemptPromise({ operation: "navigate.loadURL", tabId, webContentsId: wc.id }, () => {
+      // F6: the user typed/submitted this URL — exempt its redirect chain
+      // from the guest will-redirect guard (ElectronShell.markAppInitiatedLoad;
+      // cleared by the guest's did-navigate/did-fail-load in DesktopWindow.ts).
+      ElectronShell.markAppInitiatedLoad(wc.id);
+      return wc.loadURL(url);
+    });
   });
 
   const withWebContents = Effect.fn("PreviewManager.withWebContents")(function* (

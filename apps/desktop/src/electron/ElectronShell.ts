@@ -53,6 +53,42 @@ export function shouldAllowExternalDeflect(webContentsId: number): boolean {
   return true;
 }
 
+// F6 (guard security review, 2026-08-11): `will-redirect` cannot tell an
+// app-initiated load apart from a guest-initiated one — Electron fires it
+// for BOTH, while `will-navigate` fires only for guest-initiated
+// navigations. So when the app itself drives a load (`Manager.ts`'s
+// `navigate`/`loadPendingUrl` `wc.loadURL` calls — the user typed a URL, or
+// a pending tab URL is being applied) and the target 301s cross-origin
+// (apex -> www, http -> https, an SSO bounce), the redirect used to be
+// judged against the PREVIOUS page's origin and deflected to the external
+// browser — the "typing reddit.com in a loaded tab opens Chrome" half of
+// the owner's bug. Manager marks the load in flight here before calling
+// `loadURL`; `DesktopWindow.ts`'s guest `will-redirect` skips enforcement
+// while set; the guest's own `did-navigate`/`did-fail-load` clears it.
+// Shared per-webContentsId module state, same shape as the deflect budget
+// above and for the same reason. Deliberately NOT gated on
+// `details.initiator == null` (it also goes null when the initiating frame
+// was deleted before the event — an iframe that sets `top.location` and
+// removes itself would get a free pass; that signal fails open). And
+// deliberately NOT marked by the popup-funneled `loadURL`
+// (`handlePopupNavigation`'s loadInPanel branch): that navigation is
+// guest-initiated content merely routed through `loadURL` — marking it
+// would let a hostile page ride a same-origin `window.open` into an
+// arbitrary cross-origin redirect in-panel.
+const appInitiatedLoadInFlightWebContentsIds = new Set<number>();
+
+export function markAppInitiatedLoad(webContentsId: number): void {
+  appInitiatedLoadInFlightWebContentsIds.add(webContentsId);
+}
+
+export function clearAppInitiatedLoad(webContentsId: number): void {
+  appInitiatedLoadInFlightWebContentsIds.delete(webContentsId);
+}
+
+export function isAppInitiatedLoadInFlight(webContentsId: number): boolean {
+  return appInitiatedLoadInFlightWebContentsIds.has(webContentsId);
+}
+
 export function parseSafeExternalUrl(rawUrl: unknown): Option.Option<string> {
   if (typeof rawUrl !== "string") {
     return Option.none();
