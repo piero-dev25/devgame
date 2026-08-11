@@ -46,6 +46,8 @@ import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import { ProviderRuntimeIngestionLive } from "./ProviderRuntimeIngestion.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
@@ -241,10 +243,31 @@ describe("ProviderRuntimeIngestion", () => {
     const layer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(orchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
+      // Single shared liveness instance across ingestion (writer), the
+      // engine, and the snapshot query (reader).
+      Layer.provideMerge(ThreadBackgroundLiveness.layer),
+      Layer.provideMerge(ThreadPlanProgress.layer),
       Layer.provideMerge(SqlitePersistenceMemory),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
       Layer.provideMerge(makeTestServerSettingsLayer(options?.serverSettings)),
-      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      // #82: this was `process.cwd()` as baseDir (not a temp dir, unlike
+      // `workspaceRoot` two lines up) — deriveServerPaths joins that into
+      // `<cwd>/userdata/...`, a REAL absolute path anchored wherever the
+      // test runner's cwd happens to be. The "persists an assistant_image
+      // content delta" test below actually writes a PNG through the real
+      // AssistantImageAttachmentPersistence.ts/attachmentStore.ts path, so
+      // every run left a stray file at the repo root's `userdata/attachments/`
+      // — 10 accumulated before this was traced. Production's own baseDir
+      // default (os-jank.ts's resolveBaseDir) is always absolute, anchored
+      // under `~/.t3`, so this was test-only; confirmed rather than assumed
+      // before landing this fix. `{ prefix }` matches the `layerTest` usage
+      // already established for this exact call in ProjectionPipeline.test.ts,
+      // OrchestrationEngine.test.ts, and CheckpointReactor.test.ts — a scoped
+      // temp dir that `runtime.dispose()` (afterEach, above) cleans up, same
+      // as `workspaceRoot`'s own `makeTempDir`.
+      Layer.provideMerge(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-provider-serverconfig-" }),
+      ),
       Layer.provideMerge(NodeServices.layer),
     );
     runtime = ManagedRuntime.make(layer);
@@ -948,6 +971,62 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(message?.text).toBe("hello world");
     expect(message?.streaming).toBe(false);
+  });
+
+  // Task #67 producer half: an image ACP's ContentBlock union carries inline
+  // in the assistant's own content stream (agent_message_chunk) reaches this
+  // layer as a "content.delta" event with streamKind "assistant_image" (see
+  // AcpRuntimeModel.ts's ImageDelta parsed event and makeAcpImageDeltaEvent).
+  // Nothing downstream of this layer needs a change: decider.ts and
+  // ProjectionPipeline.ts already carry `attachments` through generically.
+  it("persists an assistant_image content delta as a message attachment", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-message-image-1"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-2"),
+      itemId: asItemId("item-1"),
+      payload: {
+        streamKind: "assistant_image",
+        delta: "",
+        attachmentData: "iVBORw0KGgo=",
+        attachmentMimeType: "image/png",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-message-image-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-2"),
+      itemId: asItemId("item-1"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.id === "assistant:item-1" && (message.attachments?.length ?? 0) > 0,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.id === "assistant:item-1",
+    );
+    expect(message?.attachments).toHaveLength(1);
+    expect(message?.attachments?.[0]).toMatchObject({
+      type: "image",
+      mimeType: "image/png",
+      sizeBytes: 8,
+    });
   });
 
   it("uses assistant item completion detail when no assistant deltas were streamed", async () => {
@@ -2197,7 +2276,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("starts a new streaming assistant message segment after approval", async () => {
-    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
     const startedAt = "2026-03-28T07:00:00.000Z";
     const pausedAt = "2026-03-28T07:00:01.000Z";
     const resumedAt = "2026-03-28T07:00:02.000Z";
@@ -2304,7 +2383,7 @@ describe("ProviderRuntimeIngestion", () => {
   });
 
   it("streams assistant deltas when thread.turn.start requests streaming mode", async () => {
-    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const harness = await createHarness({ serverSettings: { enableLegacyTokenStreaming: true } });
     const now = "2026-01-01T00:00:00.000Z";
 
     await Effect.runPromise(
@@ -3147,7 +3226,8 @@ describe("ProviderRuntimeIngestion", () => {
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-started",
     );
     const progress = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-progress",
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "task-progress:thread-1:turn-task-1",
     );
     const completed = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-task-completed",
@@ -3231,7 +3311,8 @@ describe("ProviderRuntimeIngestion", () => {
     );
 
     const progress = thread.activities.find(
-      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-named-task-progress",
+      (activity: ProviderRuntimeTestActivity) =>
+        activity.id === "task-progress:thread-1:named-task-1",
     );
     const completed = thread.activities.find(
       (activity: ProviderRuntimeTestActivity) => activity.id === "evt-named-task-completed",
@@ -3322,7 +3403,8 @@ describe("ProviderRuntimeIngestion", () => {
 
     await waitForThread(harness.readModel, (entry) =>
       entry.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-swept-task-progress",
+        (activity: ProviderRuntimeTestActivity) =>
+          activity.id === "task-progress:thread-1:swept-task-1",
       ),
     );
 

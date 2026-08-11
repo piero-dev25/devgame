@@ -48,6 +48,18 @@
  * literal string at each call site.
  */
 export const DIFF_PANEL_ID = "diff";
+/** Task #61, following the same pattern: `ChatView.tsx`'s `addFilesSurface`
+ * needs this id to call `openChatDockPanel` after Files moved to the dock. */
+export const FILES_PANEL_ID = "files";
+/** Task #53, third slice, same pattern again: `ChatView.tsx`'s
+ * `addTerminalSurface` needs this id to call `openChatDockPanel` after
+ * Terminal moved to the dock. */
+export const TERMINAL_PANEL_ID = "terminal";
+/** Task #53, fourth and final slice: every "open a preview" entry point
+ * (chat markdown links, script auto-open, terminal links, discovered
+ * ports, the mini-player's "restore") needs this id to call
+ * `openChatDockPanel` after Browser moved to the dock. */
+export const BROWSER_PANEL_ID = "browser";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;
@@ -60,6 +72,16 @@ export interface ChatDockHandle {
    * it. See `DockviewLayout.tsx`'s `togglePanel` for the open-vs-close
    * decision. No-ops if `id` isn't a registered panel. */
   togglePanel: (id: string) => void;
+  /** dock-chrome-strip.md, Section C: toggles the sidebar panel's GROUP-level
+   * dockview visibility (size-to-zero / restore) via
+   * `DockviewLayout.tsx`'s generic `togglePanelGroupVisibility`, applied
+   * here specifically to `SIDEBAR_PANEL_ID`. Deliberately NOT
+   * `togglePanel` above — the sidebar panel's `closeable: false` is
+   * load-bearing (its window keydown listeners — thread prev/next,
+   * Cmd+1..9 — live only while mounted, see ChatDock.tsx's own
+   * `SIDEBAR_PANEL_ID` registration comment, ChatDock.tsx:180-185), so a
+   * real `close()` would tear that down; `setVisible` never does. */
+  toggleSidebarVisibility: () => void;
 }
 
 let chatDockHandle: ChatDockHandle | null = null;
@@ -88,4 +110,71 @@ export function toggleChatDockPanel(id: string): void {
     return;
   }
   chatDockHandle.togglePanel(id);
+}
+
+/**
+ * dock-chrome-strip.md, Section C: `_chat.tsx`'s hoisted chrome strip (a
+ * SIBLING of the dock, not a descendant — same structural-reachability
+ * reason this whole module exists, see the top-of-file doc) needs to READ
+ * the sidebar's live visibility reactively (for the toggle button's pressed
+ * state) as well as TOGGLE it. Mirrored here into a plain module-scope
+ * boolean + listener set — independent of `chatDockHandle`'s own lifecycle
+ * — rather than routed through the handle object itself, so a subscriber
+ * that mounts BEFORE the dock (e.g. the strip renders above `<Outlet/>`,
+ * the dock mounts as part of the route content under it) doesn't miss the
+ * dock's eventual registration: `ChatDock.tsx`'s mount effect calls
+ * `reportChatDockSidebarVisibleChange` once, synchronously, right after
+ * registering its handle, seeding this store's snapshot correctly whenever
+ * the dock (re)mounts, regardless of subscriber mount order.
+ *
+ * `sidebarVisible` defaults to `true` — the sidebar panel is
+ * `singleton: true, closeable: false` and always present in the default
+ * preset, so "visible" is the correct assumption both before the dock has
+ * mounted (index-route loading/empty states, critique M6) and for the
+ * ordinary case where nothing has ever hidden it.
+ */
+let sidebarVisible = true;
+const sidebarVisibilityListeners = new Set<() => void>();
+
+function setSidebarVisibleSnapshot(next: boolean): void {
+  if (sidebarVisible === next) return;
+  sidebarVisible = next;
+  sidebarVisibilityListeners.forEach((listener) => listener());
+}
+
+/** `useSyncExternalStore`'s `getSnapshot` — a plain boolean read, no dock
+ * access required (see this store's own doc above for why it's independent
+ * of `chatDockHandle`'s lifecycle). */
+export function getChatDockSidebarVisible(): boolean {
+  return sidebarVisible;
+}
+
+/** `useSyncExternalStore`'s `subscribe`. */
+export function subscribeChatDockSidebarVisible(listener: () => void): () => void {
+  sidebarVisibilityListeners.add(listener);
+  return () => sidebarVisibilityListeners.delete(listener);
+}
+
+/**
+ * The ONE place this store's snapshot is written — called by `ChatDock.tsx`'s
+ * mount effect, both once synchronously (seeding the initial live value) and
+ * on every subsequent `DockviewLayout.tsx#subscribePanelGroupVisibility`
+ * event for the sidebar panel, so this mirror always reflects live dockview
+ * truth regardless of what triggered the change (the strip button, the
+ * `sidebar.toggle` keybinding, or — hypothetically — anything else that
+ * might call the group's own `setVisible` in the future).
+ */
+export function reportChatDockSidebarVisibleChange(isVisible: boolean): void {
+  setSidebarVisibleSnapshot(isVisible);
+}
+
+export function toggleChatDockSidebarVisibility(): void {
+  if (!chatDockHandle) {
+    console.warn(
+      "toggleChatDockSidebarVisibility() called before the chat dock registered its handle — no-op.",
+      { operation: "toggle-chat-dock-sidebar-visibility" },
+    );
+    return;
+  }
+  chatDockHandle.toggleSidebarVisibility();
 }

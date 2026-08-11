@@ -36,15 +36,26 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
+import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, MessageCircle, PanelLeft } from "lucide-react";
+import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import { DIFF_PANEL_ID, registerChatDockHandle } from "./chatDockHandle";
+import {
+  BROWSER_PANEL_ID,
+  DIFF_PANEL_ID,
+  FILES_PANEL_ID,
+  registerChatDockHandle,
+  reportChatDockSidebarVisibleChange,
+  TERMINAL_PANEL_ID,
+} from "./chatDockHandle";
+import BrowserDockPanel from "./BrowserDockPanel";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
 import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
+import FilesDockPanel from "./FilesDockPanel";
+import TerminalDockPanel from "./TerminalDockPanel";
 import {
   createPanelRegistry,
   createPresetRegistry,
@@ -55,11 +66,13 @@ import {
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
 import { SidebarPanel } from "./SidebarPanel";
 
-const SIDEBAR_PANEL_ID = "sidebar";
 const CHAT_PANEL_ID = "chat";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
+const FILES_GROUP_ID = "group-files";
+const TERMINAL_GROUP_ID = "group-terminal";
+const BROWSER_GROUP_ID = "group-browser";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -69,6 +82,23 @@ const CHAT_DOCK_PRESET_ID = "chat-dock-default";
  * below), so its saved split must be one shared layout, not one per thread
  * — the same "workspace" DockviewLayoutProps already models, just with
  * exactly one workspace for now.
+ *
+ * READ THIS BEFORE ASSUMING "shared" COVERS SELECTION TOO (task #108): the
+ * `SerializedDockview` this key stores bundles two genuinely different kinds
+ * of state, and "one shared layout, not one per thread" above is a claim
+ * about ONLY the first one:
+ *  - Layout STRUCTURE — panel positions, sizes, splits — correctly global.
+ *    Nobody wants their column widths resetting on every thread switch.
+ *  - dockview's own `activeGroup`/per-group `activeView` — which tab is
+ *    front-most — travels in this SAME blob, but should NOT be global: it
+ *    used to be, and that was the bug (#108's "outer tab selection leaks
+ *    across chats" — switch threads, whichever tab you last clicked stays
+ *    clicked, everywhere). `dockActiveSelectionStore.ts` (keyed by
+ *    `activationKey` below, via `DockviewLayout.tsx`'s
+ *    `restoreActivePanelForKey`) now gives selection its own per-thread
+ *    answer instead of inheriting this key's shared scope. If you're adding
+ *    new dockview-level state here, ask which of these two categories it
+ *    belongs to before assuming this comment's "shared" applies to it.
  *
  * STABLE FROM HERE ON — fix round after 7606dff45, reversing the precedent
  * step 1/2 set. This key was bumped twice (`"chat-dock"` →
@@ -120,8 +150,10 @@ export const chatDockPanelRegistry: PanelRegistry = createPanelRegistry();
  *
  * OWNER CORRECTION to the original spec (spec-dock-step-2.md's "decide which
  * one the dock panel hosts... do not try to host both" was overruled): both
- * `Sidebar` (v1) and `SidebarV2` stay live, neither gets deleted or
- * hardcoded away. `SidebarPanel.tsx` hosts WHICHEVER one
+ * sidebars stay live, neither gets deleted or hardcoded away. (Upstream
+ * #5672 later renamed them: `SidebarV2.tsx` became `Sidebar.tsx`, the old
+ * v1 became `LegacySidebar.tsx` behind Settings -> Legacy features — the
+ * ruling carries over unchanged.) `SidebarPanel.tsx` hosts WHICHEVER one
  * `useThreadSidebarComponent()` resolves — the exact same flag
  * `AppSidebarLayout` reads, via a hook extracted out of `AppSidebarLayout`'s
  * own inline ternary specifically so the two call sites share one
@@ -132,9 +164,9 @@ export const chatDockPanelRegistry: PanelRegistry = createPanelRegistry();
  * it's not "pick one forever," it's "don't render two competing sidebars
  * simultaneously."
  *
- * `singleton: true`: `SidebarV2.tsx:2778` hardcodes
- * `id="sidebar-thread-search-results"`, which a second SidebarV2 instance
- * would collide on. Applies regardless of which variant is currently
+ * `singleton: true`: `Sidebar.tsx` (nee SidebarV2) hardcodes
+ * `id="sidebar-thread-search-results"` (Sidebar.tsx:3212 as of the
+ * 2026-08 upstream merge), which a second instance would collide on. Applies regardless of which variant is currently
  * resolved — only one "sidebar" panel can ever be open in this dock either
  * way.
  */
@@ -152,6 +184,28 @@ chatDockPanelRegistry.register({
   // listeners (thread prev/next, Cmd+1..9) only exist while this panel
   // stays mounted — see this file's own comment further down.
   closeable: false,
+  // docs/specs/unified-topband.md, Section B, NARROW-COLUMN RULE (critique
+  // M4): matches index.css's `--workspace-corner-width` FALLBACK value —
+  // this Sidebar panel is always the (0,0) group in the default preset, so
+  // a floating Sidebar window can never render narrower than the corner
+  // cell it sits under while docked. This is the ADVISORY half of the rule
+  // (honoured only while floating — `PanelDefinition.minWidth`'s own doc
+  // comment, `lib/types.ts`); the DOCKED half is enforced separately and
+  // more strongly by DockviewLayout.tsx's `applyTopBandLayout`, which caps
+  // the corner's own padding at the (0,0) group's live width regardless of
+  // whether the sash respects this minimum.
+  //
+  // Fix round 2 (content-driven corner width): this stays a STATIC 220,
+  // deliberately NOT wired to the corner's own live-measured width — this
+  // registry entry is built once, at module scope, before any DOM (or
+  // corner) exists, so it has no live value to read. A documented,
+  // accepted gap: if the corner's real measured width ever grows
+  // meaningfully past 220px (a longer future brand string, a wider pill
+  // label), a floating Sidebar's advisory minimum would under-reserve
+  // relative to the corner it sits under while docked — the DOCKED
+  // guarantee above is unaffected either way, since it derives its cap
+  // from the LIVE corner width, not this constant.
+  minWidth: 220,
 });
 
 chatDockPanelRegistry.register({
@@ -221,14 +275,92 @@ chatDockPanelRegistry.register({
 });
 
 /**
- * The default preset: sidebar on the left, chat next to it, Diff further
- * right — the same third-column slot Files occupied before Part A deleted
- * it, now occupied by T3's own Diff surface instead of a re-filled stand-in.
+ * Part B, second slice (task #61): T3's own Files surface as an ordinary
+ * dock panel. `FilesDockPanel.tsx` is a thicker wrapper than Diff's — see
+ * its own doc comment for the three decisions that made it so (files+file
+ * move together, a dedicated store for "which file is open," the minimal
+ * multi-file tab strip preserved from `RightPanelTabs`).
+ *
+ * `singleton: true`: same reasoning as Diff — one thread's file browser has
+ * no case for two simultaneous instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as Diff —
+ * nothing depends on this panel staying mounted, so no reason to take away
+ * the ability to close it.
+ */
+chatDockPanelRegistry.register({
+  id: FILES_PANEL_ID,
+  title: "Files",
+  icon: Files,
+  component: FilesDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * Part B, third slice (task #53): T3's own Terminal surface as an ordinary
+ * dock panel. `TerminalDockPanel.tsx` is closer to Files' shape than Diff's
+ * — see its own doc comment for the session-lifecycle reasoning that makes
+ * it so.
+ *
+ * `singleton: true`: same reasoning as Diff/Files — one thread's terminal
+ * workspace (itself capable of holding several groups/splits internally,
+ * via `TerminalDockPanel`'s own tab strip) has no case for two simultaneous
+ * PANEL instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as Diff/
+ * Files — nothing depends on this panel staying mounted, and closing it no
+ * longer ends any session (see `terminalDockStore.ts`'s own doc comment for
+ * why that's a deliberate, precedent-matching change from the old
+ * right-panel tab's close behaviour).
+ */
+chatDockPanelRegistry.register({
+  id: TERMINAL_PANEL_ID,
+  title: "Terminal",
+  icon: TerminalSquare,
+  component: TerminalDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * Part B, fourth and final slice (task #53): T3's own Browser (preview)
+ * surface as an ordinary dock panel. `BrowserDockPanel.tsx` needs no new
+ * store — see its own doc comment for why `previewStateStore.ts` already
+ * carried everything this panel reads.
+ *
+ * `singleton: true`: same reasoning as the other three — one thread's
+ * browser workspace (itself capable of holding several tabs via
+ * `BrowserDockPanel`'s own tab strip) has no case for two simultaneous
+ * PANEL instances.
+ *
+ * `closeable: true` (the default, no override): same reasoning as the
+ * other three — closing the panel is a view action, never destructive (see
+ * `BrowserDockPanel.tsx`'s own module doc on desktop-only degradation for
+ * the one place this panel DOES need to behave differently depending on
+ * runtime).
+ */
+chatDockPanelRegistry.register({
+  id: BROWSER_PANEL_ID,
+  title: "Browser",
+  icon: Globe2,
+  component: BrowserDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
+ * The default preset: sidebar on the left, chat next to it, Diff, Files,
+ * Terminal and Browser further right — the same third-column slot Files
+ * occupied before Part A deleted our own version of it, now occupied by
+ * T3's own Diff, Files, Terminal AND Browser surfaces instead of a
+ * re-filled stand-in. This preset now covers every surface
+ * spec-surfaces-as-dock-panels.md set out to promote.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
  * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
- * number. No measured mock exists for the chat:diff split — dockview
+ * number. No measured mock exists for the chat:diff:files split — dockview
  * stretches this initial tree to fit the real container, so only the
  * RATIOS matter, not the absolute pixels.
  *
@@ -238,8 +370,9 @@ chatDockPanelRegistry.register({
  * open. For the sidebar specifically this is load-bearing, not just
  * convenient — see SidebarPanel.tsx/this file's registration comment on why
  * a panel that can never unmount is what keeps the sidebar's window keydown
- * listeners (thread prev/next, Cmd+1..9) alive. Diff is NOT no-close — see
- * its own registration comment above for why that's deliberate.
+ * listeners (thread prev/next, Cmd+1..9) alive. Diff and Files are NOT
+ * no-close — see their own registration comments above for why that's
+ * deliberate.
  *
  * `presetPanelEntry` below reads `closeable` off the REGISTRY rather than
  * this function choosing `tabComponent` independently — fix round after the
@@ -249,15 +382,16 @@ chatDockPanelRegistry.register({
  * one place (`PanelDefinition.closeable`, set at registration above), and
  * every caller reads it.
  *
- * Diff is its own SEPARATE leaf in this flat branch (own `views: [id]`
- * array, length 1) — a SEPARATE PANEL IN A ROW, not tabbed into chat's
- * group. That's not just this function's choice: `lib/layoutMigration.ts`'s
- * `locatePanelInFlatBranch` only recognizes a leaf as a newly-registered
- * panel's home when `views.length === 1` — grafting Diff into an existing
- * TABBED group here would make it unrecognizable to migration (reported as
- * unplaceable) for every user who saved a layout before this shipped. The
- * "separate row" rule enforces itself structurally; it isn't something a
- * future edit here could quietly break without migration noticing.
+ * Diff and Files are each their own SEPARATE leaf in this flat branch (own
+ * `views: [id]` array, length 1) — a SEPARATE PANEL IN A ROW, not tabbed
+ * into chat's group or into each other. That's not just this function's
+ * choice: `lib/layoutMigration.ts`'s `locatePanelInFlatBranch` only
+ * recognizes a leaf as a newly-registered panel's home when
+ * `views.length === 1` — grafting either into an existing TABBED group here
+ * would make it unrecognizable to migration (reported as unplaceable) for
+ * every user who saved a layout before this shipped. The "separate row"
+ * rule enforces itself structurally; it isn't something a future edit here
+ * could quietly break without migration noticing.
  */
 function presetPanelEntry(id: string, title: string): SerializedDockview["panels"][string] {
   const definition = chatDockPanelRegistry.get(id);
@@ -274,7 +408,11 @@ function buildChatDockPreset(): SerializedDockview {
   const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
   const CHAT_WIDTH = 640;
   const DIFF_WIDTH = 400;
-  const CONTAINER_WIDTH = SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH;
+  const FILES_WIDTH = 400;
+  const TERMINAL_WIDTH = 400;
+  const BROWSER_WIDTH = 400;
+  const CONTAINER_WIDTH =
+    SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH + TERMINAL_WIDTH + BROWSER_WIDTH;
 
   return {
     grid: {
@@ -300,6 +438,29 @@ function buildChatDockPreset(): SerializedDockview {
             size: DIFF_WIDTH,
             data: { id: DIFF_GROUP_ID, views: [DIFF_PANEL_ID], activeView: DIFF_PANEL_ID },
           },
+          {
+            type: "leaf",
+            size: FILES_WIDTH,
+            data: { id: FILES_GROUP_ID, views: [FILES_PANEL_ID], activeView: FILES_PANEL_ID },
+          },
+          {
+            type: "leaf",
+            size: TERMINAL_WIDTH,
+            data: {
+              id: TERMINAL_GROUP_ID,
+              views: [TERMINAL_PANEL_ID],
+              activeView: TERMINAL_PANEL_ID,
+            },
+          },
+          {
+            type: "leaf",
+            size: BROWSER_WIDTH,
+            data: {
+              id: BROWSER_GROUP_ID,
+              views: [BROWSER_PANEL_ID],
+              activeView: BROWSER_PANEL_ID,
+            },
+          },
         ],
       },
     },
@@ -307,6 +468,9 @@ function buildChatDockPreset(): SerializedDockview {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
+      [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
+      [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),
+      [BROWSER_PANEL_ID]: presetPanelEntry(BROWSER_PANEL_ID, "Browser"),
     },
     activeGroup: CHAT_GROUP_ID,
   };
@@ -404,8 +568,39 @@ export function ChatDock(props: ChatDockProps) {
   // reconcile here.
   const dockviewLayoutRef = useRef<DockviewLayoutHandle>(null);
   useEffect(() => {
-    registerChatDockHandle(dockviewLayoutRef.current);
-    return () => registerChatDockHandle(null);
+    // dock-chrome-strip.md, Section C: `ChatDockHandle`'s new
+    // `toggleSidebarVisibility` has a different shape than
+    // `DockviewLayoutHandle`'s generic-by-id `togglePanelGroupVisibility`,
+    // so (unlike `openPanel`/`togglePanel`, which pass straight through
+    // structurally) this is a real adapter, applying the generic dock
+    // action to `SIDEBAR_PANEL_ID` specifically. The functions close over
+    // `dockviewLayoutRef` (not its `.current` at registration time), so
+    // they stay correct across any ref changes.
+    registerChatDockHandle({
+      openPanel: (id) => dockviewLayoutRef.current?.openPanel(id),
+      togglePanel: (id) => dockviewLayoutRef.current?.togglePanel(id),
+      toggleSidebarVisibility: () =>
+        dockviewLayoutRef.current?.togglePanelGroupVisibility(SIDEBAR_PANEL_ID),
+    });
+    // Mirrors the sidebar panel's live group visibility into
+    // `chatDockHandle.ts`'s standalone store, for `_chat.tsx`'s strip (a
+    // sibling, not a descendant) to read reactively — see that store's own
+    // doc comment. Seeded once synchronously right after registration so a
+    // subscriber that mounted before this dock did sees the correct value
+    // immediately, not just on the next change.
+    if (dockviewLayoutRef.current) {
+      reportChatDockSidebarVisibleChange(
+        dockviewLayoutRef.current.isPanelGroupVisible(SIDEBAR_PANEL_ID),
+      );
+    }
+    const unsubscribeSidebarVisibility = dockviewLayoutRef.current?.subscribePanelGroupVisibility(
+      SIDEBAR_PANEL_ID,
+      reportChatDockSidebarVisibleChange,
+    );
+    return () => {
+      registerChatDockHandle(null);
+      unsubscribeSidebarVisibility?.();
+    };
   }, []);
   // Not memoized: step 1 memoized this object, but constructing a
   // 3-4-field plain object is cheap enough that the memo bought nothing

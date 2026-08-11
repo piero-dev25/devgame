@@ -10,12 +10,16 @@ import {
 import { useLocation, useNavigate } from "@tanstack/react-router";
 
 import { isElectron } from "../env";
+import { useDesktopFullscreenState } from "../hooks/useDesktopFullscreenState";
 import { getLocalStorageItem } from "../hooks/useLocalStorage";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { useEnvironmentIdentificationMode, useSidebarV2Enabled } from "../hooks/useSettings";
+import { resolveWorkspaceChromeInsetStyle } from "../workspaceChromeInset";
+import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import { useThreadSidebarComponent } from "../hooks/useThreadSidebarComponent";
+import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
+import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
 import {
   resolveInitialThreadSidebarWidth,
@@ -33,8 +37,6 @@ import {
   useSidebarVisibility,
 } from "./ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-
-const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "90px";
 
 function subscribeToViewportWidth(onChange: () => void): () => void {
   window.addEventListener("resize", onChange);
@@ -104,6 +106,15 @@ function SidebarControl() {
                   "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
               )}
               aria-label="Toggle main sidebar"
+              // dock-chrome-strip.md, Section C: `SidebarTrigger` now accepts
+              // explicit `onToggle`/`pressed` so it can be reused by the
+              // dock-side strip toggle without touching `SidebarProvider`
+              // state. Passed explicitly here too (not left to `SidebarTrigger`'s
+              // internal `useSidebar()` fallback) so this call site's behavior
+              // is visibly, verifiably unchanged: same `toggleSidebar` function,
+              // same `isSidebarVisible` read this component already computed.
+              onToggle={toggleSidebar}
+              pressed={isSidebarVisible}
             />
           }
         />
@@ -117,23 +128,19 @@ function SidebarControl() {
 
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
-  const sidebarV2Enabled = useSidebarV2Enabled();
-  // Settings routes render the settings nav, which lives in the v1 component
-  // and is identical for both sidebars — so v1 stays mounted there.
+  // Settings routes show the settings nav in place of whichever thread
+  // sidebar is active.
   const pathname = useLocation({ select: (location) => location.pathname });
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
-  // `sidebarV2Enabled || isOnSettings` is `(sidebarV2Enabled && !isOnSettings)
-  // || isOnSettings` simplified (A||B is equivalent to (A&&!B)||B) — themed as
-  // v2 whenever the flag would pick it OR we're on settings, independent of
-  // which component actually renders below (see `ThreadSidebarComponent`,
-  // which forces v1 specifically ON settings — this stays themed "v2" there
-  // by design, matching the pre-existing behaviour this replaces).
-  const useSidebarV2Theme = sidebarV2Enabled || isOnSettings;
-  // Which CONTENT component renders is now resolved by the shared hook (spec
-  // correction: the dock's SidebarPanel.tsx uses the exact same hook, so the
-  // v1-vs-v2 decision lives in exactly one place instead of being duplicated
-  // here and there).
-  const ThreadSidebarComponent = useThreadSidebarComponent({ forceV1: isOnSettings });
+  // Which thread-sidebar CONTENT component renders is resolved by the shared
+  // hook (spec correction: the dock's SidebarPanel.tsx uses the exact same
+  // hook, so the decision lives in exactly one place instead of being
+  // duplicated here and there). The hook's `forceV1` option is no longer
+  // passed: it existed only because the settings nav used to live inside the
+  // v1 sidebar component, and upstream extracted it into
+  // `SettingsSidebarNav`, so `/settings*` now mounts no thread sidebar at
+  // all.
+  const ThreadSidebarComponent = useThreadSidebarComponent();
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -141,35 +148,19 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   // that would otherwise refresh a render-time snapshot.
   const viewportWidth = useSyncExternalStore(subscribeToViewportWidth, readViewportWidth);
   const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth);
-  const [isWindowFullscreen, setIsWindowFullscreen] = useState(() => {
-    const getWindowFullscreenState = window.desktopBridge?.getWindowFullscreenState;
-    return isMacosDesktop && typeof getWindowFullscreenState === "function"
-      ? getWindowFullscreenState()
-      : false;
-  });
+  // dock-chrome-strip.md, Section A: both the fullscreen subscription and the
+  // resulting inset mapping are now shared with `_chat.tsx`'s hoisted chrome
+  // strip via `useDesktopFullscreenState`/`resolveWorkspaceChromeInsetStyle`
+  // — no behavior change here, same inputs, same byte-equal output (see
+  // `workspaceChromeInset.test.ts`).
+  const isWindowFullscreen = useDesktopFullscreenState(isMacosDesktop);
   const sidebarProviderStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
-    ...(isMacosDesktop && !isWindowFullscreen
-      ? { "--workspace-controls-left": MACOS_TRAFFIC_LIGHTS_LEFT_INSET }
-      : {}),
+    ...resolveWorkspaceChromeInsetStyle({
+      isMacDesktop: isMacosDesktop,
+      isFullscreen: isWindowFullscreen,
+    }),
   } as CSSProperties;
-
-  useEffect(() => {
-    if (!isMacosDesktop) return;
-    const bridge = window.desktopBridge;
-    if (!bridge) return;
-    const { getWindowFullscreenState, onWindowFullscreenStateChange } = bridge;
-    if (
-      typeof getWindowFullscreenState !== "function" ||
-      typeof onWindowFullscreenStateChange !== "function"
-    ) {
-      return;
-    }
-
-    const unsubscribe = onWindowFullscreenStateChange(setIsWindowFullscreen);
-    setIsWindowFullscreen(getWindowFullscreenState());
-    return unsubscribe;
-  }, [isMacosDesktop]);
 
   useEffect(() => {
     const onMenuAction = window.desktopBridge?.onMenuAction;
@@ -197,7 +188,6 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
         side="left"
         collapsible="offcanvas"
         data-app-sidebar=""
-        data-sidebar-version={useSidebarV2Theme ? "v2" : "v1"}
         className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
         resizable={{
           maxWidth: sidebarMaximumWidth,
@@ -209,7 +199,14 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
           onResize: setSidebarWidth,
         }}
       >
-        <ThreadSidebarComponent />
+        {isOnSettings ? (
+          <>
+            <SidebarChromeHeader isElectron={isElectron} />
+            <SettingsSidebarNav pathname={pathname} />
+          </>
+        ) : (
+          <ThreadSidebarComponent />
+        )}
         <SidebarRail />
       </Sidebar>
       {children}

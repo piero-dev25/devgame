@@ -11,6 +11,7 @@ import type {
   DesktopPreviewPointerEvent,
   PreviewAnnotationPayload,
   PreviewAnnotationRect,
+  PreviewAnnotationSubmissionResult,
   DesktopPreviewRecordingArtifact,
   DesktopPreviewRecordingFrame,
   DesktopPreviewScreenshotArtifact,
@@ -28,7 +29,15 @@ import type {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizePreviewUrl } from "@t3tools/shared/preview";
-import { BrowserWindow, type Session, clipboard, nativeImage, shell, webContents } from "electron";
+import {
+  app,
+  BrowserWindow,
+  type Session,
+  clipboard,
+  nativeImage,
+  shell,
+  webContents,
+} from "electron";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -48,7 +57,10 @@ import * as Scope from "effect/Scope";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import { parseSafeExternalUrl, shouldAllowExternalDeflect } from "../electron/ElectronShell.ts";
+import * as ElectronShell from "../electron/ElectronShell.ts";
 import { PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL } from "../ipc/channels.ts";
+import { isSameOriginRendererNavigation } from "../window/DesktopWindow.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
   ANNOTATION_CAPTURED_CHANNEL,
@@ -109,7 +121,7 @@ const DIAGNOSTIC_BUFFER_LIMIT = 200;
 const MAX_ARTIFACT_SITE_SLUG_LENGTH = 80;
 const AGENT_CURSOR_MOVE_MS = 160;
 const AGENT_CURSOR_CLICK_LEAD_MS = 40;
-const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.UnknownFromJsonString);
+const encodeUnknownJson = Schema.encodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const DEFAULT_ANNOTATION_THEME: DesktopPreviewAnnotationTheme = {
   colorScheme: "light",
   radius: "0.625rem",
@@ -406,6 +418,13 @@ const APP_FORWARDED_SHORTCUTS: ReadonlyArray<{
   { key: "w", meta: true, shift: false, control: false },
 ]);
 
+export const isPreviewRefreshShortcut = (input: Electron.Input): boolean =>
+  input.type === "keyDown" &&
+  input.key.toLowerCase() === "r" &&
+  (input.meta || input.control) &&
+  !input.shift &&
+  !input.alt;
+
 const isPreviewInputSignal = (value: unknown): value is PreviewInputSignal => {
   if (typeof value !== "object" || value === null || !("kind" in value)) return false;
   if (value.kind === "pointer") {
@@ -454,6 +473,92 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   const parentScope = yield* Scope.Scope;
   const context = yield* Effect.context<never>();
   const runFork = Effect.runForkWith(context);
+
+  // G2/H1/F-3 (independent security review, 2026-08-04) built a
+  // session-identity-scoped policy here — same-origin popups load in the
+  // guest, cross-origin ones deny-and-deflect to the real external browser,
+  // rate limited — for the third-party (Figma/Notion) panel specifically,
+  // with preview explicitly carved OUT: "Preview webviews keep their
+  // original, unconditional loadURL behavior, matching G3's own
+  // preview-out-of-scope carve-out." FIGMA/NOTION DELETED (owner ruling,
+  // 2026-08-04) collapsed this handler down to exactly that carved-out
+  // behavior — unconditional `loadURL`, no origin check at all — which was
+  // correct for what preview got BEFORE, but left #88 open: `window.open`
+  // still needs SOME handler (Electron's default opens a real, unrestricted
+  // `BrowserWindow` at an attacker-chosen URL, outside every check in this
+  // file — G2's original problem), and deny-then-`loadURL`-in-place on the
+  // SAME guest WebContents never fires `will-navigate`, so
+  // `DesktopWindow.ts`'s guest guard (which listens for exactly that event)
+  // never saw this path either (H1).
+  //
+  // #88 (2026-08-04): restores the same-origin/deflect/rate-limited policy —
+  // `git show 630eeb5e9` for the full history and the probe that proved it.
+  // The ticket's own citation was right; a mid-fix correction here
+  // second-guessed it against the WRONG check (that commit's own MESSAGE is
+  // unrelated docs — but `git show <sha>:<path>` reads a file's content AT
+  // THAT TREE, not that commit's own diff, and the tree is what matters for
+  // recovery). `630eeb5e9` is the last tree state before `f82da4876` deleted
+  // this mechanism, and it's more complete than the commit that originally
+  // introduced the code (`2d8a9acb6`): two later commits corrected several
+  // of its comments — see `ElectronShell.ts`'s cross-origin-hop invariant
+  // note, which survived untouched there the whole time since `f82da4876`
+  // never touched that file. Applied UNCONDITIONALLY here, not scoped by
+  // session identity, because preview is now the only guest type this
+  // handler ever sees. See `DesktopWindow.ts`'s `did-attach-webview` guard
+  // for why the old "preview loads the user's own trusted dev server"
+  // carve-out doesn't hold: a running game build pulls npm packages, CDN
+  // scripts, and remote hosts same as any other web content.
+  //
+  // Kept as a NAMED, dedicated function rather than inlined at both call
+  // sites (this one and `install` inside `attachListeners`, below) so the
+  // two install sites' shared behavior (see the H1 note in `install` for
+  // why there are two) is visibly the same function, not two copies that
+  // could drift.
+  const resolvePopupNavigationTarget = (
+    wc: Electron.WebContents,
+    normalizedUrl: string,
+  ): { readonly kind: "loadInPanel" | "deflect" } => {
+    const anchor = wc.getURL();
+    const sameOrigin = isSameOriginRendererNavigation({
+      applicationUrl: anchor,
+      navigationUrl: normalizedUrl,
+    });
+    return sameOrigin ? { kind: "loadInPanel" } : { kind: "deflect" };
+  };
+
+  const handlePopupNavigation = Effect.fn("PreviewManager.handlePopupNavigation")(function* (
+    operation: string,
+    wc: Electron.WebContents,
+    rawUrl: string,
+  ) {
+    let normalizedUrl: string;
+    try {
+      normalizedUrl = normalizePreviewUrl(rawUrl);
+    } catch {
+      return;
+    }
+    const target = resolvePopupNavigationTarget(wc, normalizedUrl);
+    if (target.kind === "loadInPanel") {
+      yield* attemptPromise({ operation, webContentsId: wc.id }, () =>
+        wc.loadURL(normalizedUrl),
+      ).pipe(Effect.ignore);
+      return;
+    }
+    if (!shouldAllowExternalDeflect(wc.id)) return;
+    if (Option.isNone(parseSafeExternalUrl(normalizedUrl))) return;
+    yield* attemptPromise({ operation: `${operation}.deflect`, webContentsId: wc.id }, () =>
+      shell.openExternal(normalizedUrl),
+    ).pipe(Effect.ignore);
+  });
+
+  app.on("web-contents-created", (_event, wc) => {
+    if (wc.getType() !== "webview") return;
+    wc.setWindowOpenHandler(({ url }) => {
+      runFork(handlePopupNavigation("openPreviewWindow.earlyGuard", wc, url));
+      return { action: "deny" };
+    });
+  });
+
   const resolvedArtifactDirectory = path.resolve(artifactDirectory);
   const playwrightInstallExpression = yield* Effect.cached(
     playwrightInjectedRuntimeInstallExpression(),
@@ -644,6 +749,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
     return wc;
   });
+
+  // G4 (independent security review, 2026-08-04): a defense-in-depth guard
+  // that blocked the MCP automation toolkit from targeting the third-party
+  // (Figma/Notion) webview by session identity, kept even after an
+  // independent reviewer couldn't reproduce the originally-reported live
+  // exploit (the automation tabId namespace and the panel's registration
+  // namespace turned out disjoint). FIGMA/NOTION DELETED (owner ruling,
+  // 2026-08-04): there is no third-party session left to check identity
+  // against, so this guard is gone with the feature it protected, not left
+  // as dead code that would always resolve successfully — see git history
+  // at commit 630eeb5e9 for the removed `assertNotThirdParty`/
+  // `requireAutomatableWebContents` and their full rationale. Every call
+  // site below that used `requireAutomatableWebContents(operation, tabId)`
+  // now calls the plain `requireWebContents(tabId)` it wrapped.
 
   const resolveArtifactPath = (artifactPath: string) =>
     attempt({ operation: "resolveArtifactPath", artifactPath }, () => {
@@ -1365,6 +1484,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       });
     });
     const beforeInput = (event: Electron.Event, input: Electron.Input): void => {
+      if (isPreviewRefreshShortcut(input)) {
+        event.preventDefault();
+        runFork(
+          attempt({ operation: "shortcut.refresh", tabId, webContentsId: wc.id }, () =>
+            wc.reload(),
+          ).pipe(Effect.ignore),
+        );
+        return;
+      }
       runFork(forwardShortcut(event, input));
     };
     yield* Scope.addFinalizer(
@@ -1390,11 +1518,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         wc.on("did-fail-load", failed as never);
         wc.ipc.on(HUMAN_INPUT_CHANNEL, humanInput);
         wc.setWindowOpenHandler(({ url }) => {
-          runFork(
-            attemptPromise({ operation: "openPreviewWindow", tabId, webContentsId: wc.id }, () =>
-              wc.loadURL(url),
-            ).pipe(Effect.ignore),
-          );
+          // F5 (independent security review, 2026-08-04): this handler
+          // exists to stop uncontrolled new windows from untrusted content
+          // (deny + navigate the same webview instead), with #88's
+          // same-origin/deflect/rate-limited policy applied inside
+          // `handlePopupNavigation` — see that function's own comment (this
+          // file, near the early `web-contents-created` handler) for the
+          // full history. This call site shares that function rather than
+          // re-implementing it.
+          runFork(handlePopupNavigation("openPreviewWindow", wc, url));
           return { action: "deny" };
         });
         wc.on("before-input-event", beforeInput);
@@ -1651,8 +1783,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       wc.getURL() !== pendingUrl
     ) {
       runFork(
-        attemptPromise({ operation: "registerWebview.loadPendingUrl", tabId, webContentsId }, () =>
-          wc.loadURL(pendingUrl),
+        attemptPromise(
+          { operation: "registerWebview.loadPendingUrl", tabId, webContentsId },
+          () => {
+            // F6: app-initiated load — exempt its redirect chain from the
+            // guest will-redirect guard (see ElectronShell.markAppInitiatedLoad).
+            ElectronShell.markAppInitiatedLoad(wc.id);
+            return wc.loadURL(pendingUrl);
+          },
         ).pipe(Effect.ignore),
       );
     }
@@ -1715,14 +1853,21 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       return;
     }
     if (wc.getURL() === url) {
-      yield* attempt({ operation: "navigate.reload", tabId, webContentsId: wc.id }, () =>
-        wc.reload(),
-      );
+      yield* attempt({ operation: "navigate.reload", tabId, webContentsId: wc.id }, () => {
+        // F6: a user-driven reload is app-initiated too — the page's server
+        // may redirect somewhere new since the last load.
+        ElectronShell.markAppInitiatedLoad(wc.id);
+        wc.reload();
+      });
       return;
     }
-    yield* attemptPromise({ operation: "navigate.loadURL", tabId, webContentsId: wc.id }, () =>
-      wc.loadURL(url),
-    );
+    yield* attemptPromise({ operation: "navigate.loadURL", tabId, webContentsId: wc.id }, () => {
+      // F6: the user typed/submitted this URL — exempt its redirect chain
+      // from the guest will-redirect guard (ElectronShell.markAppInitiatedLoad;
+      // cleared by the guest's did-navigate/did-fail-load in DesktopWindow.ts).
+      ElectronShell.markAppInitiatedLoad(wc.id);
+      return wc.loadURL(url);
+    });
   });
 
   const withWebContents = Effect.fn("PreviewManager.withWebContents")(function* (
@@ -1792,7 +1937,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     const wc = yield* requireWebContents(tabId);
     yield* cancelPickElement(tabId);
     const annotationTheme = yield* Ref.get(annotationThemeRef);
-    return yield* Effect.callback<PreviewAnnotationPayload | null, PreviewManagerError>(
+    return yield* Effect.callback<PreviewAnnotationSubmissionResult | null, PreviewManagerError>(
       (resume) => {
         const cleanup = Effect.fn("PreviewManager.cleanupPickElement")(function* () {
           yield* attempt({ operation: "pickElement.cleanup", tabId, webContentsId: wc.id }, () => {
@@ -1807,14 +1952,14 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
           );
         });
         const settlePick = Effect.fn("PreviewManager.settlePickElement")(function* (
-          payload: PreviewAnnotationPayload | null,
+          payload: PreviewAnnotationSubmissionResult | null,
         ) {
           const active = (yield* Ref.get(pickSessionsRef)).get(tabId);
           if (!active || active.cancel !== cancel) return;
           yield* cleanup();
           resume(Effect.succeed(payload));
         });
-        const settle = (payload: PreviewAnnotationPayload | null) => {
+        const settle = (payload: PreviewAnnotationSubmissionResult | null) => {
           runFork(settlePick(payload));
         };
         const cancelPickSession = Effect.fn("PreviewManager.cancelPickSession")(function* () {
@@ -1844,11 +1989,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
             return;
           }
           const cropRect = normalizeCaptureRect(args[1]);
+          const submission = args[2] === "send" ? "send" : "attach";
           runFork(
             captureAnnotationScreenshot(tabId, wc, cropRect).pipe(
               Effect.matchEffect({
-                onFailure: () => Effect.sync(() => settle(payload)),
-                onSuccess: (screenshot) => Effect.sync(() => settle({ ...payload, screenshot })),
+                onFailure: () => Effect.sync(() => settle({ annotation: payload, submission })),
+                onSuccess: (screenshot) =>
+                  Effect.sync(() => settle({ annotation: { ...payload, screenshot }, submission })),
               }),
               Effect.ensuring(
                 attempt(
@@ -2041,6 +2188,20 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       createdAt,
     };
   });
+
+  // A dataURL-based capture, deliberately NOT a variant of `captureScreenshot`
+  // above: that one writes to disk and returns a path, which has no route
+  // back into the renderer as attachable image bytes (confirmed — no
+  // existing bridge method reads an artifact path back as bytes/dataURL).
+  // Reuses `captureAnnotationScreenshot`, the SAME helper `pickElement`
+  // already exercises for its own embedded screenshot, just without the
+  // DOM-picking UX around it — generic by `tabId`, no partition coupling.
+  const captureTabScreenshotDataUrl = Effect.fn("PreviewManager.captureTabScreenshotDataUrl")(
+    function* (tabId: string) {
+      const wc = yield* requireWebContents(tabId);
+      return yield* captureAnnotationScreenshot(tabId, wc, null);
+    },
+  );
 
   const capturePreviewFrame = Effect.fn("PreviewManager.capturePreviewFrame")(function* (
     tabId: string,
@@ -2519,10 +2680,12 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   });
 
   const startRecording = Effect.fn("PreviewManager.startRecording")(function* (tabId: string) {
+    yield* requireWebContents(tabId);
     yield* startFrameCapture(tabId, "recording");
   });
 
   const stopRecording = Effect.fn("PreviewManager.stopRecording")(function* (tabId: string) {
+    yield* requireWebContents(tabId);
     yield* stopFrameCapture(tabId, "recording");
   });
 
@@ -2581,23 +2744,24 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       };
     }
     const wc = webContents.fromId(tab.webContentsId);
-    return !wc || wc.isDestroyed()
-      ? {
-          available: false,
-          visible: true,
-          tabId,
-          url: null,
-          title: null,
-          loading: false,
-        }
-      : {
-          available: true,
-          visible: true,
-          tabId,
-          url: wc.getURL() || null,
-          title: wc.getTitle() || null,
-          loading: wc.isLoading(),
-        };
+    if (!wc || wc.isDestroyed()) {
+      return {
+        available: false,
+        visible: true,
+        tabId,
+        url: null,
+        title: null,
+        loading: false,
+      };
+    }
+    return {
+      available: true,
+      visible: true,
+      tabId,
+      url: wc.getURL() || null,
+      title: wc.getTitle() || null,
+      loading: wc.isLoading(),
+    };
   });
 
   const captureAutomationSnapshot = Effect.fn("PreviewManager.captureAutomationSnapshot")(
@@ -3264,6 +3428,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     automationWaitFor,
     cancelPickElement,
     captureScreenshot,
+    captureTabScreenshotDataUrl,
     closeTab,
     copyArtifactToClipboard,
     createTab,
@@ -3586,11 +3751,21 @@ export class PreviewManager extends Context.Service<
     ) => Effect.Effect<void, PreviewManagerError>;
     readonly pickElement: (
       tabId: string,
-    ) => Effect.Effect<PreviewAnnotationPayload | null, PreviewManagerError>;
+    ) => Effect.Effect<PreviewAnnotationSubmissionResult | null, PreviewManagerError>;
     readonly cancelPickElement: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly captureScreenshot: (
       tabId: string,
     ) => Effect.Effect<DesktopPreviewScreenshotArtifact, PreviewManagerError>;
+    /** A dataURL-based capture of a tab's current view — NOT a variant of
+     * `captureScreenshot` above (which writes a PNG to disk and returns a
+     * path; that shape has no route back into the renderer as attachable
+     * image bytes). Reuses the SAME internal capture helper `pickElement`
+     * already exercises for its own embedded screenshot, just without the
+     * DOM-picking UX around it: generic by `tabId`, no partition coupling,
+     * no preview-specific behaviour. */
+    readonly captureTabScreenshotDataUrl: (
+      tabId: string,
+    ) => Effect.Effect<PreviewAnnotationPayload["screenshot"], PreviewManagerError>;
     readonly revealArtifact: (path: string) => Effect.Effect<void, PreviewManagerError>;
     readonly copyArtifactToClipboard: (path: string) => Effect.Effect<void, PreviewManagerError>;
     readonly openPictureInPicture: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
@@ -3704,6 +3879,7 @@ export const make = Effect.gen(function* PreviewManagerMake() {
     pickElement: operations.pickElement,
     cancelPickElement: operations.cancelPickElement,
     captureScreenshot: operations.captureScreenshot,
+    captureTabScreenshotDataUrl: operations.captureTabScreenshotDataUrl,
     revealArtifact: operations.revealArtifact,
     copyArtifactToClipboard: operations.copyArtifactToClipboard,
     openPictureInPicture: operations.openPictureInPicture,

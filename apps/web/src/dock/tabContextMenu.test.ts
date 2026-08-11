@@ -1,5 +1,5 @@
 import type { DockviewApi, DockviewGroupPanel, IDockviewPanel } from "dockview";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { createPanelRegistry, type PanelRegistry } from "./lib/panelRegistry";
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
@@ -26,19 +26,22 @@ function fakePanel(id: string): IDockviewPanel {
 }
 
 function fakeGroup(isMaximized = false): DockviewGroupPanel {
-  return { api: { isMaximized: () => isMaximized } } as unknown as DockviewGroupPanel;
+  return {
+    api: { isMaximized: () => isMaximized, exitMaximized: () => {} },
+  } as unknown as DockviewGroupPanel;
 }
 
 function fakeApi(
   overrides: {
     getPanel?: (id: string) => unknown;
     addPanel?: (options: unknown) => void;
+    maximizeGroup?: (panel: IDockviewPanel) => void;
   } = {},
 ): DockviewApi {
   return {
     getPanel: overrides.getPanel ?? (() => undefined),
     addPanel: overrides.addPanel ?? (() => {}),
-    maximizeGroup: () => {},
+    maximizeGroup: overrides.maximizeGroup ?? (() => {}),
   } as unknown as DockviewApi;
 }
 
@@ -55,6 +58,16 @@ function findAddTabAction(
 ): (() => void) | undefined {
   const item = items.find(
     (candidate) => typeof candidate === "object" && candidate.label === `Add tab: ${title}`,
+  );
+  return item && typeof item === "object" ? item.action : undefined;
+}
+
+function findMaximizeAction(
+  items: ReturnType<typeof buildTabContextMenuItems>,
+): (() => void) | undefined {
+  const item = items.find(
+    (candidate) =>
+      typeof candidate === "object" && (candidate.label === "Maximize" || candidate.label === "Restore"),
   );
   return item && typeof item === "object" ? item.action : undefined;
 }
@@ -135,5 +148,63 @@ describe("buildTabContextMenuItems — finding #3: a re-added panel must retain 
     expect(action).toBeDefined();
     action?.();
     expect(Object.hasOwn(addPanelOptions ?? {}, "tabComponent")).toBe(false);
+  });
+});
+
+// #89/#92 (independent audit, mutation-tested, 2026-08-04): `maximizeGroup`
+// maximizes the panel's GROUP as a whole — it does not also make `panel`
+// itself the active tab within that group. This ordering (`setActive()`
+// BEFORE `api.maximizeGroup(panel)`, see the "Finding #6" comment above)
+// IS the fix for right-clicking Chat's tab and getting Files maximized
+// instead, because Files happened to be the group's active tab already.
+// Nothing pinned it: deleting the `setActive()` call, or swapping the two
+// lines' order, survived the whole suite.
+describe("buildTabContextMenuItems — finding #6: Maximize activates the right-clicked panel first", () => {
+  it("calls panel.api.setActive() BEFORE api.maximizeGroup(panel) — order, not just occurrence", () => {
+    const calls: string[] = [];
+    const setActive = vi.fn(() => calls.push("setActive"));
+    const maximizeGroup = vi.fn(() => calls.push("maximizeGroup"));
+    const panel = { id: "chat", api: { setActive } } as unknown as IDockviewPanel;
+    const registry = registryWith(stubDefinition({ id: "chat" }));
+
+    const items = buildTabContextMenuItems({
+      panel,
+      group: fakeGroup(false),
+      api: fakeApi({ maximizeGroup }),
+      registry,
+    });
+
+    const action = findMaximizeAction(items);
+    expect(action).toBeDefined();
+    action?.();
+
+    expect(setActive).toHaveBeenCalledOnce();
+    expect(maximizeGroup).toHaveBeenCalledExactlyOnceWith(panel);
+    // The effect that actually matters: setActive must run FIRST. Calling
+    // maximizeGroup(panel) before setActive() would still "call both", but
+    // would maximize the group around whichever OTHER tab was already
+    // active — silently reproducing finding #6.
+    expect(calls).toEqual(["setActive", "maximizeGroup"]);
+  });
+
+  it("does NOT call setActive or maximizeGroup when the group is already maximized (the item reads 'Restore' and exits instead)", () => {
+    const setActive = vi.fn();
+    const maximizeGroup = vi.fn();
+    const panel = { id: "chat", api: { setActive } } as unknown as IDockviewPanel;
+    const registry = registryWith(stubDefinition({ id: "chat" }));
+
+    const items = buildTabContextMenuItems({
+      panel,
+      group: fakeGroup(true),
+      api: fakeApi({ maximizeGroup }),
+      registry,
+    });
+
+    const action = findMaximizeAction(items);
+    expect(action).toBeDefined();
+    action?.();
+
+    expect(setActive).not.toHaveBeenCalled();
+    expect(maximizeGroup).not.toHaveBeenCalled();
   });
 });

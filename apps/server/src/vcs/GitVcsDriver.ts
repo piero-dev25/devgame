@@ -20,6 +20,8 @@ import {
   type VcsCreateWorktreeResult,
   type ReviewDiffPreviewInput,
   type ReviewDiffPreviewResult,
+  type ReviewDiffFileContentsInput,
+  type ReviewDiffFileContentsResult,
   type VcsInitInput,
   type VcsListRefsInput,
   type VcsListRefsResult,
@@ -166,6 +168,11 @@ export interface GitFetchRemoteInput {
   remoteName: string;
 }
 
+export interface GitRemoteExistsInput {
+  cwd: string;
+  remoteName: string;
+}
+
 export interface GitResolveRemoteTrackingCommitInput {
   cwd: string;
   refName: string;
@@ -221,6 +228,9 @@ export class GitVcsDriver extends Context.Service<
     readonly getReviewDiffPreview: (
       input: ReviewDiffPreviewInput,
     ) => Effect.Effect<ReviewDiffPreviewResult, GitCommandError>;
+    readonly getReviewDiffFileContents: (
+      input: ReviewDiffFileContentsInput,
+    ) => Effect.Effect<ReviewDiffFileContentsResult, GitCommandError>;
     readonly readConfigValue: (
       cwd: string,
       key: string,
@@ -238,6 +248,7 @@ export class GitVcsDriver extends Context.Service<
     readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
     readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
     readonly fetchRemote: (input: GitFetchRemoteInput) => Effect.Effect<void, GitCommandError>;
+    readonly remoteExists: (input: GitRemoteExistsInput) => Effect.Effect<boolean, GitCommandError>;
     readonly resolveRemoteTrackingCommit: (
       input: GitResolveRemoteTrackingCommitInput,
     ) => Effect.Effect<GitResolveRemoteTrackingCommitResult, GitCommandError>;
@@ -818,6 +829,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         ],
         allowNonZeroExit: true,
         maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
+        // Belt-and-suspenders alongside the structured `truncated` flag
+        // below: an inline marker in the patch text itself means even a
+        // raw/unparsed fallback render (getRenderablePatch's "raw" kind)
+        // shows SOMETHING at the cut point, matching
+        // getReviewDiffPreview's precedent for the same cap.
+        appendTruncationMarker: true,
       });
 
       if (result.exitCode !== 0) {
@@ -830,7 +847,12 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         });
       }
 
-      return result.stdout;
+      // Do NOT drop stdoutTruncated here — that omission is the whole bug
+      // this return shape exists to fix. A patch cut off mid-hunk at
+      // CHECKPOINT_DIFF_MAX_OUTPUT_BYTES is indistinguishable from a
+      // complete one without this flag; see VcsDiffCheckpointsResult's doc
+      // comment in VcsDriver.ts.
+      return { diff: result.stdout, truncated: result.stdoutTruncated };
     }),
 
     deleteCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.deleteCheckpointRefs")(

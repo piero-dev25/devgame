@@ -39,7 +39,15 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
   "PrimaryEnvironmentRequestError",
   {
     operation: PrimaryEnvironmentRequestOperation,
-    status: Schema.Number,
+    // `null` means no real HTTP status is known — a transport-level
+    // failure (connection refused/reset, aborted fetch, or anything else
+    // readHttpApiStatus can't classify), NEVER a fabricated guess. #87
+    // (2026-08-05, presence-authz + team-lead): this used to default to
+    // `500` here, so a request that never reached ANY server rendered
+    // identically to a genuine server-side 500 — which is exactly what
+    // sent #87 chasing a server bug for a request the server's own trace
+    // log never recorded at all. See auth.test.ts for the proof.
+    status: Schema.NullOr(Schema.Number),
     pairingLinkId: Schema.optional(Schema.String),
     sessionId: Schema.optional(Schema.String),
     cause: Schema.Defect(),
@@ -51,7 +59,7 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
     readonly pairingLinkId?: string;
     readonly sessionId?: string;
   }): PrimaryEnvironmentRequestError {
-    const status = readHttpApiStatus(input.cause) ?? 500;
+    const status = readHttpApiStatus(input.cause);
     return new PrimaryEnvironmentRequestError({
       operation: input.operation,
       status,
@@ -62,7 +70,14 @@ export class PrimaryEnvironmentRequestError extends Schema.TaggedErrorClass<Prim
   }
 
   override get message(): string {
-    return `Primary environment request failed during ${this.operation} (HTTP ${this.status}).`;
+    // Deliberately doesn't interpolate `this.cause`'s own message here —
+    // same reasoning as before this fix: an arbitrary internal Error's
+    // text (stack fragments, file paths) doesn't belong in a user-facing
+    // string. What changed is refusing to invent an HTTP status that was
+    // never observed, rather than what detail this surfaces.
+    return this.status === null
+      ? `Primary environment request failed during ${this.operation} (no response received).`
+      : `Primary environment request failed during ${this.operation} (HTTP ${this.status}).`;
   }
 }
 
@@ -307,7 +322,12 @@ function waitForBootstrapRetry(delayMs: number): Promise<void> {
 
 function isTransientBootstrapError(error: unknown): boolean {
   if (isPrimaryEnvironmentRequestError(error)) {
-    return TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
+    // `status === null` (no real HTTP status observed) preserves exactly
+    // today's behavior: a fabricated `500` was never in
+    // TRANSIENT_BOOTSTRAP_STATUS_CODES either, so this fix doesn't change
+    // whether a status-unknown failure gets retried here, only whether
+    // its message lies about being one.
+    return error.status !== null && TRANSIENT_BOOTSTRAP_STATUS_CODES.has(error.status);
   }
 
   if (error instanceof TypeError) {

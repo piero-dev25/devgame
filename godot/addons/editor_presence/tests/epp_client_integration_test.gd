@@ -48,6 +48,7 @@ func _check(name: String, condition: bool, detail: String = "") -> void:
 
 enum Stage {
 	CONNECT_AND_SEND,
+	COMMAND_ROUNDTRIP,
 	SCENARIO_CREDENTIAL,
 	SCENARIO_INTERNAL_ERROR,
 	SCENARIO_TRANSIENT,
@@ -95,6 +96,15 @@ var _scene_root: Node
 var _node_a: Node
 var _node_b: Node
 
+## Every `command_received` the happy-path client has emitted, in arrival
+## order — this test's stand-in for plugin.gd (the real EditorInterface
+## dispatcher, which cannot run headlessly; see plugin.gd's own module
+## doc). Recorded here rather than replied to immediately in the signal
+## handler so COMMAND_ROUNDTRIP's own ticking function decides exactly
+## when and how to reply — matching how a real signal consumer would.
+var _commands_received: Array[Dictionary] = []
+var _command_roundtrip_step := 0
+
 func _now() -> float:
 	return Time.get_ticks_msec() / 1000.0
 
@@ -117,6 +127,7 @@ func _initialize() -> void:
 
 	_client_happy = EppClient.new()
 	_client_happy.configure("ws://127.0.0.1:%d/editor-presence" % PORT_HAPPY_PATH, "dummy-token", "4.7.1-test")
+	_client_happy.command_received.connect(_on_command_received)
 	_client_happy.connect_now()
 
 	var credential := CloseScenario.new()
@@ -188,6 +199,8 @@ func _process(_delta: float) -> bool:
 	match _stage:
 		Stage.CONNECT_AND_SEND:
 			_tick_connect_and_send(now)
+		Stage.COMMAND_ROUNDTRIP:
+			_tick_command_roundtrip(now)
 		Stage.SCENARIO_CREDENTIAL:
 			_tick_scenario(now, _scenarios[0], Stage.SCENARIO_INTERNAL_ERROR)
 		Stage.SCENARIO_INTERNAL_ERROR:
@@ -199,6 +212,9 @@ func _process(_delta: float) -> bool:
 			return true
 
 	return false
+
+func _on_command_received(id: String, action: String, params: Dictionary) -> void:
+	_commands_received.append({"id": id, "action": action, "params": params})
 
 func _advance(stage: int) -> void:
 	_stage = stage
@@ -240,6 +256,12 @@ func _tick_connect_and_send(now: float) -> void:
 	_check("server validated a hello frame", hello_frame.has("type"), str(_server_happy.received_frames))
 	if hello_frame.has("editor"):
 		_check("hello.editor.id is 'godot'", hello_frame["editor"].get("id") == "godot", str(hello_frame))
+	if hello_frame.has("capabilities"):
+		_check(
+			"hello.capabilities advertises exactly what this build can honour (play, stop)",
+			hello_frame["capabilities"] == ["play", "stop"],
+			str(hello_frame["capabilities"]),
+		)
 
 	_check("server validated a selection frame (flat, not nested)", selection_frame.has("type"), str(_server_happy.received_frames))
 	if selection_frame.has("items"):
@@ -250,7 +272,76 @@ func _tick_connect_and_send(now: float) -> void:
 				items[0]["label"] == "Alpha" and items[1]["label"] == "Beta",
 				"%s, %s" % [items[0].get("label"), items[1].get("label")])
 
-	_advance(Stage.SCENARIO_CREDENTIAL)
+	_advance(Stage.COMMAND_ROUNDTRIP)
+
+## The real-socket half of the command round trip: task #48's spec requires
+## proof the engine actually received the frame and acted (or at least
+## replied), not merely that a function was called — see spec-editor-
+## presence-commands.md's "Test bar". This drives BOTH directions over a
+## REAL WebSocket: the fake server sends a `command` frame exactly as the
+## real T3 server would; the real (unmodified) EppClient parses it and
+## emits `command_received`; this function stands in for plugin.gd (which
+## cannot run headlessly) by replying the way plugin.gd's own dispatch
+## would for each case; the fake server then validates the REAL
+## `commandResult` bytes that arrive. What this canNOT prove —
+## EditorInterface.play_main_scene()/stop_playing_scene() actually firing
+## — is exactly the gap the addon README already names, closed only by
+## live verification.
+func _tick_command_roundtrip(now: float) -> void:
+	match _command_roundtrip_step:
+		0:
+			_server_happy.send_command("cmd-int-play", "play", {"scene": "res://main.tscn"})
+			_command_roundtrip_step = 1
+		1:
+			if _commands_received.size() < 1:
+				return
+			_check("command round trip: play command reaches the client with the right id/action/params",
+				_commands_received[0] == {
+					"id": "cmd-int-play", "action": "play", "params": {"scene": "res://main.tscn"},
+				},
+				str(_commands_received[0]),
+			)
+			# Stand-in for plugin.gd's own "play" branch — see this
+			# function's header comment for why the real EditorInterface
+			# call cannot run here.
+			_client_happy.send_command_result("cmd-int-play", true)
+			_command_roundtrip_step = 2
+		2:
+			var reply := _find_command_result(_server_happy.received_frames, "cmd-int-play")
+			if reply.is_empty():
+				return
+			_check("command round trip: server receives a valid commandResult{ok:true} for the play command",
+				reply.get("ok") == true, str(reply))
+			_server_happy.send_command("cmd-int-unsupported", "an.action.this.build.does.not.recognise")
+			_command_roundtrip_step = 3
+		3:
+			if _commands_received.size() < 2:
+				return
+			_check("command round trip: an unrecognised action still reaches the client (never dropped)",
+				_commands_received[1]["action"] == "an.action.this.build.does.not.recognise",
+				str(_commands_received[1]),
+			)
+			# Stand-in for plugin.gd's own `_:` (unsupported) branch.
+			_client_happy.send_command_result("cmd-int-unsupported", false, "unsupported_action")
+			_command_roundtrip_step = 4
+		4:
+			var reply := _find_command_result(_server_happy.received_frames, "cmd-int-unsupported")
+			if reply.is_empty():
+				return
+			_check(
+				"command round trip: server receives a valid commandResult{ok:false, error:unsupported_action}",
+				reply.get("ok") == false and reply.get("error") == "unsupported_action",
+				str(reply),
+			)
+			_check("no frames were rejected by wire-contract validation during the command round trip",
+				_server_happy.rejected_frames.is_empty(), str(_server_happy.rejected_frames))
+			_advance(Stage.SCENARIO_CREDENTIAL)
+
+func _find_command_result(frames: Array[Dictionary], id: String) -> Dictionary:
+	for frame in frames:
+		if frame.get("type") == "commandResult" and frame.get("id") == id:
+			return frame
+	return {}
 
 func _tick_scenario(now: float, scenario: CloseScenario, next_stage: int) -> void:
 	# Step 1: bring up this scenario's own server+client pair.

@@ -26,6 +26,21 @@ extends EditorPlugin
 ## tick in the idle editor, the documented fallback (spec-godot-publisher.md
 ## step 0(a)) is a Timer child with PROCESS_MODE_ALWAYS in place of
 ## set_process(true) below — everything downstream is identical either way.
+##
+## COMMANDS (task #48): this is the ONLY file with EditorInterface access,
+## so it is the only file that dispatches a `command` — EppClient parses
+## the frame and emits `command_received`, this file's `_on_command_received`
+## calls `EditorInterface.play_main_scene()` / `stop_playing_scene()` and
+## replies via `_client.send_command_result()`. `is_playing_scene()` is used
+## ONLY to avoid a redundant re-launch of an already-running scene — it is
+## NOT used to distinguish "stopped" from "paused", because it does not:
+## `is_playing_scene()` stays true while the running session is merely
+## paused via the editor's own debugger pause, so a false return means
+## "truly stopped" but a true return does not mean "definitely unpaused."
+## This addon does not implement pause/step at all (Godot has no scriptable
+## frame-step, and pause is out of this task's scope), so that distinction
+## does not need resolving here — noted so a future pause implementation
+## does not reach for this same boolean and get it wrong.
 
 const EppClientScript = preload("res://addons/editor_presence/epp_client.gd")
 const EppSelectionScript = preload("res://addons/editor_presence/epp_selection.gd")
@@ -77,6 +92,7 @@ func _enter_tree() -> void:
 		version_string,
 	)
 	_client.state_changed.connect(_on_client_state_changed)
+	_client.command_received.connect(_on_command_received)
 
 	EditorInterface.get_selection().selection_changed.connect(_on_selection_dirty)
 	scene_changed.connect(_on_scene_changed)
@@ -177,6 +193,27 @@ func _on_client_state_changed(state: int, message: String) -> void:
 func _on_retry_requested() -> void:
 	if _client != null:
 		_client.force_reconnect_now()
+
+## The only place in this addon that touches EditorInterface's play/stop
+## API — see the module doc's COMMANDS note. `action` is an open string
+## (protocol.ts never validates it either), so anything other than "play"
+## or "stop" answers `unsupported_action` rather than being dropped —
+## exactly the spec's rule for engine-side handling of an action this
+## build does not (yet) implement.
+func _on_command_received(id: String, action: String, _params: Dictionary) -> void:
+	if _client == null:
+		return
+	match action:
+		"play":
+			if not EditorInterface.is_playing_scene():
+				EditorInterface.play_main_scene()
+			_client.send_command_result(id, true)
+		"stop":
+			if EditorInterface.is_playing_scene():
+				EditorInterface.stop_playing_scene()
+			_client.send_command_result(id, true)
+		_:
+			_client.send_command_result(id, false, "unsupported_action")
 
 func _on_editor_settings_changed() -> void:
 	if _client == null:

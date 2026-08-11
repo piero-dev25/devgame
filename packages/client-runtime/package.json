@@ -55,6 +55,10 @@
       "types": "./src/state/entities.ts",
       "default": "./src/state/entities.ts"
     },
+    "./state/environmentHttpAuth": {
+      "types": "./src/state/environmentHttpAuth.ts",
+      "default": "./src/state/environmentHttpAuth.ts"
+    },
     "./state/filesystem": {
       "types": "./src/state/filesystem.ts",
       "default": "./src/state/filesystem.ts"
@@ -122,6 +126,10 @@
     "./state/threads": {
       "types": "./src/state/threads.ts",
       "default": "./src/state/threads.ts"
+    },
+    "./state/subagentRuntime": {
+      "types": "./src/state/subagentRuntime.ts",
+      "default": "./src/state/subagentRuntime.ts"
     },
     "./state/thread-sort": {
       "types": "./src/state/threadSort.ts",

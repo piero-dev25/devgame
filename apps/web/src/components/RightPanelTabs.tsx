@@ -1,6 +1,5 @@
-import type { ContextMenuItem, PreviewSessionSnapshot } from "@t3tools/contracts";
-import { getTerminalLabel } from "@t3tools/shared/terminalLabels";
-import { ClipboardList, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
+import type { ContextMenuItem } from "@t3tools/contracts";
+import { Bot, FileDiff, Files, Globe2, Plus, TerminalSquare, X } from "lucide-react";
 import {
   type MouseEvent as ReactMouseEvent,
   type ReactElement,
@@ -8,7 +7,6 @@ import {
   useCallback,
   useEffect,
   useRef,
-  useState,
 } from "react";
 
 import { isElectron } from "~/env";
@@ -18,12 +16,9 @@ import { readLocalApi } from "~/localApi";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "~/components/ui/menu";
 import { ScrollArea } from "~/components/ui/scroll-area";
-import { faviconUrlForOrigin } from "~/lib/favicon";
-import { useTheme } from "~/hooks/useTheme";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { PreviewPanelShell, type PreviewPanelMode } from "./preview/PreviewPanelShell";
-import { PierreEntryIcon } from "./chat/PierreEntryIcon";
 
 interface RightPanelTabsProps {
   mode: PreviewPanelMode;
@@ -32,18 +27,16 @@ interface RightPanelTabsProps {
   surfaces: readonly RightPanelSurface[];
   activeSurfaceId: string | null;
   pendingSurfaceIds: ReadonlySet<string>;
-  previewSessions: Readonly<Record<string, PreviewSessionSnapshot>>;
-  terminalLabelsById: ReadonlyMap<string, string>;
   onActivate: (surface: RightPanelSurface) => void;
   onCloseSurface: (surface: RightPanelSurface) => void;
   onCloseOtherSurfaces: (surface: RightPanelSurface) => void;
   onCloseSurfacesToRight: (surface: RightPanelSurface) => void;
   onCloseAllSurfaces: () => void;
-  onCopyFilePath: (relativePath: string) => void;
   onAddBrowser: () => void;
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddAgents: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -56,7 +49,7 @@ const SURFACE_DISABLED_REASONS = {
   diff: "Diff is only available for server threads in Git repositories.",
 } as const;
 
-type TabContextMenuAction = "copy-path" | "close" | "close-others" | "close-to-right" | "close-all";
+type TabContextMenuAction = "close" | "close-others" | "close-to-right" | "close-all";
 
 function DisabledReasonTooltip(props: { reason: string; trigger: ReactElement }) {
   return (
@@ -91,6 +84,7 @@ function RightPanelEmptyState(props: {
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddAgents: () => void;
   browserAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
@@ -127,6 +121,14 @@ function RightPanelEmptyState(props: {
       available: props.diffAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.diff,
       onClick: props.onAddDiff,
+    },
+    {
+      label: "Agents",
+      description: "Watch subagents and workflows run.",
+      icon: Bot,
+      available: true,
+      disabledReason: null,
+      onClick: props.onAddAgents,
     },
   ] as const;
 
@@ -186,88 +188,28 @@ function RightPanelEmptyState(props: {
   );
 }
 
-function surfaceTitle(
-  surface: RightPanelSurface,
-  sessions: Readonly<Record<string, PreviewSessionSnapshot>>,
-  terminalLabelsById: ReadonlyMap<string, string>,
-): string {
+// Task #53: this switch's LAST non-"plan" case ("preview") was removed
+// here — Browser moved to a dock panel, the fourth and final surface kind
+// promoted out of this file. The upstream merge then removed "plan" too
+// (plans render inline in the transcript now), leaving "agents" as the only
+// member of RightPanelSurface at all — see rightPanelStore.ts's own comment
+// on what that means for this store going forward.
+function surfaceTitle(surface: RightPanelSurface): string {
   switch (surface.kind) {
-    case "files":
-      return "Files";
-    case "file":
-      return surface.relativePath.slice(surface.relativePath.lastIndexOf("/") + 1);
-    case "terminal":
-      return (
-        terminalLabelsById.get(surface.activeTerminalId) ??
-        getTerminalLabel(surface.activeTerminalId)
-      );
-    case "plan":
-      return "Plan";
-    case "preview": {
-      const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
-      if (!snapshot || snapshot.navStatus._tag === "Idle") return "Browser";
-      if (snapshot.navStatus.title.trim().length > 0) return snapshot.navStatus.title;
-      try {
-        return new URL(snapshot.navStatus.url).host || "Browser";
-      } catch {
-        return "Browser";
-      }
-    }
+    case "agents":
+      return "Agents";
   }
 }
 
-function PreviewFavicon({ url }: { url: string | null }) {
-  const faviconUrl = faviconUrlForOrigin(url, 32);
-  const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  if (!faviconUrl || failedUrl === faviconUrl) return <Globe2 className="size-3.5 shrink-0" />;
-  return (
-    <img
-      src={faviconUrl}
-      alt=""
-      aria-hidden
-      draggable={false}
-      className="size-3.5 shrink-0 rounded-sm"
-      onError={() => setFailedUrl(faviconUrl)}
-    />
-  );
-}
-
-function SurfaceIcon({
-  surface,
-  sessions,
-  theme,
-}: {
-  surface: RightPanelSurface;
-  sessions: Readonly<Record<string, PreviewSessionSnapshot>>;
-  theme: "light" | "dark";
-}) {
+function SurfaceIcon({ surface }: { surface: RightPanelSurface }) {
   switch (surface.kind) {
-    case "preview": {
-      const snapshot = surface.resourceId ? sessions[surface.resourceId] : null;
-      const url = !snapshot || snapshot.navStatus._tag === "Idle" ? null : snapshot.navStatus.url;
-      return <PreviewFavicon url={url} />;
-    }
-    case "files":
-      return <Files className="size-3.5 shrink-0" />;
-    case "file":
-      return (
-        <PierreEntryIcon
-          pathValue={surface.relativePath}
-          kind="file"
-          theme={theme}
-          className="size-3.5"
-        />
-      );
-    case "terminal":
-      return <TerminalSquare className="size-3.5 shrink-0" />;
-    case "plan":
-      return <ClipboardList className="size-3.5 shrink-0" />;
+    case "agents":
+      return <Bot className="size-3.5 shrink-0" />;
   }
 }
 
 export function RightPanelTabs(props: RightPanelTabsProps) {
   const ownsDesktopTitleBar = isElectron && props.mode === "inline";
-  const { resolvedTheme } = useTheme();
   const tabListRef = useRef<HTMLDivElement>(null);
 
   const handleTabContextMenu = useCallback(
@@ -282,9 +224,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       if (surfaceIndex < 0) return;
 
       const items: ContextMenuItem<TabContextMenuAction>[] = [];
-      if (surface.kind === "file") {
-        items.push({ id: "copy-path", label: "Copy path" });
-      }
       items.push(
         { id: "close", label: "Close" },
         {
@@ -306,9 +245,6 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
 
       const action = await api.contextMenu.show(items, { x: event.clientX, y: event.clientY });
       switch (action) {
-        case "copy-path":
-          if (surface.kind === "file") props.onCopyFilePath(surface.relativePath);
-          break;
         case "close":
           props.onCloseSurface(surface);
           break;
@@ -372,7 +308,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             {props.surfaces.map((surface) => {
               const active = surface.id === props.activeSurfaceId;
               const pending = props.pendingSurfaceIds.has(surface.id);
-              const title = surfaceTitle(surface, props.previewSessions, props.terminalLabelsById);
+              const title = surfaceTitle(surface);
               return (
                 <div
                   key={surface.id}
@@ -395,11 +331,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                           className="flex min-w-0 flex-1 items-center gap-1.5"
                           onClick={() => props.onActivate(surface)}
                         >
-                          <SurfaceIcon
-                            surface={surface}
-                            sessions={props.previewSessions}
-                            theme={resolvedTheme}
-                          />
+                          <SurfaceIcon surface={surface} />
                           <span className="truncate">{title}</span>
                         </button>
                       }
@@ -467,6 +399,10 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
                     <FileDiff />
                     Diff
                   </SurfaceMenuItem>
+                  <SurfaceMenuItem available onClick={props.onAddAgents}>
+                    <Bot />
+                    Agents
+                  </SurfaceMenuItem>
                 </MenuPopup>
               </Menu>
             ) : null}
@@ -481,6 +417,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddTerminal={props.onAddTerminal}
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
+            onAddAgents={props.onAddAgents}
             browserAvailable={props.browserAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}

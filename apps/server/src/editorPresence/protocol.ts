@@ -3,9 +3,10 @@
  *
  * Transport: WebSocket, one JSON object per text frame. See
  * docs/workbench/spec-editor-presence.md for the one-way (publish/subscribe)
- * protocol writeup and docs/workbench/spec-editor-presence-commands.md
- * (frozen) for the two-way command extension this file also implements:
- * `hello` (now with `capabilities`) / `selection` / `ping` / `commandResult`
+ * protocol writeup, docs/workbench/spec-editor-presence-commands.md (frozen)
+ * for the two-way command extension, and docs/workbench/spec-unity-play-stop.md
+ * (frozen) for `playState`, this file's newest addition: `hello` (now with
+ * `capabilities`) / `selection` / `ping` / `commandResult` / `playState`
  * inbound from a publisher (an editor plugin), and the `presence` fan-out
  * frame plus the `command` frame outbound to it.
  *
@@ -101,6 +102,40 @@ export type EditorPresenceCommandOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: string };
 
+/**
+ * Play/pause/stop state a publisher reports about ITSELF, independent of
+ * `command`/`commandResult` — see spec-unity-play-stop.md's ruling
+ * ("acceptance is an edge, play state is a level"): `commandResult` only
+ * answers "did a command reach a plugin that understood it," never "is it
+ * actually playing now" — Unity's domain reload on Play/Stop entry/exit can
+ * (and, per the frozen spec, routinely does) kill the connection before any
+ * reply about the OUTCOME could be sent. Whether an engine is actually
+ * playing is reported here instead, through presence — which is already a
+ * level, republished in full on every reconnect — so the true state always
+ * arrives after a reload settles, without any caller correlating it back to
+ * the command that caused it.
+ *
+ * Deliberately a CLOSED union, unlike `action` / `editor.id` / `items[].kind`
+ * (open because third-party editors emit those without this repo's
+ * knowledge): play state is a physical concept every publisher in this repo
+ * computes from its own engine's API (`isPlaying`/`isPaused` or the
+ * equivalent) — there's no third-party-extensibility case for a fourth
+ * value, and a closed union lets a subscriber (the toolbar, task #52) switch
+ * on it exhaustively instead of needing an `else` branch for values that
+ * cannot mean anything.
+ */
+export type EditorPresencePlayState = "stopped" | "playing" | "paused";
+
+const EDITOR_PRESENCE_PLAY_STATES: ReadonlySet<string> = new Set<EditorPresencePlayState>([
+  "stopped",
+  "playing",
+  "paused",
+]);
+
+function isEditorPresencePlayState(value: unknown): value is EditorPresencePlayState {
+  return typeof value === "string" && EDITOR_PRESENCE_PLAY_STATES.has(value);
+}
+
 export interface EditorPresenceEditorIdentity {
   readonly id: string;
   readonly name: string;
@@ -131,7 +166,8 @@ export type EditorPresenceInboundFrame =
     }
   | { readonly type: "selection"; readonly selection: EditorPresenceSelection }
   | { readonly type: "ping" }
-  | ({ readonly type: "commandResult"; readonly id: string } & EditorPresenceCommandOutcome);
+  | ({ readonly type: "commandResult"; readonly id: string } & EditorPresenceCommandOutcome)
+  | { readonly type: "playState"; readonly playState: EditorPresencePlayState };
 
 export interface EditorPresenceEntry {
   readonly editor: EditorPresenceEditorIdentity;
@@ -141,6 +177,17 @@ export interface EditorPresenceEntry {
   readonly lastSeenAt: string;
   readonly selection: EditorPresenceSelection | null;
   readonly capabilities: ReadonlyArray<EditorPresenceCapability>;
+  /** The publisher's own most recently reported play/pause state, or `null`
+   * when it has never reported one — an older publisher that predates this
+   * field (same "absent means unknown, not a lie" shape `capabilities`'s
+   * empty-array default already established), or a fresh registration that
+   * hasn't sent its first `playState` frame yet (see
+   * `EditorPresenceRegistry.ts`'s `registerPublisher`, which resets this to
+   * `null` on every (re)registration — self-healing the same way `selection`
+   * does, since a `playState` frame follows immediately after `hello`). Also
+   * the correct steady state for a publisher whose `capabilities` don't
+   * include `"play"`/`"stop"` at all — there is nothing to report. */
+  readonly playState: EditorPresencePlayState | null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -324,6 +371,23 @@ function parseCommandResult(value: Record<string, unknown>): EditorPresenceInbou
 }
 
 /**
+ * `{ v:1, type:"playState", playState: "stopped"|"playing"|"paused" }` — a
+ * publisher's own report of its current play/pause state. Sent once right
+ * after `hello` on every (re)connect, per the module doc's presence-is-a-
+ * level reasoning, and again on every actual change. Dropped (not loudly
+ * rejected) on a missing or unrecognised value, matching
+ * `selection`/`ping`/`commandResult`'s existing "malformed -> silent drop"
+ * treatment: unlike `hello`, a dropped `playState` frame has no
+ * connection-establishment consequence a publisher could be unknowingly
+ * stuck in — the next correct frame (or a fresh reconnect) self-heals it,
+ * same as a dropped `selection` frame does.
+ */
+function parsePlayState(value: Record<string, unknown>): EditorPresenceInboundFrame | null {
+  if (!isEditorPresencePlayState(value.playState)) return null;
+  return { type: "playState", playState: value.playState };
+}
+
+/**
  * Parse one inbound text frame from a publisher. Returns `null` for anything
  * malformed — the caller drops the frame and keeps the connection open,
  * matching the protocol's open/lenient design rather than the strict
@@ -354,6 +418,8 @@ export function parseEditorPresenceInboundFrame(raw: string): EditorPresenceInbo
       return { type: "ping" };
     case "commandResult":
       return parseCommandResult(parsed);
+    case "playState":
+      return parsePlayState(parsed);
     default:
       return null;
   }

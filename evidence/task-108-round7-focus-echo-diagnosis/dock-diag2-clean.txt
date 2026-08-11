@@ -1,0 +1,62 @@
+12:13:36.303625  TIMELINE t=1785957216303 source=contentRenderer:onShow panelId=sidebar isConnected=false
+12:13:36.304087  TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=browser isConnected=false
+12:13:36.304445  TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=diff isConnected=false
+12:13:36.304802  TIMELINE t=1785957216304 source=contentRenderer:onShow panelId=chat isConnected=false
+12:13:36.307173  TIMELINE t=1785957216307 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:2f72113e-bf69-41ac-91dc-18ab61f22189
+12:13:36.307208  TIMELINE t=1785957216307 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat
+12:13:36.307302  TIMELINE t=1785957216307 source=contentRenderer:onHide panelId=chat isConnected=false
+12:13:36.307339  TIMELINE t=1785957216307 source=contentRenderer:onShow panelId=chat isConnected=true
+12:13:36.307379  TIMELINE t=1785957216307 source=restore-complete target=chat groupModel=chat
+12:13:36.307406  TIMELINE t=1785957216307 source=top-level panel=chat isRestoring=false
+12:14:52.650685  TIMELINE t=1785957292650 source=top-level panel=sidebar isRestoring=false
+12:14:52.665932  TIMELINE t=1785957292665 source=contentRenderer:onShow panelId=sidebar isConnected=false
+12:14:52.666378  TIMELINE t=1785957292666 source=contentRenderer:onShow panelId=browser isConnected=false
+12:14:52.666745  TIMELINE t=1785957292666 source=contentRenderer:onShow panelId=diff isConnected=false
+12:14:52.667180  TIMELINE t=1785957292667 source=contentRenderer:onShow panelId=chat isConnected=false
+12:14:52.668375  TIMELINE t=1785957292668 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01
+12:14:52.668421  TIMELINE t=1785957292668 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat
+12:14:52.668505  TIMELINE t=1785957292668 source=contentRenderer:onHide panelId=chat isConnected=false
+12:14:52.668524  TIMELINE t=1785957292668 source=contentRenderer:onShow panelId=chat isConnected=true
+12:14:52.668539  TIMELINE t=1785957292668 source=restore-complete target=chat groupModel=chat
+12:14:52.668561  TIMELINE t=1785957292668 source=top-level panel=chat isRestoring=false
+12:15:01.647901  TIMELINE t=1785957301647 source=contentRenderer:onHide panelId=diff isConnected=false
+12:15:01.659687  TIMELINE t=1785957301659 source=contentRenderer:onShow panelId=files isConnected=true
+12:15:01.662373  TIMELINE t=1785957301662 source=group:group-terminal panel=files isRestoring=false
+12:15:01.662434  TIMELINE t=1785957301662 source=top-level panel=files isRestoring=false
+12:15:07.825629  TIMELINE t=1785957307825 source=top-level panel=sidebar isRestoring=false
+12:15:07.893390  TIMELINE t=1785957307893 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:c95ca78e-8fba-487c-bdb9-1e4e029c7774
+12:15:07.893457  TIMELINE t=1785957307893 source=restore-entry rememberedPanelId=diff fallbackPanelId=chat
+12:15:07.893480  TIMELINE t=1785957307893 source=top-level panel=files isRestoring=true
+12:15:07.893571  TIMELINE t=1785957307893 source=contentRenderer:onHide panelId=files isConnected=false
+12:15:07.893621  TIMELINE t=1785957307893 source=contentRenderer:onShow panelId=diff isConnected=true
+12:15:07.896059  TIMELINE t=1785957307895 source=group:group-terminal panel=diff isRestoring=true
+12:15:07.896103  TIMELINE t=1785957307896 source=top-level panel=diff isRestoring=true
+12:15:07.896121  TIMELINE t=1785957307896 source=restore-complete target=diff groupModel=diff
+12:15:07.905190  TIMELINE t=1785957307905 source=top-level panel=chat isRestoring=false
+12:15:17.020214  TIMELINE t=1785957317020 source=top-level panel=diff isRestoring=false
+12:15:21.242268  TIMELINE t=1785957321242 source=top-level panel=sidebar isRestoring=false
+12:15:21.311700  TIMELINE t=1785957321311 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01
+12:15:21.311764  TIMELINE t=1785957321311 source=restore-entry rememberedPanelId=files fallbackPanelId=chat
+12:15:21.311787  TIMELINE t=1785957321311 source=top-level panel=diff isRestoring=true
+12:15:21.311892  TIMELINE t=1785957321311 source=contentRenderer:onHide panelId=diff isConnected=false
+12:15:21.317388  TIMELINE t=1785957321317 source=contentRenderer:onShow panelId=files isConnected=true
+12:15:21.318903  TIMELINE t=1785957321318 source=group:group-terminal panel=files isRestoring=true
+12:15:21.318943  TIMELINE t=1785957321318 source=top-level panel=files isRestoring=true
+12:15:21.318964  TIMELINE t=1785957321318 source=restore-complete target=files groupModel=files
+12:15:21.341493  TIMELINE t=1785957321341 source=top-level panel=chat isRestoring=false
+12:15:31.714594  TIMELINE t=1785957331714 source=top-level panel=sidebar isRestoring=false
+12:15:31.796082  TIMELINE t=1785957331795 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:c95ca78e-8fba-487c-bdb9-1e4e029c7774
+12:15:31.796155  TIMELINE t=1785957331795 source=restore-entry rememberedPanelId=diff fallbackPanelId=chat
+12:15:31.796178  TIMELINE t=1785957331796 source=top-level panel=files isRestoring=true
+12:15:31.796195  TIMELINE t=1785957331796 source=contentRenderer:onHide panelId=files isConnected=false
+12:15:31.796245  TIMELINE t=1785957331796 source=contentRenderer:onShow panelId=diff isConnected=true
+12:15:31.798443  TIMELINE t=1785957331798 source=group:group-terminal panel=diff isRestoring=true
+12:15:31.798483  TIMELINE t=1785957331798 source=top-level panel=diff isRestoring=true
+12:15:31.798499  TIMELINE t=1785957331798 source=restore-complete target=diff groupModel=diff
+12:15:43.026255  TIMELINE t=1785957343026 source=top-level panel=sidebar isRestoring=false
+12:15:43.091284  TIMELINE t=1785957343091 source=restoreActivePanelForCurrentThread-entry key=e8123456-0e70-4708-a552-dd4ca66259bb:b968a54f-b71d-4e7f-a953-65b2c8ce3f01
+12:15:43.091348  TIMELINE t=1785957343091 source=restore-entry rememberedPanelId=chat fallbackPanelId=chat
+12:15:43.091373  TIMELINE t=1785957343091 source=top-level panel=chat isRestoring=true
+12:15:43.091660  TIMELINE t=1785957343091 source=contentRenderer:onHide panelId=chat isConnected=false
+12:15:43.091752  TIMELINE t=1785957343091 source=contentRenderer:onShow panelId=chat isConnected=true
+12:15:43.091786  TIMELINE t=1785957343091 source=restore-complete target=chat groupModel=chat

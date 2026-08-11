@@ -19,6 +19,7 @@ type ChildProcessCommand = {
   readonly args: ReadonlyArray<string>;
   readonly options: {
     readonly shell?: boolean | string;
+    readonly detached?: boolean;
   };
 };
 
@@ -99,6 +100,49 @@ describe("runProcess", () => {
       expect(result.stdout).toBe("x".repeat(32));
       expect(result.timedOut).toBe(false);
     }),
+  );
+
+  it.effect(
+    "detached: true reaches the spawned ChildProcess's own options — UnityPipelineClient.ts's `open` relies on this so a launched Editor never ties the server request to its lifetime",
+    () => {
+      const spawner = makeSpawner((command) =>
+        Effect.sync(() => {
+          expect(command.options.detached).toBe(true);
+          return makeHandle({ stdout: "ok" });
+        }),
+      );
+
+      return runWith(spawner)({
+        command: "fake",
+        args: ["--detached"],
+        detached: true,
+      }).pipe(
+        Effect.map((result) => {
+          expect(result.stdout).toBe("ok");
+        }),
+      );
+    },
+  );
+
+  it.effect(
+    "detached left unset never adds the option at all — every existing caller's behaviour is unchanged",
+    () => {
+      const spawner = makeSpawner((command) =>
+        Effect.sync(() => {
+          expect("detached" in command.options).toBe(false);
+          return makeHandle({ stdout: "ok" });
+        }),
+      );
+
+      return runWith(spawner)({
+        command: "fake",
+        args: ["--normal"],
+      }).pipe(
+        Effect.map((result) => {
+          expect(result.stdout).toBe("ok");
+        }),
+      );
+    },
   );
 
   it.effect("runs through the ProcessRunner service", () => {

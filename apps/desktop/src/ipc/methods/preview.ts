@@ -17,6 +17,8 @@ import {
   DesktopPreviewTabInputSchema,
   DesktopPreviewWebviewConfigSchema,
   PreviewAnnotationPayloadSchema,
+  PreviewAnnotationScreenshotSchema,
+  PreviewAnnotationSubmissionResultSchema,
   PreviewAutomationSnapshot,
   PreviewAutomationStatus,
 } from "@t3tools/contracts";
@@ -227,7 +229,7 @@ export const setAnnotationTheme = DesktopIpc.makeIpcMethod({
 export const pickElement = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_PICK_ELEMENT_CHANNEL,
   payload: DesktopPreviewTabInputSchema,
-  result: Schema.NullOr(PreviewAnnotationPayloadSchema),
+  result: Schema.NullOr(PreviewAnnotationSubmissionResultSchema),
   handler: Effect.fn("desktop.ipc.preview.pickElement")(function* ({ tabId }) {
     const manager = yield* PreviewManager.PreviewManager;
     return yield* manager.pickElement(tabId);
@@ -241,6 +243,20 @@ export const captureScreenshot = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.preview.captureScreenshot")(function* ({ tabId }) {
     const manager = yield* PreviewManager.PreviewManager;
     return yield* manager.captureScreenshot(tabId);
+  }),
+});
+
+// Generic by tabId, not preview-specific — see PreviewManager.ts's own note
+// on captureTabScreenshotDataUrl for why this is not a variant of
+// captureScreenshot above (that one writes to disk and returns a path with
+// no route back into the renderer as attachable image bytes).
+export const captureTabScreenshotDataUrl = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.CAPTURE_TAB_SCREENSHOT_DATA_URL_CHANNEL,
+  payload: DesktopPreviewTabInputSchema,
+  result: Schema.NullOr(PreviewAnnotationScreenshotSchema),
+  handler: Effect.fn("desktop.ipc.preview.captureTabScreenshotDataUrl")(function* ({ tabId }) {
+    const manager = yield* PreviewManager.PreviewManager;
+    return yield* manager.captureTabScreenshotDataUrl(tabId);
   }),
 });
 
@@ -375,6 +391,7 @@ export const methods = [
   pickElement,
   cancelPickElement,
   captureScreenshot,
+  captureTabScreenshotDataUrl,
   revealArtifact,
   copyArtifactToClipboard,
   openPictureInPicture,

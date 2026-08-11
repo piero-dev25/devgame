@@ -8,7 +8,13 @@ import {
   extractTrailingEditorSelection,
   EDITOR_SELECTION_ATTACHMENT_MAX_ITEMS,
 } from "./editorSelectionContext";
-import type { EditorPresenceRenderChip } from "./store";
+import type { EditorPresenceEntry } from "./protocol";
+import {
+  deriveLiveEditorPresenceChips,
+  mergeEditorPresenceChips,
+  selectEditorPresenceChipsForProject,
+  type EditorPresenceRenderChip,
+} from "./store";
 
 function chip(overrides: Partial<EditorPresenceRenderChip> = {}): EditorPresenceRenderChip {
   return {
@@ -21,10 +27,97 @@ function chip(overrides: Partial<EditorPresenceRenderChip> = {}): EditorPresence
     editorId: "unity",
     editorName: "Unity",
     sessionId: "session-1",
+    workspaceRoot: "/repo",
     pinned: false,
     ...overrides,
   };
 }
+
+describe("the outgoing message is scoped to the thread's own project (#71)", () => {
+  function entry(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntry {
+    return {
+      editor: { id: "unity", name: "Unity", version: "6000.1" },
+      session: { id: "session-1" },
+      workspace: { root: "/repo" },
+      connected: true,
+      lastSeenAt: "2026-08-01T00:00:00.000Z",
+      selection: null,
+      capabilities: [],
+      playState: null,
+      ...overrides,
+    };
+  }
+
+  /**
+   * Drives the exact composition ChatView.tsx's send path performs: the
+   * merged snapshot EditorPresenceChips.tsx publishes for EVERY connected
+   * editor in the environment, scoped to this thread's project, then
+   * serialized.
+   *
+   * Asserts the EFFECT, not the call: what does and does not appear in the
+   * text that goes to the model. Deleting the scoping step in ChatView must
+   * make this fail.
+   */
+  function outgoingMessageFor(
+    editors: ReadonlyArray<EditorPresenceEntry>,
+    workspaceRoot: string,
+  ): string {
+    const snapshot = mergeEditorPresenceChips(deriveLiveEditorPresenceChips(editors), new Map());
+    return appendEditorSelectionToPrompt(
+      "Fix the double jump",
+      selectEditorPresenceChipsForProject(snapshot, { workspaceRoot }),
+    );
+  }
+
+  const projectA = entry({
+    session: { id: "session-a" },
+    workspace: { root: "/repo/game-a" },
+    selection: {
+      seq: 1,
+      at: "2026-08-01T00:00:00.000Z",
+      items: [
+        {
+          id: "obj-a",
+          kind: "gameObject",
+          label: "PlayerA",
+          path: "Assets/PlayerA.prefab",
+          detail: null,
+        },
+      ],
+    },
+  });
+  const projectB = entry({
+    editor: { id: "godot", name: "Godot", version: "4.3" },
+    session: { id: "session-b" },
+    workspace: { root: "/repo/game-b" },
+    selection: {
+      seq: 1,
+      at: "2026-08-01T00:00:01.000Z",
+      items: [
+        {
+          id: "obj-b",
+          kind: "node",
+          label: "SecretBossB",
+          path: "/root/SecretBossB",
+          detail: null,
+        },
+      ],
+    },
+  });
+
+  it("carries this project's selection and not another project's", () => {
+    const outgoing = outgoingMessageFor([projectA, projectB], "/repo/game-a");
+
+    expect(outgoing).toContain("PlayerA");
+    expect(outgoing).not.toContain("SecretBossB");
+  });
+
+  it("omits the block entirely when only another project's editor is selecting", () => {
+    // Not an empty `<editor_selection></editor_selection>` pair — the family's
+    // empty-input contract has to survive the scoping step.
+    expect(outgoingMessageFor([projectB], "/repo/game-a")).toBe("Fix the double jump");
+  });
+});
 
 describe("buildEditorSelectionBlock / appendEditorSelectionToPrompt", () => {
   it("attaches nothing when there is nothing selected or pinned", () => {

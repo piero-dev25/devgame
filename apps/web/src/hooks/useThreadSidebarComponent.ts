@@ -1,33 +1,27 @@
 import type { ComponentType } from "react";
 
+import LegacyThreadSidebar from "../components/LegacySidebar";
 import ThreadSidebar from "../components/Sidebar";
-import ThreadSidebarV2 from "../components/SidebarV2";
-import { useSidebarV2Enabled } from "./useSettings";
+import { useLegacySidebarEnabled } from "./useSettings";
 
 /**
  * Resolves WHICH of T3's two live sidebar content components to render —
- * `Sidebar.tsx` (v1) or `SidebarV2.tsx` — from the same `useSidebarV2Enabled()`
- * flag `AppSidebarLayout` already reads.
+ * `Sidebar.tsx` (the default; upstream #5672 promoted the v2 redesign to
+ * this name) or `LegacySidebar.tsx` (the pre-redesign sidebar, opt-in via
+ * Settings → General → Legacy features) — from the same
+ * `useLegacySidebarEnabled()` flag `AppSidebarLayout` reads.
  *
  * Extracted here (spec-dock-step-2.md, owner correction) so `AppSidebarLayout`
  * and the dock's `SidebarPanel` share ONE component-selection decision
  * instead of each hardcoding/duplicating the same ternary. The owner's
- * ruling: both sidebars are live and stay live — v1 is the production
- * default (and is additionally forced on `/settings*`, independent of the
- * flag, because it carries the settings nav), v2 is T3's in-progress
- * redesign, on by default for dev/nightly build stages and user-overridable
- * in Settings → Beta. Neither gets deleted or hardcoded away; the dock hosts
- * whichever one the flag currently selects, same as `AppSidebarLayout`
- * already does everywhere except `/settings*`.
+ * ruling: both sidebars are live and stay live — the dock hosts whichever
+ * one the flag currently selects, same as `AppSidebarLayout` does.
  *
- * `forceV1` is a parameter, not baked into this hook's own resolution,
- * because it is `AppSidebarLayout`'s own route-specific override (settings
- * nav lives only in v1), not part of what the flag itself means. The dock's
- * `SidebarPanel` never passes it — the dock never mounts on `/settings*`,
- * `AppSidebarLayout` still owns that route exclusively.
+ * The old `forceV1` option is gone with this upstream merge: `/settings*`
+ * renders upstream's dedicated `SettingsSidebarNav` and mounts no thread
+ * sidebar at all, so no route needs to override the flag any more.
  */
-export function useThreadSidebarComponent(options?: { forceV1?: boolean }): ComponentType {
-  const sidebarV2Enabled = useSidebarV2Enabled();
-  const useV2 = sidebarV2Enabled && !options?.forceV1;
-  return useV2 ? ThreadSidebarV2 : ThreadSidebar;
+export function useThreadSidebarComponent(): ComponentType {
+  const legacySidebarEnabled = useLegacySidebarEnabled();
+  return legacySidebarEnabled ? LegacyThreadSidebar : ThreadSidebar;
 }

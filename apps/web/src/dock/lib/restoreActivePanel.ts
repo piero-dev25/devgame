@@ -1,0 +1,144 @@
+import type { DockviewApi, IDockviewPanel } from "dockview";
+
+import { CHROME_PANEL_IDS, selectActivePanelForKey } from "~/dockActiveSelectionStore";
+
+/**
+ * The core decision behind restoring a thread's remembered dock selection
+ * (task #108, "dock tab selection leaks across chats") — extracted the same
+ * way `openPanel.ts`'s functions are, since this repo has no jsdom/mounted-
+ * component test infra to drive `DockviewLayout`'s own effects end-to-end
+ * (see that file's module doc, and `openPanel.ts`'s own doc comment).
+ *
+ * Root cause this closes: `DockviewLayout.tsx`'s persisted layout
+ * (`ChatDock.tsx`'s `CHAT_DOCK_WORKSPACE_ID`) is deliberately ONE shared blob
+ * across every thread — correct for the split/arrangement, but dockview's
+ * `activeGroup`/per-group `activeView` travel in that SAME blob, so "which
+ * tab is front-most" inherited a global scope it never should have. This
+ * function is what gives selection its own, per-thread answer instead.
+ *
+ * Prefers the remembered panel — but ONLY when it's still actually open in
+ * the LIVE layout right now (a thread whose remembered panel was since
+ * closed, e.g. the user closed Diff entirely, has nothing meaningful left to
+ * restore to) — falling back to `fallbackPanelId` (the caller's
+ * `activateOnChangeId`, e.g. always Chat) exactly when there's nothing
+ * better. That fallback is what keeps fix-round finding #5's original
+ * guarantee ("a thread switch always shows you something relevant, never a
+ * stale leftover panel") true for a thread with no remembered selection yet
+ * — a brand-new thread falls straight through to the same behaviour that
+ * existed before this fix.
+ *
+ * Task #108, QA round 3 reopen ("per-thread tab selection leaks when two
+ * panels share ONE dock group"): activates the panel's GROUP
+ * (`panel.group.api.setActive()`) BEFORE the panel itself
+ * (`panel.api.setActive()`), not the panel alone. Root cause this closes —
+ * traced against the installed dockview-core@7.0.4 source, not assumed:
+ * dockview's top-level `onDidActivePanelChange` only re-broadcasts a group's
+ * internal tab flip when that flip's group is ALREADY dockview's own active
+ * group (`dockviewComponent.js`'s guard: `if (event.panel !==
+ * this.activePanel) return`, where `activePanel` reads as
+ * `activeGroup?.activePanel`). Calling `panel.api.setActive()` alone, on a
+ * panel whose group isn't yet the active one, sets that group's internal
+ * active tab correctly but leaves dockview's OWN active-group pointer
+ * unchanged — so the guard above still doesn't see this group as
+ * `activeGroup`, and a later, unrelated action that finally does activate
+ * the group can re-surface whichever tab was ALSO left active there by the
+ * OTHER thread's own visit, silently overwriting the restore this function
+ * just performed. `panel.group.api.setActive()` is wired straight through to
+ * `accessor.doSetGroupActive(this)` (`gridview/gridviewPanel.js`'s
+ * `GridviewPanel` constructor, inherited by every `DockviewGroupPanel`) —
+ * activating the group first makes it dockview's `activeGroup` BEFORE the
+ * panel-level `setActive()` below runs, so the guard's `activePanel` check
+ * already points at the right group by the time it matters.
+ * `panel.group` is guarded with `?.` rather than assumed present — a fake
+ * panel in a test stub (see `restoreActivePanel.test.ts`'s `fakePanel`) may
+ * not model a group at all, and that must stay a safe no-op for the group
+ * half, not a throw.
+ *
+ * Task #108, round 6 (live QA, diagnostic-build repro): a `rememberedPanelId`
+ * that names a `CHROME_PANEL_IDS` member (`dockActiveSelectionStore.ts` —
+ * `SIDEBAR_PANEL_ID`'s own doc comment has the traced mechanism) is treated
+ * as NO ENTRY, falling straight through to `fallbackPanelId`, exactly like
+ * `rememberedPanelId: null`. This is needed on the READ side independently
+ * of the round-6 write-side filter (`recordActivePanelForKeyUnlessRestoring`):
+ * `byActivationKey` is persisted to `localStorage`
+ * (`t3code:dock-active-selection-state:v1`), so every entry the pre-fix
+ * write-side bug already clobbered to `"sidebar"` — which is most entries,
+ * given the bug fired on every thread switch — survives an app restart and
+ * would otherwise still restore to the sidebar forever, even on a build
+ * with the write-side fix, until this thread happened to get a fresh real
+ * selection recorded. Filtering on read closes that gap for every
+ * already-poisoned entry without requiring a manual `localStorage` wipe.
+ */
+export function restoreActivePanelForKey(
+  api: DockviewApi,
+  {
+    rememberedPanelId,
+    fallbackPanelId,
+  }: { rememberedPanelId: string | null; fallbackPanelId?: string },
+): void {
+  const effectiveRememberedPanelId =
+    rememberedPanelId !== null && CHROME_PANEL_IDS.has(rememberedPanelId)
+      ? null
+      : rememberedPanelId;
+  if (effectiveRememberedPanelId !== null) {
+    const panel = api.getPanel(effectiveRememberedPanelId);
+    if (panel) {
+      activatePanelInItsGroup(panel);
+      return;
+    }
+  }
+  if (fallbackPanelId !== undefined) {
+    const panel = api.getPanel(fallbackPanelId);
+    if (panel) activatePanelInItsGroup(panel);
+  }
+}
+
+/** See `restoreActivePanelForKey`'s own doc comment for why group-before-panel ordering matters. */
+function activatePanelInItsGroup(panel: IDockviewPanel): void {
+  panel.group?.api.setActive();
+  panel.api.setActive();
+}
+
+/**
+ * Combines `selectActivePanelForKey` (dockActiveSelectionStore.ts) with
+ * `restoreActivePanelForKey` above into the ONE decision `DockviewLayout.tsx`
+ * needs at BOTH of its call sites — the activation-key-change effect (a
+ * thread switch on an already-mounted dock) and `loadInitialLayout`'s own
+ * post-mount correction (F3, 2026-08-05 merge-gate review: neither
+ * `api.fromJSON(...)` nor `applyPreset`'s own `fromJSON` know about
+ * per-thread selection — they apply whatever `activeGroup`/`activeView` the
+ * shared layout blob or the static preset happened to carry — so the dock's
+ * initial mount needs the identical correction a later thread switch
+ * already gets, or the very first thread shown after a reload never has its
+ * remembered selection applied).
+ *
+ * Extracted here (not left as a component-local closure) specifically so
+ * BOTH the `String(activationKey)` conversion and the `undefined` guard —
+ * neither previously exercised by a test, since the pre-F3 test suite only
+ * ever called `restoreActivePanelForKey` with an already-computed
+ * `rememberedPanelId` — have one tested home instead of two untested
+ * inline copies.
+ *
+ * `activationKey === undefined` (no thread yet) is a silent no-op, matching
+ * `DockviewLayout.tsx`'s own `onDidActivePanelChange` write-side guard for
+ * the identical case.
+ */
+export function restoreActivePanelForThread(
+  api: DockviewApi,
+  {
+    byActivationKey,
+    activationKey,
+    fallbackPanelId,
+  }: {
+    byActivationKey: Record<string, string>;
+    activationKey: string | number | undefined;
+    fallbackPanelId?: string;
+  },
+): void {
+  if (activationKey === undefined) return;
+  const rememberedPanelId = selectActivePanelForKey(byActivationKey, String(activationKey));
+  restoreActivePanelForKey(api, {
+    rememberedPanelId,
+    ...(fallbackPanelId !== undefined ? { fallbackPanelId } : {}),
+  });
+}

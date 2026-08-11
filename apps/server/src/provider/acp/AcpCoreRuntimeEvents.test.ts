@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   makeAcpAssistantItemEvent,
   makeAcpContentDeltaEvent,
+  makeAcpImageDeltaEvent,
   makeAcpPlanUpdatedEvent,
   makeAcpRequestOpenedEvent,
   makeAcpRequestResolvedEvent,
@@ -66,6 +67,46 @@ describe("AcpCoreRuntimeEvents", () => {
         decision: "accept",
       },
     });
+  });
+
+  it("maps generic ACP permission kinds to dynamic tool approvals", () => {
+    const stamp = { eventId: "event-1" as never, createdAt: "2026-03-27T00:00:00.000Z" };
+
+    for (const kind of ["search", "fetch", "other", "unknown", "future-tool-kind"]) {
+      const permissionRequest = { kind };
+      const request = {
+        stamp,
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: "thread-1" as never,
+        turnId: TurnId.make("turn-1"),
+        requestId: RuntimeRequestId.make(`request-${kind}`),
+        permissionRequest,
+      };
+
+      expect(
+        makeAcpRequestOpenedEvent({
+          ...request,
+          detail: kind,
+          args: {},
+          source: "acp.jsonrpc",
+          method: "session/request_permission",
+          rawPayload: { sessionId: "session-1" },
+        }),
+      ).toMatchObject({
+        type: "request.opened",
+        payload: { requestType: "dynamic_tool_call" },
+      });
+
+      expect(
+        makeAcpRequestResolvedEvent({
+          ...request,
+          decision: "accept",
+        }),
+      ).toMatchObject({
+        type: "request.resolved",
+        payload: { requestType: "dynamic_tool_call" },
+      });
+    }
   });
 
   it("maps ACP core plan, tool-call, and content updates", () => {
@@ -131,6 +172,32 @@ describe("AcpCoreRuntimeEvents", () => {
       itemId: "assistant:session-1:segment:0",
       payload: {
         delta: "hello",
+      },
+    });
+
+    // Task #67: `makeAcpImageDeltaEvent` is `makeAcpContentDeltaEvent`'s
+    // sibling for the "ImageDelta" parsed event (AcpRuntimeModel.ts) — an
+    // image ACP's ContentBlock union carries inline in the assistant's own
+    // content stream.
+    expect(
+      makeAcpImageDeltaEvent({
+        stamp,
+        provider: ProviderDriverKind.make("cursor"),
+        threadId: "thread-1" as never,
+        turnId,
+        itemId: "assistant:session-1:segment:0",
+        data: "iVBORw0KGgo=",
+        mimeType: "image/png",
+        rawPayload: { sessionId: "session-1" },
+      }),
+    ).toMatchObject({
+      type: "content.delta",
+      itemId: "assistant:session-1:segment:0",
+      payload: {
+        streamKind: "assistant_image",
+        delta: "",
+        attachmentData: "iVBORw0KGgo=",
+        attachmentMimeType: "image/png",
       },
     });
 

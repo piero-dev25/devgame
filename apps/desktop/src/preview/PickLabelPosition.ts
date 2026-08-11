@@ -1,9 +1,19 @@
 /**
  * Pure clamp/flip math for the floating label that follows the cursor while
  * the user is picking an element in the in-app browser. Lives in its own
- * electron-free module so the geometry can be unit-tested without spinning
- * up an Electron preload context (`PickPreload.ts` itself imports
- * `electron` and `react-grab/primitives`, which can't load under vitest).
+ * electron-free module so the geometry can be unit-tested cheaply, without
+ * a jsdom environment or an `electron` mock in the loop at all.
+ *
+ * CORRECTED (#89/#92, independent audit, 2026-08-04): this used to say
+ * `PickPreload.ts` itself "can't load under vitest" because it imports
+ * `electron` and `react-grab/primitives`. That was never actually tested —
+ * it can: `vi.mock("electron", ...)` plus a per-file `@vitest-environment
+ * jsdom` load and exercise it fully (see `PickPreload.test.ts`, which now
+ * does). The real reason this file stays separate is unchanged and still
+ * good: this geometry is pure, needs no DOM or IPC mock at all, and
+ * splitting it out keeps ITS OWN tests running under the repo's default
+ * plain-node environment rather than paying jsdom's setup cost for math
+ * that never touches an Element.
  *
  * - Horizontally pins the label to `targetLeft`, clamped into
  *   `[VIEWPORT_MARGIN, viewportWidth - labelWidth - VIEWPORT_MARGIN]`.

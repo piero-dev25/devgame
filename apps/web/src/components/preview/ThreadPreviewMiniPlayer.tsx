@@ -8,9 +8,9 @@ import { BrowserSurfaceSlot } from "~/browser/BrowserSurfaceSlot";
 import { previewRuntimeTabId } from "~/browser/previewRuntimeTabId";
 import { Button } from "~/components/ui/button";
 import { toastManager } from "~/components/ui/toast";
-import { useThreadPreviewState } from "~/previewStateStore";
+import { BROWSER_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
+import { setActivePreviewTab, useThreadPreviewState } from "~/previewStateStore";
 import { selectThreadPreviewMiniPlayer, usePreviewMiniPlayerStore } from "~/previewMiniPlayerStore";
-import { useRightPanelStore } from "~/rightPanelStore";
 
 import { previewBridge } from "./previewBridge";
 import {
@@ -63,7 +63,14 @@ export function ThreadPreviewMiniPlayer({ threadRef, tabId, bottomInset }: Props
 
   const openInPanel = () => {
     usePreviewMiniPlayerStore.getState().close(threadRef);
-    useRightPanelStore.getState().openBrowser(threadRef, tabId);
+    // Unlike the other five open-preview call sites, no fresh snapshot is
+    // being applied here — the mini-player was already showing `tabId`,
+    // which may not be `previewStateStore`'s current `activeTabId` (the
+    // user could have switched threads/tabs elsewhere while it floated).
+    // Set it explicitly rather than relying on a side effect that isn't
+    // happening in this path.
+    setActivePreviewTab(threadRef, tabId);
+    openChatDockPanel(BROWSER_PANEL_ID);
   };
 
   const toggleNativePictureInPicture = () => {

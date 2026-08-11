@@ -6,6 +6,8 @@ import {
   getCurrentEditorPresenceChips,
   mergeEditorPresenceChips,
   publishCurrentEditorPresenceChips,
+  resolveEditorPresenceChipsView,
+  selectEditorPresenceChipsForProject,
   useEditorPresencePinStore,
   type EditorPresenceChipItem,
   type EditorPresenceRenderChip,
@@ -19,6 +21,8 @@ function entry(overrides: Partial<EditorPresenceEntry> = {}): EditorPresenceEntr
     connected: true,
     lastSeenAt: "2026-08-01T00:00:00.000Z",
     selection: null,
+    capabilities: [],
+    playState: null,
     ...overrides,
   };
 }
@@ -155,6 +159,7 @@ describe("useEditorPresencePinStore", () => {
     editorId: "unity",
     editorName: "Unity",
     sessionId: "session-1",
+    workspaceRoot: "/repo",
   };
 
   it("togglePin pins an unpinned item and unpins a pinned one", () => {
@@ -189,6 +194,7 @@ describe("mergeEditorPresenceChips", () => {
     editorId: "unity",
     editorName: "Unity",
     sessionId: "session-1",
+    workspaceRoot: "/repo",
   };
   const otherLiveItem: EditorPresenceChipItem = {
     ...liveItem,
@@ -241,6 +247,167 @@ describe("mergeEditorPresenceChips", () => {
   });
 });
 
+describe("selectEditorPresenceChipsForProject", () => {
+  function renderChip(overrides: Partial<EditorPresenceRenderChip> = {}): EditorPresenceRenderChip {
+    return {
+      id: "obj-1",
+      kind: "gameObject",
+      label: "Player",
+      path: null,
+      detail: null,
+      key: "session-1:obj-1",
+      editorId: "unity",
+      editorName: "Unity",
+      sessionId: "session-1",
+      workspaceRoot: "/repo/game-a",
+      pinned: false,
+      ...overrides,
+    };
+  }
+
+  it("keeps only the chips published by editors rooted at this project", () => {
+    const mine = renderChip({ key: "a", label: "PlayerA", workspaceRoot: "/repo/game-a" });
+    const theirs = renderChip({ key: "b", label: "BossB", workspaceRoot: "/repo/game-b" });
+
+    const selected = selectEditorPresenceChipsForProject([mine, theirs], {
+      workspaceRoot: "/repo/game-a",
+    });
+
+    expect(selected.map((chip) => chip.label)).toEqual(["PlayerA"]);
+  });
+
+  it("keeps every editor rooted at this project, not just the first", () => {
+    // Two publishers on ONE project (e.g. Godot plus a second editor) — the
+    // reason this filters chips by workspace root instead of reusing
+    // `resolveConnectedEditorForProject`, which returns only the first match.
+    const godot = renderChip({ key: "a", label: "Level", sessionId: "s1" });
+    const other = renderChip({ key: "b", label: "Material", sessionId: "s2" });
+
+    const selected = selectEditorPresenceChipsForProject([godot, other], {
+      workspaceRoot: "/repo/game-a",
+    });
+
+    expect(selected.map((chip) => chip.label)).toEqual(["Level", "Material"]);
+  });
+
+  it("normalizes a trailing slash on either side rather than reporting no match", () => {
+    const chip = renderChip({ workspaceRoot: "/repo/game-a/" });
+
+    expect(
+      selectEditorPresenceChipsForProject([chip], { workspaceRoot: "/repo/game-a" }),
+    ).toHaveLength(1);
+    expect(
+      selectEditorPresenceChipsForProject([renderChip()], { workspaceRoot: "/repo/game-a/" }),
+    ).toHaveLength(1);
+  });
+
+  it("drops a PINNED chip from another project too — a pin is not a licence to cross projects", () => {
+    const pinnedElsewhere = renderChip({
+      key: "b",
+      label: "BossB",
+      workspaceRoot: "/repo/game-b",
+      pinned: true,
+    });
+
+    expect(
+      selectEditorPresenceChipsForProject([pinnedElsewhere], { workspaceRoot: "/repo/game-a" }),
+    ).toEqual([]);
+  });
+
+  it("selects nothing when the thread has no project resolved yet", () => {
+    expect(selectEditorPresenceChipsForProject([renderChip()], null)).toEqual([]);
+  });
+});
+
+describe("resolveEditorPresenceChipsView", () => {
+  const mine: EditorPresenceChipItem = {
+    id: "obj-1",
+    kind: "gameObject",
+    label: "Player",
+    path: null,
+    detail: null,
+    key: "session-1:obj-1",
+    editorId: "unity",
+    editorName: "Unity",
+    sessionId: "session-1",
+    workspaceRoot: "/repo/game-a",
+  };
+  const theirs: EditorPresenceChipItem = {
+    ...mine,
+    id: "obj-2",
+    label: "BossB",
+    key: "session-2:obj-2",
+    sessionId: "session-2",
+    workspaceRoot: "/repo/game-b",
+  };
+
+  it("is hidden for a 'none' (non-game) project, regardless of what's live or pinned", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "none",
+    });
+
+    expect(view).toEqual({ kind: "hidden" });
+  });
+
+  it("shows the project-scoped chips for 'unknown' — the composer keeps this row mounted through that window", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine, theirs],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unknown",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: false }] });
+  });
+
+  it("shows the project-scoped chips for a concrete engine type", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine, theirs],
+      pinned: new Map(),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: false }] });
+  });
+
+  it("yields no chips (not hidden) for a null workspace root — the same 'nothing to scope to' answer selectEditorPresenceChipsForProject already gives", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [mine],
+      pinned: new Map(),
+      workspaceRoot: null,
+      engineChipState: "unknown",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [] });
+  });
+
+  it("delegates the merge to mergeEditorPresenceChips — a pinned item from THIS project survives dropping out of the live selection", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [],
+      pinned: new Map([[mine.key, mine]]),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [{ ...mine, pinned: true }] });
+  });
+
+  it("delegates the project scoping to selectEditorPresenceChipsForProject — a pin from another project is not a licence to cross", () => {
+    const view = resolveEditorPresenceChipsView({
+      liveChips: [],
+      pinned: new Map([[theirs.key, theirs]]),
+      workspaceRoot: "/repo/game-a",
+      engineChipState: "unity",
+    });
+
+    expect(view).toEqual({ kind: "chips", chips: [] });
+  });
+});
+
 describe("publishCurrentEditorPresenceChips / getCurrentEditorPresenceChips", () => {
   it("defaults to empty, and returns whatever was last published", () => {
     publishCurrentEditorPresenceChips([]);
@@ -256,6 +423,7 @@ describe("publishCurrentEditorPresenceChips / getCurrentEditorPresenceChips", ()
       editorId: "unity",
       editorName: "Unity",
       sessionId: "session-1",
+      workspaceRoot: "/repo",
       pinned: false,
     };
     publishCurrentEditorPresenceChips([chip]);

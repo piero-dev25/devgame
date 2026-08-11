@@ -1,3 +1,4 @@
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -17,6 +18,7 @@ import * as ElectronTheme from "../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import { MENU_ACTION_CHANNEL, WINDOW_FULLSCREEN_STATE_CHANNEL } from "../ipc/channels.ts";
 import * as PreviewManager from "../preview/Manager.ts";
+import { PREVIEW_WEBVIEW_PREFERENCES } from "../preview/WebviewPreferences.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 
 const TITLEBAR_HEIGHT = 40;
@@ -25,6 +27,12 @@ const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
+// Renderer crash (usually V8 OOM on long sessions) recovery: reload after a
+// short delay, at most MAX_ATTEMPTS times per rolling WINDOW so a renderer
+// that dies on boot cannot reload-loop forever.
+const RENDERER_RECOVERY_RELOAD_DELAY_MS = 500;
+const RENDERER_RECOVERY_MAX_ATTEMPTS = 3;
+const RENDERER_RECOVERY_WINDOW_MS = 60_000;
 const DEVELOPMENT_RETRYABLE_LOAD_ERROR_CODES = new Set([
   -2, // ERR_FAILED
   -7, // ERR_TIMED_OUT
@@ -188,7 +196,12 @@ function getWindowTitleBarOptions(
   if (platform === "darwin") {
     return {
       titleBarStyle: "hiddenInset",
-      trafficLightPosition: { x: 16, y: 18 },
+      // docs/specs/unified-topband.md, Section B (critique m3): y:10 for the
+      // new 36px band, not guessed — the shipped y:18 against the old 52px
+      // strip satisfies y = (band - 16) / 2 exactly ((52 - 16) / 2 = 18), so
+      // the same grounded model gives y:10 for the 36px band
+      // ((36 - 16) / 2 = 10). Screenshot-confirmed round 12.
+      trafficLightPosition: { x: 16, y: 10 },
     };
   }
 
@@ -430,17 +443,68 @@ export const make = Effect.gen(function* () {
     flushMainWindowBounds = flushBoundsPersist;
 
     yield* previewManager.setMainWindow(window);
+    // ALLOWLIST, not a style-setter: any `<webview>` whose partition doesn't
+    // match `isBrowserPartition` gets `event.preventDefault()` and never
+    // attaches at all.
     window.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-      if (
-        typeof params.partition !== "string" ||
-        !previewManager.isBrowserPartition(params.partition)
-      ) {
+      // G1 (independent security review, follow-up to F2/F3, 2026-08-04),
+      // SHIP BLOCKER, PROVEN BY EXECUTION (decompiled shipped Electron
+      // binary + a live probe): this handler used to classify from
+      // `params.partition` — the bare `partition="..."` ATTRIBUTE — but
+      // Electron actually BUILDS the guest session from
+      // `webPreferences.partition`, a different field. The webview's
+      // `webpreferences="..."` attribute is parsed with NO key allowlist
+      // and applied LAST, silently overriding `partition` (and `preload`)
+      // on the object Electron actually uses. Two independent closures
+      // below, either sufficient alone:
+      //
+      // 1. `params.webpreferences` must be BYTE-IDENTICAL to the known-good
+      //    exported constant. It contains no `partition=` or `preload=` key
+      //    (or anything else), so this alone makes a smuggled key
+      //    impossible: any extra key deviates from the constant and is
+      //    denied outright. This is also the fix for G6 — every key not in
+      //    the constant (`webviewTag=true`, `experimentalFeatures=true`,
+      //    ...) is rejected, not just the flags this handler forces below.
+      // 2. Classify from `webPreferences.partition` — the field Electron
+      //    actually uses — not `params.partition`, and fail closed if the
+      //    two disagree. (1) should already make disagreement impossible
+      //    (the constant can't move `webPreferences.partition` away from
+      //    what the `partition=` attribute set), but this doesn't lean on
+      //    that being airtight forever.
+      const webpreferencesAttr =
+        typeof params.webpreferences === "string" ? params.webpreferences : null;
+      if (webpreferencesAttr !== PREVIEW_WEBVIEW_PREFERENCES) {
+        event.preventDefault();
+        return;
+      }
+      if (params.partition !== webPreferences.partition) {
+        event.preventDefault();
+        return;
+      }
+      const partition =
+        typeof webPreferences.partition === "string" ? webPreferences.partition : null;
+      if (partition === null || !previewManager.isBrowserPartition(partition)) {
         event.preventDefault();
         return;
       }
       webPreferences.sandbox = true;
       webPreferences.nodeIntegration = false;
       webPreferences.nodeIntegrationInSubFrames = false;
+      // F2 (independent security review, 2026-08-04), VERIFIED BY
+      // EXECUTION: this handler forced only 3 of 6 security-relevant
+      // flags. Nothing SET `webSecurity`/`allowRunningInsecureContent`,
+      // but nothing FORCED them either — a `<webview disablewebsecurity>`
+      // attribute attached with `webSecurity:false`. A handler whose own
+      // comment calls itself "an ALLOWLIST, not a style-setter" needs to
+      // pin the whole posture, not just the three flags that happened to
+      // matter for the picker.
+      webPreferences.webSecurity = true;
+      webPreferences.allowRunningInsecureContent = false;
+      // Preview loads the user's OWN dev server, and its picker preload
+      // needs `contextIsolation=false` to reach the page's React DevTools
+      // hook (see WebviewPreferences.ts) — this is preview's own,
+      // main-process-controlled preload (`getPreviewConfig`'s
+      // `preloadUrl`), never left to a renderer-supplied value.
       webPreferences.contextIsolation = false;
     });
 
@@ -514,6 +578,200 @@ export const make = Effect.gen(function* () {
       }
     });
 
+    // G3/#80 (independent security review, 2026-08-04) built a
+    // same-origin-allow/cross-origin-deflect navigation guard, plus a guest
+    // context menu, for `did-attach-webview` guests, because the two
+    // listeners above are scoped to `window.webContents` — the main
+    // window's OWN content — and Electron never applies them to a
+    // `<webview>` guest's separate WebContents. Originally scoped by
+    // session identity to the third-party (Figma/Notion) panel, with
+    // preview explicitly carved OUT: "preview's guest loads the user's OWN,
+    // fully-trusted dev server."
+    //
+    // #88 (2026-08-04): that carve-out reasoning does not survive contact
+    // with what preview actually loads. A running game build routinely
+    // pulls npm packages, CDN scripts, and remote asset hosts — it is not
+    // "the user's own trusted dev server" in the sense the original
+    // exemption assumed. The webview sandbox forces means a hostile page
+    // in the panel cannot ESCALATE, but the sandbox says nothing about
+    // NAVIGATION: with no guard here, any page inside the preview panel —
+    // including a same-origin script the game itself loaded, or a
+    // cross-origin iframe it embedded — could repaint the whole panel to
+    // an arbitrary `https` URL. F5's window-open handler (`Manager.ts`'s
+    // `handlePopupNavigation`) already funnels a denied `window.open()`
+    // into a same-webview `loadURL`, so this was never just a popup-only
+    // risk (H1) — and `will-navigate` alone misses a same-origin request
+    // that then 302-redirects cross-origin (H2, `will-redirect` below).
+    //
+    // FIGMA/NOTION DELETED (owner ruling, 2026-08-04) removed this guard
+    // entirely rather than reusing it for preview, because re-scoping it
+    // from third-party identity to preview identity was flagged as a real
+    // security decision for whoever picked up `#88`, not a mechanical
+    // rename to make while deleting an unrelated feature. That decision:
+    // preview is now the ONLY guest type left, so this applies
+    // UNCONDITIONALLY to every `did-attach-webview` guest — no session
+    // check, no identity branch, nothing left to carve preview out of.
+    // Policy unchanged from the original: allow navigation that stays on
+    // the guest's CURRENT origin (a real game build is a real SPA/app that
+    // legitimately navigates within itself); DEFLECT anything cross-origin
+    // to the user's real external browser via `ElectronShell.openExternal`
+    // rather than silently blocking it, rate-limited by
+    // `ElectronShell.shouldAllowExternalDeflect` (F-3) so a hostile page
+    // can't spam external tabs by looping a navigation.
+    window.webContents.on("did-attach-webview", (_event, guestWebContents) => {
+      // FIRST-NAVIGATION EXEMPTION (owner bug report 2026-08-11: typing a
+      // URL in the Browser panel opened the user's EXTERNAL Chrome): a
+      // freshly-attached guest whose `<webview src>` was set directly to a
+      // real target URL fires `will-navigate` for that very first load
+      // while no page has committed yet, so the same-origin check below
+      // compared the target against a blank baseline and classified the
+      // app's own requested URL as a hostile cross-origin redirect,
+      // deflecting it externally. A guest with no committed page has NO
+      // origin baseline to defend: the first navigation is by construction
+      // the URL our own renderer mounted the tab with, and there is no
+      // guest-page content yet that could have initiated anything.
+      // Allowing it grants nothing an attacker doesn't already have — the
+      // IPC path (`previewBridge.navigate` -> Manager.ts `wc.loadURL`)
+      // never fires `will-navigate` at all per Electron's own semantics.
+      // Enforcement starts once a real page has COMMITTED (the latch
+      // below). Reviewed 2026-08-11 (fresh Opus security review:
+      // SHIP-WITH-CHANGES, all adopted — the latch, the F6 app-initiated
+      // in-flight exemption, the F7 budget-order swap, the F8 main-frame
+      // gate).
+      // MONOTONIC LATCH (guard security review F1, 2026-08-11): the
+      // exemption is a one-way gate armed until the guest COMMITS its
+      // first real page, tracked via `did-navigate` below rather than
+      // re-reading `getURL()` per event. A state-based blank check would
+      // re-arm if the top frame ever returned to about:blank; no exploit
+      // chain was found through that (a blank document is unscriptable by
+      // guest content), but the latch is strictly stronger, costs three
+      // lines, and drops that argument from the trust base entirely.
+      // Nothing in this app ever loads about:blank into an EXISTING guest
+      // (grep-verified), so the latch has no false-positive cost.
+      let hasCommittedRealPage = false;
+      guestWebContents.on("did-navigate", (_navEvent, committedUrl) => {
+        // A completed load also ends any app-initiated in-flight window
+        // (F6) — success or not, the redirect chain it exempted is over.
+        ElectronShell.clearAppInitiatedLoad(guestWebContents.id);
+        if (committedUrl !== "" && committedUrl !== "about:blank") {
+          hasCommittedRealPage = true;
+        }
+      });
+      guestWebContents.on("did-fail-load", () => {
+        ElectronShell.clearAppInitiatedLoad(guestWebContents.id);
+      });
+      guestWebContents.on("will-navigate", (event, url) => {
+        // F8: enforce main-frame navigations only. `will-navigate` is
+        // documented main-frame-only, but `will-redirect` (below, same
+        // policy) is not — and deflecting a SUBFRAME's cross-origin
+        // redirect (an ad, an OAuth widget) would pop external tabs while
+        // loading one ordinary page. `=== false` so fixtures/events
+        // without the field keep today's enforcement.
+        if ((event as { isMainFrame?: boolean }).isMainFrame === false) {
+          return;
+        }
+        if (!hasCommittedRealPage) {
+          return;
+        }
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        // F7: parse BEFORE consuming the deflect budget — a navigation to
+        // an un-openable scheme (about:, mailto:) must not burn the 3s
+        // cooldown and suppress a legitimate deflect behind it.
+        if (
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
+        ) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // H2 (independent security review, 2026-08-04, merge-gate): `will-
+      // navigate` only fires for the INITIAL navigation of a load — a
+      // same-origin navigation that then 302-redirects cross-origin fires
+      // `will-redirect` instead, which nothing was listening to. On its
+      // own this needs an open redirect on the guest's current origin, but
+      // it composes directly with H1/G4 — either of which can already hand
+      // an attacker that origin — so it's not an independent precondition
+      // in practice. Same policy as `will-navigate` above, not a new one:
+      // same-origin redirect target is allowed silently, cross-origin is
+      // denied and deflected, same rate limit.
+      guestWebContents.on("will-redirect", (event, url) => {
+        // Same latch exemption as `will-navigate`, for the same reason
+        // plus one more: most real sites 302 on their FIRST load (apex ->
+        // www, http -> https) before anything commits — without this,
+        // typing "google.com" passes `will-navigate` and then deflects on
+        // the redirect anyway. Additionally (F6): `will-redirect` fires
+        // for APP-INITIATED loads too (`wc.loadURL` skips `will-navigate`
+        // but not this), so a user typing a URL into a tab with a page
+        // already loaded used to deflect on the target's own redirect —
+        // the second half of the owner's bug. While Manager marks an
+        // app-initiated load in flight, its redirect chain is the server
+        // the USER asked for doing standard redirect behavior; skip
+        // enforcement until did-navigate/did-fail-load clears it.
+        if ((event as { isMainFrame?: boolean }).isMainFrame === false) {
+          return;
+        }
+        if (!hasCommittedRealPage) {
+          return;
+        }
+        if (ElectronShell.isAppInitiatedLoadInFlight(guestWebContents.id)) {
+          return;
+        }
+        if (
+          isSameOriginRendererNavigation({
+            applicationUrl: guestWebContents.getURL(),
+            navigationUrl: url,
+          })
+        ) {
+          return;
+        }
+        event.preventDefault();
+        if (
+          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
+        ) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+
+      // Minimal Cut/Copy/Paste/Select All, matching the main window's own
+      // template above. Deliberately NOT the fuller "Copy Link"/"Copy
+      // Image" affordances that template also has: nothing here closes G4
+      // (the automation-tabId issue), so adding more surface to guest
+      // content ahead of that landing would only grow the problem, not
+      // shrink it.
+      guestWebContents.on("context-menu", (event, params) => {
+        event.preventDefault();
+        const menuTemplate: Electron.MenuItemConstructorOptions[] = [
+          { role: "cut", enabled: params.editFlags.canCut },
+          { role: "copy", enabled: params.editFlags.canCopy },
+          { role: "paste", enabled: params.editFlags.canPaste },
+          { role: "selectAll", enabled: params.editFlags.canSelectAll },
+        ];
+        void runPromise(electronMenu.popupTemplate({ window, template: menuTemplate }));
+      });
+    });
+
+    // Electron's windowMenu close role owns CmdOrCtrl+W. Holding the
+    // close-terminal shortcut can outlive the terminal that handled its first
+    // press, so reject repeats before they reach the native window accelerator.
+    // Deliberate presses still flow through the renderer or native menu.
+    window.webContents.on("before-input-event", (event, input) => {
+      if (input.type !== "keyDown" || !input.isAutoRepeat) return;
+      const modifier = environment.platform === "darwin" ? input.meta : input.control;
+      if (modifier && !input.alt && !input.shift && input.key.toLowerCase() === "w") {
+        event.preventDefault();
+      }
+    });
+
     window.on("page-title-updated", (event) => {
       event.preventDefault();
       window.setTitle(environment.displayName);
@@ -537,6 +795,7 @@ export const make = Effect.gen(function* () {
 
     let developmentLoadRetryIndex = 0;
     let developmentLoadRetryFiber: Fiber.Fiber<void, never> | undefined;
+    let rendererRecoveryTimestamps: number[] = [];
     const clearDevelopmentLoadRetry = () => {
       if (developmentLoadRetryFiber === undefined) {
         return;
@@ -618,10 +877,39 @@ export const make = Effect.gen(function* () {
       },
     );
     window.webContents.on("render-process-gone", (_event, details) => {
-      void runPromise(
-        logWindowWarning("main window render process gone", {
-          reason: details.reason,
-          exitCode: details.exitCode,
+      const recoverable =
+        details.reason === "crashed" ||
+        details.reason === "oom" ||
+        details.reason === "abnormal-exit";
+      // Long sessions can OOM the renderer (V8 heap exhaustion from
+      // accumulated thread state). Without a reload the user is left staring
+      // at a dead white window while agents keep running invisibly, so
+      // recover by reloading — the renderer rehydrates from the backend,
+      // which is unaffected. Recovery attempts are bounded so a renderer
+      // that dies immediately on boot cannot reload-loop forever.
+      runFork(
+        Effect.gen(function* () {
+          const now = yield* Clock.currentTimeMillis;
+          rendererRecoveryTimestamps = rendererRecoveryTimestamps.filter(
+            (timestamp) => now - timestamp < RENDERER_RECOVERY_WINDOW_MS,
+          );
+          const shouldRecover =
+            recoverable &&
+            !window.isDestroyed() &&
+            rendererRecoveryTimestamps.length < RENDERER_RECOVERY_MAX_ATTEMPTS;
+          yield* logWindowWarning("main window render process gone", {
+            reason: details.reason,
+            exitCode: details.exitCode,
+            recovering: shouldRecover,
+          });
+          if (!shouldRecover) {
+            return;
+          }
+          rendererRecoveryTimestamps.push(now);
+          yield* Effect.sleep(RENDERER_RECOVERY_RELOAD_DELAY_MS);
+          if (!window.isDestroyed()) {
+            loadApplication();
+          }
         }),
       );
     });

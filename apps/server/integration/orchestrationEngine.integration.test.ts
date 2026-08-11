@@ -513,7 +513,8 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
-      assert.equal(incrementalDiff.includes("README.md"), true);
+      assert.equal(incrementalDiff.diff.includes("README.md"), true);
+      assert.equal(incrementalDiff.truncated, false);
 
       const fullDiff = yield* harness.checkpointStore.diffCheckpoints({
         cwd: harness.workspaceDir,
@@ -522,7 +523,8 @@ it.live("runs multi-turn file edits and persists checkpoint diffs", () =>
         fallbackFromToHead: false,
         ignoreWhitespace: false,
       });
-      assert.equal(fullDiff.includes("README.md"), true);
+      assert.equal(fullDiff.diff.includes("README.md"), true);
+      assert.equal(fullDiff.truncated, false);
 
       assert.equal(
         gitShowFileAtRef(

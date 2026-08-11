@@ -21,10 +21,13 @@ interface ParsedPresenceFrame {
       readonly seq: number;
       readonly items: ReadonlyArray<{ readonly label: string }>;
     } | null;
+    // Task #49 (spec-unity-play-stop.md): the publisher's own reported
+    // play/pause state, or null before it has reported one.
+    readonly playState: string | null;
   }>;
 }
 
-const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const parseFrame = (raw: string) => decodeUnknownJson(raw) as ParsedPresenceFrame;
 const parseCommandFrame = (raw: string) =>
   decodeUnknownJson(raw) as {
@@ -90,7 +93,9 @@ it.effect("hello + selection broadcast to every registered subscriber", () =>
       yield* registry.addSubscriber(subscriberB.send);
 
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO);
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
       yield* registry.updatePublisherSelection("session-1", token, {
         seq: 1,
         at: "2026-08-03T00:00:00.000Z",
@@ -122,7 +127,9 @@ it.effect("a later subscriber immediately sees already-connected publishers", ()
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO);
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const lateSubscriber = makeRecorder();
       const initialFrame = yield* registry.addSubscriber(lateSubscriber.send);
@@ -137,7 +144,9 @@ it.effect("an out-of-order (<=last seen) seq is dropped, not broadcast", () =>
   withRegistry((registry) =>
     Effect.gen(function* () {
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO);
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       yield* registry.addSubscriber(subscriber.send);
@@ -165,6 +174,110 @@ it.effect("an out-of-order (<=last seen) seq is dropped, not broadcast", () =>
   ),
 );
 
+// Task #49 (spec-unity-play-stop.md's ruling): play state is a LEVEL,
+// reported through presence, independent of any one command's
+// commandResult — these tests exercise the same connectionToken-guarded
+// update path `updatePublisherSelection` already has, but for `playState`.
+it.effect("a fresh registration reports playState: null until the publisher reports one", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const token = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
+
+      const subscriber = makeRecorder();
+      const initialFrame = yield* registry.addSubscriber(subscriber.send);
+      const parsed = parseFrame(initialFrame);
+      expect(parsed.editors[0]!.playState).toBeNull();
+    }),
+  ),
+);
+
+it.effect("updatePublisherPlayState broadcasts the new state to every subscriber", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const token = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
+
+      const subscriber = makeRecorder();
+      yield* registry.addSubscriber(subscriber.send);
+
+      yield* registry.updatePublisherPlayState("session-1", token, "playing");
+      const afterPlaying = parseFrame(subscriber.frames.at(-1)!);
+      expect(afterPlaying.editors[0]!.playState).toBe("playing");
+
+      // Unlike selection's seq guard, playState has no monotonic ordering —
+      // every report replaces the last one, including going "backwards"
+      // (paused -> playing is a legitimate resume, not a stale frame).
+      yield* registry.updatePublisherPlayState("session-1", token, "paused");
+      const afterPaused = parseFrame(subscriber.frames.at(-1)!);
+      expect(afterPaused.editors[0]!.playState).toBe("paused");
+    }),
+  ),
+);
+
+it.effect("a stale (superseded) connection's playState update is a silent no-op", () =>
+  withRegistry((registry) =>
+    Effect.gen(function* () {
+      const staleToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+        claimantSessionId: undefined,
+      });
+
+      const freshToken = registry.newConnectionToken();
+      yield* registry.registerPublisher("session-1", freshToken, HELLO, {
+        claimantSessionId: undefined,
+      });
+
+      const subscriber = makeRecorder();
+      yield* registry.addSubscriber(subscriber.send);
+      const framesBefore = subscriber.frames.length;
+
+      // The stale connection's late playState frame (e.g. a report that
+      // was already in flight when the reconnect/takeover happened) must
+      // not resurrect state onto the record its own connection no longer
+      // owns.
+      yield* registry.updatePublisherPlayState("session-1", staleToken, "playing");
+      expect(subscriber.frames.length).toBe(framesBefore);
+
+      const stillNull = yield* registry.addSubscriber(makeRecorder().send);
+      const parsed = parseFrame(stillNull);
+      expect(parsed.editors[0]!.playState).toBeNull();
+    }),
+  ),
+);
+
+it.effect(
+  "a reconnect (session takeover) resets playState to null until the fresh connection reports one",
+  () =>
+    withRegistry((registry) =>
+      Effect.gen(function* () {
+        const staleToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+          claimantSessionId: undefined,
+        });
+        yield* registry.updatePublisherPlayState("session-1", staleToken, "playing");
+
+        // A Unity domain reload: the OLD connection dies and a NEW one
+        // takes over the same session id — self-healing per protocol.ts's
+        // doc on `playState: null`, not a lasting regression, since the
+        // fresh connection sends its own playState frame right after hello.
+        const freshToken = registry.newConnectionToken();
+        yield* registry.registerPublisher("session-1", freshToken, HELLO, {
+          claimantSessionId: undefined,
+        });
+
+        const subscriber = makeRecorder();
+        const initialFrame = yield* registry.addSubscriber(subscriber.send);
+        const parsed = parseFrame(initialFrame);
+        expect(parsed.editors[0]!.playState).toBeNull();
+      }),
+    ),
+);
+
 it.effect(
   "reconnect with the same session id replaces the stale connection instead of duplicating it",
   () =>
@@ -174,13 +287,20 @@ it.effect(
         yield* registry.addSubscriber(subscriber.send);
 
         const staleToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("session-1", staleToken, HELLO);
+        yield* registry.registerPublisher("session-1", staleToken, HELLO, {
+          claimantSessionId: undefined,
+        });
 
         const freshToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("session-1", freshToken, {
-          ...HELLO,
-          editor: { ...HELLO.editor, name: "Unity Editor (reconnected)" },
-        });
+        yield* registry.registerPublisher(
+          "session-1",
+          freshToken,
+          {
+            ...HELLO,
+            editor: { ...HELLO.editor, name: "Unity Editor (reconnected)" },
+          },
+          { claimantSessionId: undefined },
+        );
 
         const latest = parseFrame(subscriber.frames.at(-1)!);
         expect(latest.editors).toHaveLength(1);
@@ -208,7 +328,9 @@ it.effect("removeSubscriber stops future broadcasts from reaching it", () =>
       yield* registry.removeSubscriber(subscriber.send);
 
       const token = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-1", token, HELLO);
+      yield* registry.registerPublisher("session-1", token, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       expect(subscriber.frames).toHaveLength(0);
     }),
@@ -233,13 +355,21 @@ it.effect("a new connection claiming an existing session.id closes the supersede
       };
 
       const victimToken = registry.newConnectionToken();
-      yield* registry.registerPublisher("shared-session", victimToken, HELLO, victimClose);
+      yield* registry.registerPublisher("shared-session", victimToken, HELLO, {
+        close: victimClose,
+        claimantSessionId: undefined,
+      });
 
       const attackerToken = registry.newConnectionToken();
-      yield* registry.registerPublisher("shared-session", attackerToken, {
-        editor: { id: "attacker", name: "Attacker Editor", version: "0.0.0" },
-        workspace: { root: "/not/the/victims/project" },
-      });
+      yield* registry.registerPublisher(
+        "shared-session",
+        attackerToken,
+        {
+          editor: { id: "attacker", name: "Attacker Editor", version: "0.0.0" },
+          workspace: { root: "/not/the/victims/project" },
+        },
+        { claimantSessionId: undefined },
+      );
 
       // The victim's own connection must be told — this is the "not
       // silent for either party" half of the fix.
@@ -264,10 +394,14 @@ it.effect(
     withRegistry((registry) =>
       Effect.gen(function* () {
         const victimToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("shared-session", victimToken, HELLO);
+        yield* registry.registerPublisher("shared-session", victimToken, HELLO, {
+          claimantSessionId: undefined,
+        });
 
         const attackerToken = registry.newConnectionToken();
-        yield* registry.registerPublisher("shared-session", attackerToken, HELLO);
+        yield* registry.registerPublisher("shared-session", attackerToken, HELLO, {
+          claimantSessionId: undefined,
+        });
 
         // The superseded connection's own cleanup finally runs (its
         // read-loop finalizer fires late) — the connectionToken guard
@@ -291,11 +425,15 @@ it.effect("refuses a new publisher session once at capacity, without touching ex
       const CAP = 64; // must match EditorPresenceRegistry.ts's MAX_PUBLISHERS
       for (let i = 0; i < CAP; i++) {
         const token = registry.newConnectionToken();
-        yield* registry.registerPublisher(`session-${i}`, token, HELLO);
+        yield* registry.registerPublisher(`session-${i}`, token, HELLO, {
+          claimantSessionId: undefined,
+        });
       }
 
       const overflowToken = registry.newConnectionToken();
-      yield* registry.registerPublisher("session-overflow", overflowToken, HELLO);
+      yield* registry.registerPublisher("session-overflow", overflowToken, HELLO, {
+        claimantSessionId: undefined,
+      });
 
       const subscriber = makeRecorder();
       const initialFrame = yield* registry.addSubscriber(subscriber.send);
@@ -355,7 +493,10 @@ it.effect(
       Effect.gen(function* () {
         const token = registry.newConnectionToken();
         const publisher = makeAutoReplyingPublisher(registry, token, () => ({ ok: true }));
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const outcome = yield* registry.sendCommand("session-1", "play", { sceneIndex: 0 });
 
@@ -387,7 +528,10 @@ it.effect(
           ok: false,
           error: "unsupported_action",
         }));
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const outcome = yield* registry.sendCommand(
           "session-1",
@@ -407,7 +551,10 @@ it.effect(
         const token = registry.newConnectionToken();
         const sentFrames = yield* Queue.unbounded<string>();
         const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const fiberA = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
         const frameA = parseCommandFrame(yield* Queue.take(sentFrames));
@@ -445,7 +592,10 @@ it.effect(
         // resolve fast is if the rate limit itself short-circuits before
         // ever waiting on a reply.
         const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const pendingFibers: Array<Fiber.Fiber<EditorPresenceCommandOutcome>> = [];
         for (let i = 0; i < EditorPresenceRegistry.COMMAND_RATE_LIMIT_MAX; i++) {
@@ -506,7 +656,10 @@ it.effect(
         // path to resolution, proving the bound is real rather than
         // merely documented.
         const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
         yield* Queue.take(sentFrames); // the write actually reached the engine
@@ -526,7 +679,10 @@ it.effect(
         const token = registry.newConnectionToken();
         const sentFrames = yield* Queue.unbounded<string>();
         const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
         yield* Queue.take(sentFrames); // the pending entry now exists
@@ -547,7 +703,10 @@ it.effect(
         const token = registry.newConnectionToken();
         const sentFrames = yield* Queue.unbounded<string>();
         const publisher = { send: (frame: string) => Queue.offer(sentFrames, frame) };
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         const fiber = yield* Effect.forkChild(registry.sendCommand("session-1", "play"));
         const sentFrame = parseCommandFrame(yield* Queue.take(sentFrames));
@@ -584,7 +743,10 @@ it.effect(
         // well after the command above already failed.
         const token = registry.newConnectionToken();
         const publisher = makeAutoReplyingPublisher(registry, token, () => ({ ok: true }));
-        yield* registry.registerPublisher("session-1", token, HELLO, undefined, publisher.send);
+        yield* registry.registerPublisher("session-1", token, HELLO, {
+          send: publisher.send,
+          claimantSessionId: undefined,
+        });
 
         // Give any background fiber a chance to run before asserting
         // nothing arrived — without this, a hypothetical mutant that

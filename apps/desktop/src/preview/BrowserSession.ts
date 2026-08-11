@@ -23,6 +23,10 @@ const ALLOWED_PREVIEW_PERMISSIONS: ReadonlySet<string> = new Set([
   "clipboard-sanitized-write",
   "notifications",
   "geolocation",
+  // Deliberately NOT local-fonts: preview sessions run untrusted web content,
+  // and silently granting it would hand every page the user's installed-font
+  // fingerprint (and font file bytes via FontData.blob()). The app's own font
+  // picker runs in the main window session, which is unaffected by this list.
 ]);
 
 export class BrowserSessionPartitionDerivationError extends Schema.TaggedErrorClass<BrowserSessionPartitionDerivationError>()(
@@ -107,22 +111,51 @@ export const make = Effect.gen(function* BrowserSessionMake() {
   const crypto = yield* Crypto.Crypto;
   const sessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(new Map());
 
-  const getPartition = Effect.fn("BrowserSession.getPartition")(function* (scope = "shared") {
-    const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(scope)).pipe(
-      Effect.mapError(
-        (cause) =>
-          new BrowserSessionPartitionDerivationError({
-            scope,
-            cause,
-          }),
-      ),
-    );
-    return `${PREVIEW_PARTITION_PREFIX}${Encoding.encodeHex(digest).slice(0, 20)}`;
+  const derivePartition = (prefix: string) =>
+    Effect.fn("BrowserSession.derivePartition")(function* (scope: string) {
+      const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(scope)).pipe(
+        Effect.mapError(
+          (cause) =>
+            new BrowserSessionPartitionDerivationError({
+              scope,
+              cause,
+            }),
+        ),
+      );
+      return `${prefix}${Encoding.encodeHex(digest).slice(0, 20)}`;
+    });
+
+  // G5 (independent security review, follow-up to F3, 2026-08-04): preview
+  // has MANY legitimate partitions — one per scope — so a single-string
+  // cache doesn't generalize directly; this is the Set equivalent. Every
+  // successful derivation adds its result here, and `isPartition` (below)
+  // checks membership instead of a `startsWith` prefix match. Without
+  // this, `persist:devgame-preview-anything` satisfied the prefix check
+  // for ANY suffix, and DesktopWindow.ts's `will-attach-webview` handler
+  // trusts "classified as preview" to mean "really is a preview session"
+  // backed by this process's own derivation. A webview can only plausibly
+  // request a partition AFTER the renderer has already called
+  // `getPreviewConfig` (which calls `getSession` → this derivation) for
+  // that scope, so the set is always populated before a real attach
+  // attempt could reach it.
+  const derivedPreviewPartitions = new Set<string>();
+
+  const derivePreviewPartitionForScope = derivePartition(PREVIEW_PARTITION_PREFIX);
+  const derivePreviewPartition = Effect.fn("BrowserSession.getPartition")(function* (
+    scope = "shared",
+  ) {
+    const partition = yield* derivePreviewPartitionForScope(scope);
+    derivedPreviewPartitions.add(partition);
+    return partition;
   });
 
-  const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
-    const partition = yield* getPartition(scope);
-    return yield* SynchronizedRef.modifyEffect(sessionsRef, (sessions) => {
+  const resolveSession = (
+    ref: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
+    scope: string,
+    partition: string,
+    allowedPermissions: ReadonlySet<string>,
+  ) =>
+    SynchronizedRef.modifyEffect(ref, (sessions) => {
       const existing = sessions.get(partition);
       if (existing) return Effect.succeed([existing, sessions] as const);
       return Effect.try({
@@ -134,10 +167,10 @@ export const make = Effect.gen(function* BrowserSessionMake() {
             .replace(/\s*t3code\/[\d.]+/, "");
           browserSession.setUserAgent(userAgent);
           browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-            callback(ALLOWED_PREVIEW_PERMISSIONS.has(permission));
+            callback(allowedPermissions.has(permission));
           });
           browserSession.setPermissionCheckHandler((_webContents, permission) =>
-            ALLOWED_PREVIEW_PERMISSIONS.has(permission),
+            allowedPermissions.has(permission),
           );
           const next = new Map(sessions);
           next.set(partition, browserSession);
@@ -151,11 +184,15 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           }),
       });
     });
+
+  const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
+    const partition = yield* derivePreviewPartition(scope);
+    return yield* resolveSession(sessionsRef, scope, partition, ALLOWED_PREVIEW_PERMISSIONS);
   });
 
   return BrowserSession.of({
-    getPartition,
-    isPartition: (partition) => partition.startsWith(PREVIEW_PARTITION_PREFIX),
+    getPartition: derivePreviewPartition,
+    isPartition: (partition) => derivedPreviewPartitions.has(partition),
     getSession,
     clearCookies: Effect.fn("BrowserSession.clearCookies")(function* () {
       const sessions = yield* SynchronizedRef.get(sessionsRef);

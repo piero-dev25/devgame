@@ -47,6 +47,25 @@ export { computeDuplicateSingletonPanelIds } from "./singletonGuard";
 // extracted for the same "no jsdom to drive the ref" reason as
 // decideImportedLayoutAction.
 export { openPanelInDock, togglePanelInDock } from "./openPanel";
+// dock-chrome-strip.md, Section C: the core decision behind
+// DockviewLayout.tsx's `togglePanelGroupVisibility`/`isPanelGroupVisible`/
+// `subscribePanelGroupVisibility` imperative handle actions — same
+// extraction reason as openPanelInDock/togglePanelInDock above.
+export {
+  isPanelGroupVisible,
+  subscribePanelGroupVisibility,
+  togglePanelGroupVisibility,
+} from "./openPanel";
+// Task #108: the core decision behind restoring a thread's remembered
+// active-panel selection — same "no jsdom to drive the ref" extraction
+// reason as openPanelInDock/togglePanelInDock above.
+export { restoreActivePanelForKey, restoreActivePanelForThread } from "./restoreActivePanel";
+// Task #109: which groups should be hidden from assistive tech while
+// another group is maximized — same extraction reason as the others above.
+export {
+  applyMaximizedGroupAccessibility,
+  type MaximizableGroup,
+} from "./maximizedGroupAccessibility";
 // Fix round after 7606dff45: migrates a saved layout forward when the
 // catalog has grown, instead of the workspaceId-bump-and-discard pattern
 // that used to be the only way this dock handled that case.
@@ -66,3 +85,11 @@ export {
   type PanelDefinition,
   type PanelProps,
 } from "./types";
+// docs/specs/unified-topband.md, Section A: which groups sit in the band's
+// top row and which one owns the (0,0) corner — same "no jsdom to drive
+// the ref" extraction reason as the others above.
+export {
+  computeTopBandLayout,
+  type TopBandGroupInput,
+  type TopBandLayoutResult,
+} from "./topBandLayout";

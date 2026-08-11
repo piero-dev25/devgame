@@ -65,6 +65,21 @@ func close_current_connection(code: int, reason: String) -> bool:
 func has_active_connection() -> bool:
 	return _peer != null and _peer.get_ready_state() == WebSocketPeer.STATE_OPEN
 
+## Sends a `command` frame to the current connection — the server-side half
+## of the round trip this fake exists to prove: a real EppClient, on the
+## other end of a real socket, must dispatch it and reply with a
+## `commandResult` (task #48's spec-editor-presence-commands.md). Returns
+## false (does nothing) if there is no open connection, matching
+## close_current_connection()'s own shape above.
+func send_command(id: String, action: String, params: Variant = null) -> bool:
+	if _peer == null or _peer.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		return false
+	var obj := {"v": 1, "type": "command", "id": id, "at": "2026-08-04T00:00:00.000Z", "action": action}
+	if params != null:
+		obj["params"] = params
+	_peer.send_text(JSON.stringify(obj))
+	return true
+
 func poll() -> void:
 	if _peer == null and _tcp.is_connection_available():
 		var stream: StreamPeerTCP = _tcp.take_connection()
@@ -122,6 +137,8 @@ static func validate_frame(text: String):
 			return _validate_selection(data)
 		"ping":
 			return {"type": "ping"}
+		"commandResult":
+			return _validate_command_result(data)
 		_:
 			return null
 
@@ -141,7 +158,49 @@ static func _validate_hello(data: Dictionary):
 		return null
 	if typeof(workspace) != TYPE_DICTIONARY or not _is_nonempty_string(workspace.get("root")):
 		return null
-	return {"type": "hello", "editor": editor, "session": session, "workspace": workspace}
+	# Mirrors protocol.ts's parseCapabilities: the key ABSENT means "not
+	# declared" (this fake records it as an empty array rather than the
+	# server's own DEFAULT_EDITOR_PRESENCE_CAPABILITIES default, since that
+	# default is a server-side concern this fake does not need to
+	# reproduce — the test asserts on what Godot SENT, not on what a real
+	# server would fill in for it). PRESENT but malformed (not an array, or
+	# containing a non-string/blank entry) rejects the WHOLE hello, same
+	# "fail loud" treatment as every other field here.
+	var capabilities: Array = []
+	if data.has("capabilities"):
+		var raw_capabilities = data.get("capabilities")
+		if typeof(raw_capabilities) != TYPE_ARRAY:
+			return null
+		for entry in raw_capabilities:
+			if not _is_nonempty_string(entry):
+				return null
+			capabilities.append(entry)
+	return {
+		"type": "hello",
+		"editor": editor,
+		"session": session,
+		"workspace": workspace,
+		"capabilities": capabilities,
+	}
+
+## Mirrors protocol.ts's parseCommandResult: `id` is a required non-empty
+## string (there is no id to correlate a malformed reply against, so a
+## missing one is dropped rather than partially recorded); `ok` must be a
+## real boolean; and when `ok` is false, `error` must be a non-empty
+## string — the spec's own "always a short machine-readable reason, never
+## a bare rejection" rule applies to the ENGINE's replies just as much as
+## the server's.
+static func _validate_command_result(data: Dictionary):
+	if not _is_nonempty_string(data.get("id")):
+		return null
+	var ok = data.get("ok")
+	if typeof(ok) != TYPE_BOOL:
+		return null
+	if ok:
+		return {"type": "commandResult", "id": data.get("id"), "ok": true}
+	if not _is_nonempty_string(data.get("error")):
+		return null
+	return {"type": "commandResult", "id": data.get("id"), "ok": false, "error": data.get("error")}
 
 ## THE CHECK THAT CATCHES THE UNREAL-CLASS BUG: seq/at/items must be at the
 ## TOP LEVEL of the frame, exactly as apps/server/src/editorPresence/

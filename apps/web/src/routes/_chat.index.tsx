@@ -17,6 +17,7 @@ import {
 import { useEnvironments } from "../state/environments";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
+import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
@@ -143,9 +144,30 @@ function HostedStaticOnboardingState() {
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
+        {/*
+          docs/specs/unified-topband.md, Section B (re-check against the
+          corner, per spec — SUPERSEDES the ffafc3728 strip-row reasoning
+          this comment used to carry): the old reasoning ("does not
+          double-stack against the strip") relied on the strip being IN
+          FLOW, a separate row ABOVE this content that pushed it down —
+          spatial collision was structurally impossible. The corner cell
+          that replaced the strip is `position: absolute` (`_chat.tsx`'s
+          `WorkspaceChromeStrip`), OUT of flow, so nothing pushes this
+          header down anymore: without `pt-9` (36px — the corner's own
+          height, `--workspace-topbar-height` overridden locally there) on
+          Electron, this header's own brand text would render directly
+          UNDER the corner's z-20 overlay at the same top-left pixels.
+          `isElectron`-gated, matching the corner's own gate exactly — on
+          the plain web build there is no corner to clear, and the ORIGINAL
+          `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS` narrow/mobile-viewport
+          behavior (unchanged, still `SidebarProvider`-`open`-state-driven,
+          still never fires on thread routes — see workspaceTitlebar.ts)
+          stays exactly as before.
+        */}
         <header
           className={cn(
             "border-b border-border px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5 sm:py-3",
+            isElectron && "pt-9",
             COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
           )}
         >

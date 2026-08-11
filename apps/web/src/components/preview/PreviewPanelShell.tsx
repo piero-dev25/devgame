@@ -1,6 +1,5 @@
 import { type ReactNode, useEffect, useState } from "react";
 
-import { isElectron } from "~/env";
 import { useResizableWidth } from "~/hooks/useResizableWidth";
 import { cn } from "~/lib/utils";
 
@@ -28,7 +27,6 @@ export function PreviewPanelShell(props: {
   maximized?: boolean;
   children: ReactNode;
 }) {
-  const useDragRegion = isElectron && props.mode !== "sheet" && props.mode !== "embedded";
   const isInline = props.mode === "inline";
   const maxWidth = useViewportClampedMaxWidth();
   const { width, handlers } = useResizableWidth({
@@ -54,7 +52,13 @@ export function PreviewPanelShell(props: {
       data-preview-panel-maximized={props.maximized ? "true" : "false"}
     >
       {isInline && !props.maximized ? <RightPanelResizeHandle handlers={handlers} /> : null}
-      {useDragRegion ? <div className="electron-drag-region h-0 w-full" aria-hidden /> : null}
+      {/* dock-chrome-strip.md, Section D (critique m12): the zero-height
+          `electron-drag-region` div here was dead — that class name is
+          defined nowhere in the app's CSS, so it never did anything (drag
+          or otherwise). Deleted rather than fixed: this shell's real drag
+          affordance, when it had one, was `RightPanelTabs.tsx`'s own tab
+          row (`drag-region`, kept — see that file's `ownsDesktopTitleBar`
+          conditional), not this shell. */}
       {props.children}
     </div>
   );

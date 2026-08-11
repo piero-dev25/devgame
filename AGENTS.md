@@ -1,5 +1,25 @@
 # T3 Code
 
+## DevGame: this fork
+
+This repository is **DevGame**, a fork of T3 Code (below) specialised for game development —
+Unity integration (engine detection, Play/Stop, selection chips, one-click **Setup
+Integrations**), a dockable workspace, and game-project scaffolding. See
+[ATTRIBUTION.md](./ATTRIBUTION.md) for what T3 Tools built and what we added.
+
+**Unity integration, in one paragraph:** the `unity` CLI (`brew install --cask unity-cli`) is
+Unity Technologies' own official product, not ours. `com.unity.pipeline` is Unity's own
+package, fetched from Unity's own package registry. `com.devgame.editor-presence` is ours —
+bundled inside the app and copied into the user's project. The **Setup Integrations** button in
+the engine toolbar installs both and pairs them automatically. See
+[docs/workbench/unity-integration-architecture.md](./docs/workbench/unity-integration-architecture.md)
+for the architecture, and
+[.agents/skills/unity-setup/SKILL.md](./.agents/skills/unity-setup/SKILL.md) for diagnosing and
+fixing a broken Unity setup.
+
+**Fork doctrine, in one line:** minimize divergence from upstream — we pull from
+`upstream/main` on a regular cadence and never open PRs against it.
+
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.
@@ -79,8 +99,8 @@ The most common defect in this repo is a change that works on the path you teste
 - `vp i` installs. Worktrees get this from the t3.json setup script; if module resolution looks broken, it probably did not run.
 - `vp run dev` starts server and web. In a worktree, state defaults to that worktree's gitignored `.t3`, which deliberately outranks an ambient `T3CODE_HOME` so you cannot land on shared state by accident. An explicit `--home-dir` still wins.
 - Ports derive from the worktree path and are stable across restarts, but read the real ones from the `[dev-runner]` line since occupied ports shift.
-- `--share` publishes over the tailnet. Do not open the URL when you use this, just send it to the user with the pairing code included in url
-- The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to.
+- Sharing over the tailnet is three steps: run `vp run dev --share` in the background, wait for the `pairingUrl:` line in its output, paste that full URL (token included) in your reply. Do not wire up `tailscale serve` by hand for this, and do not open the URL yourself.
+- The web app requires pairing. Hand over the pairing URL, not the bare origin. A URL without its token is useless to whoever you gave it to. If the token got consumed, mint a fresh one with `node apps/server/src/bin.ts pair` — note it carries standard scopes, while the startup URL carries admin scopes (needed for Settings → Connections management).
 - Stop what you started, by the PID you tracked. See rule 1.
 
 ## Test data

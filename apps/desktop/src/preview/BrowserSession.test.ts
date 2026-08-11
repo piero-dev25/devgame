@@ -63,6 +63,27 @@ describe("BrowserSession", () => {
     }).pipe(Effect.provide(layer)),
   );
 
+  // #89/#92 (independent audit, mutation-tested, 2026-08-04): `setUserAgent`
+  // is a `vi.fn()` in every fake session this file already builds, but
+  // nothing asserted what it was called WITH — a mutation deleting the
+  // scrub entirely, or scrubbing only one of the two tokens, survived. A
+  // regression here silently tells whatever a guest loads (the user's own
+  // dev server, but content on that server can itself embed untrusted
+  // third-party resources) that it's running inside Electron and this app
+  // specifically.
+  it.effect("scrubs Electron/x.y and t3code/x.y from the guest's User-Agent before creating the session", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const partition = yield* browserSessions.getPartition("scope-a");
+      yield* browserSessions.getSession("scope-a");
+
+      const fakeSession = sessions.get(partition);
+      // The mock's own getUserAgent returns "Mozilla/5.0 Electron/41.5.0
+      // t3code/0.0.27" (see beforeEach above) -> scrubbed to "Mozilla/5.0".
+      assert.strictEqual(fakeSession?.setUserAgent.mock.calls[0]?.[0], "Mozilla/5.0");
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect("grants clipboard-sanitized-write through both the request and check handlers", () =>
     Effect.gen(function* () {
       const browserSessions = yield* BrowserSession.BrowserSession;
@@ -189,6 +210,54 @@ describe("BrowserSession", () => {
         ]);
         assert.strictEqual(browserSession.clearCache.mock.calls.length, 1);
       }
+    }).pipe(Effect.provide(layer)),
+  );
+
+  // G5 (independent security review, follow-up to F3, 2026-08-04): F3 fixed
+  // exact matching for the third-party partition (a single fixed scope,
+  // since deleted — owner ruling, 2026-08-04) but left `isPartition` as a
+  // bare `startsWith` — preview has MANY legitimate partitions (one per
+  // scope), so a naive fix can't just cache one string the way F3 did.
+  // `<webview partition="persist:devgame-preview-anything" preload="...">`
+  // still passed this check before the fix below: any suffix satisfies
+  // `startsWith`, and DesktopWindow.ts trusts "classified as preview" to
+  // mean "really is a preview session" — so an attacker-chosen partition
+  // string with the right prefix got treated as preview and its
+  // attacker-supplied preload ran unstripped, at preview's
+  // `contextIsolation=false`. Exact-match against every scope this process
+  // has ACTUALLY derived (a Set, since there are many valid values) closes
+  // it: an attacker can't derive a NEW valid partition without knowing a
+  // scope this process would derive from, and the value is a SHA-256
+  // truncation, not guessable by suffix-guessing.
+  it.effect("isPartition rejects a lookalike that merely shares the prefix", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      yield* browserSessions.getPartition("scope-a");
+
+      assert.isFalse(browserSessions.isPartition("persist:devgame-preview-anything"));
+      assert.isFalse(browserSessions.isPartition("persist:devgame-preview-"));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("isPartition denies everything before any partition has been derived", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+
+      // Deliberately NOT calling getPartition first — nothing derived yet,
+      // so this must fail closed rather than fall back to a prefix check.
+      assert.isFalse(browserSessions.isPartition("persist:devgame-preview-anything"));
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("isPartition recognizes every distinct scope this process has actually derived", () =>
+    Effect.gen(function* () {
+      const browserSessions = yield* BrowserSession.BrowserSession;
+      const a = yield* browserSessions.getPartition("scope-a");
+      const b = yield* browserSessions.getPartition("scope-b");
+
+      assert.isTrue(browserSessions.isPartition(a));
+      assert.isTrue(browserSessions.isPartition(b));
+      assert.notStrictEqual(a, b);
     }).pipe(Effect.provide(layer)),
   );
 

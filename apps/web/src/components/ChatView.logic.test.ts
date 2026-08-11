@@ -6,10 +6,11 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { Thread, ThreadShell } from "../types";
 import {
+  resolveUnitySetupForView,
   MAX_HIDDEN_MOUNTED_PREVIEW_THREADS,
   MAX_HIDDEN_MOUNTED_TERMINAL_THREADS,
   branchMismatchKey,
@@ -19,14 +20,20 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getStartedThreadModelChangeBlockReason,
+  hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
+  resolveEngineChipState,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
+  scheduleEnvironmentReconnectWarning,
   startNewThreadForProject,
+  tryBeginUnityRaise,
+  tryBeginUnitySetupInstall,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
@@ -35,6 +42,85 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("tryBeginUnitySetupInstall", () => {
+  it("claims the first invocation and rejects re-entry until the caller releases it", () => {
+    const inFlightRef = { current: false };
+
+    expect(tryBeginUnitySetupInstall(inFlightRef)).toBe(true);
+    expect(inFlightRef.current).toBe(true);
+    expect(tryBeginUnitySetupInstall(inFlightRef)).toBe(false);
+
+    inFlightRef.current = false;
+    expect(tryBeginUnitySetupInstall(inFlightRef)).toBe(true);
+  });
+});
+
+describe("tryBeginUnityRaise", () => {
+  it("rejects re-entry until the fire-and-forget request releases its guard", () => {
+    const inFlightRef = { current: false };
+
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(true);
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(false);
+    inFlightRef.current = false;
+    expect(tryBeginUnityRaise(inFlightRef)).toBe(true);
+  });
+});
+
+describe("resolveEngineChipState", () => {
+  it("is 'unknown' when no project has resolved yet", () => {
+    expect(resolveEngineChipState(null)).toBe("unknown");
+  });
+
+  it("is 'unknown' when the project loaded but engineType is absent (an older server)", () => {
+    expect(resolveEngineChipState({})).toBe("unknown");
+  });
+
+  it("is 'none' when detection ran and matched no marker", () => {
+    expect(resolveEngineChipState({ engineType: null })).toBe("none");
+  });
+
+  it("returns the concrete engine type for a game project", () => {
+    expect(resolveEngineChipState({ engineType: "unity" })).toBe("unity");
+    expect(resolveEngineChipState({ engineType: "threejs" })).toBe("threejs");
+  });
+});
+
+describe("environment reconnect warning grace", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("shows a persistent reconnect after the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    scheduleEnvironmentReconnectWarning(showWarning);
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS - 1);
+    expect(showWarning).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(showWarning).toHaveBeenCalledOnce();
+  });
+
+  it("cancels the warning when the connection recovers during the grace period", () => {
+    vi.useFakeTimers();
+    const showWarning = vi.fn();
+
+    const cancel = scheduleEnvironmentReconnectWarning(showWarning);
+    cancel();
+    vi.advanceTimersByTime(ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+
+    expect(showWarning).not.toHaveBeenCalled();
+  });
+
+  it("does not reuse elapsed grace from another environment", () => {
+    const anotherEnvironmentId = EnvironmentId.make("environment-remote");
+
+    expect(hasEnvironmentReconnectWarningGraceElapsed(environmentId, environmentId)).toBe(true);
+    expect(hasEnvironmentReconnectWarningGraceElapsed(anotherEnvironmentId, environmentId)).toBe(
+      false,
+    );
+  });
+});
 
 function makeThread(overrides: Partial<Thread> = {}): Thread {
   return {
@@ -676,5 +762,55 @@ describe("hasServerAcknowledgedLocalDispatch", () => {
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingApproval: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, hasPendingUserInput: true })).toBe(true);
     expect(hasServerAcknowledgedLocalDispatch({ ...common, threadError: "failed" })).toBe(true);
+  });
+});
+
+// Stale-while-revalidate for the Unity setup probe — see the function's own
+// doc comment (owner flash report, 2026-08-05). Green-by-construction (the
+// function is new); the RED evidence for the behavior change lives in
+// EngineToolbar.test.tsx, whose two pre-existing pending-banner tests
+// failed against the new contract and were updated with the supersession
+// documented inline.
+describe("resolveUnitySetupForView", () => {
+  const GOOD: { facts: string } = { facts: "fresh" };
+  const OLD: { facts: string } = { facts: "old" };
+
+  it("fresh data wins and becomes the new last-good", () => {
+    expect(
+      resolveUnitySetupForView({ data: GOOD, error: undefined, isPending: false, lastGood: OLD }),
+    ).toEqual({ setup: GOOD, nextLastGood: GOOD });
+  });
+
+  it("PENDING keeps the last-good rendered — the anti-flash rule", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: undefined,
+        isPending: true,
+        lastGood: OLD,
+      }),
+    ).toEqual({ setup: OLD, nextLastGood: OLD });
+  });
+
+  it("pending with NO last-good yields null (first load — the compact spinner case)", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: undefined,
+        isPending: true,
+        lastGood: null,
+      }),
+    ).toEqual({ setup: null, nextLastGood: null });
+  });
+
+  it("ERROR is never masked by a stale answer — the failure state + Retry must surface (#106)", () => {
+    expect(
+      resolveUnitySetupForView({
+        data: undefined,
+        error: new Error("x"),
+        isPending: false,
+        lastGood: OLD,
+      }),
+    ).toEqual({ setup: null, nextLastGood: OLD });
   });
 });

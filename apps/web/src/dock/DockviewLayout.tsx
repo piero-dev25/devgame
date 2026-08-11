@@ -23,9 +23,14 @@
 // set `allowImportingTsExtensions`), and `cn` comes from `~/lib/utils`
 // instead of the source's `lib/cn.ts` (identical `(...inputs) =>
 // twMerge(...)` signature, so every call site below is unchanged).
-import { createDockview, type DockviewApi, type DockviewTheme } from "dockview";
+import {
+  createDockview,
+  type DockviewApi,
+  type DockviewGroupPanel,
+  type DockviewTheme,
+} from "dockview";
 import "dockview/dist/styles/dockview.css";
-import { RotateCcw } from "lucide-react";
+import { Minimize2, RotateCcw } from "lucide-react";
 import {
   forwardRef,
   useCallback,
@@ -39,19 +44,29 @@ import {
 import { createPortal } from "react-dom";
 
 import { Button } from "~/components/ui/button";
+import {
+  recordActivePanelForKeyUnlessRestoring,
+  useDockActiveSelectionStore,
+} from "~/dockActiveSelectionStore";
 import { cn } from "~/lib/utils";
 
 import {
+  applyMaximizedGroupAccessibility,
   buildLayoutFile,
   buildLayoutFilename,
   buildPresetSafely,
   createLocalStorageLayoutStorage,
   findUnknownPanelIds,
   isEmptyDockviewTree,
+  isPanelGroupVisible,
   migrateLoadedLayout,
   openPanelInDock,
   parseLayoutFile,
+  restoreActivePanelForThread,
+  subscribePanelGroupVisibility,
   syncFloatingConstraints,
+  computeTopBandLayout,
+  togglePanelGroupVisibility,
   togglePanelInDock,
   type LayoutPresetFactory,
   type LayoutStorage,
@@ -152,6 +167,16 @@ export interface DockviewLayoutProps {
    * together: omit both to opt out of this entirely (a future second dock
    * with no equivalent "which thing is the user looking at" concept has no
    * reason to force anything active on its own).
+   *
+   * Task #108 EXTENSION: `activateOnChangeId` is now a FALLBACK, not the
+   * unconditional target — whenever `activationKey` also has its own
+   * remembered selection (`dockActiveSelectionStore.ts`, keyed by
+   * `String(activationKey)`) AND that panel is still open, THAT wins
+   * instead. `activateOnChangeId` still fires exactly as this comment
+   * originally described for any key with no remembered selection yet (a
+   * thread visited for the first time), so finding #5's guarantee is
+   * unchanged for that case. See `restoreActivePanelForKey`
+   * (`lib/restoreActivePanel.ts`) for the actual precedence logic.
    */
   activationKey?: string | number;
   activateOnChangeId?: string;
@@ -208,6 +233,82 @@ export interface DockviewLayoutHandle {
    * that isn't in `panelRegistry` at all, same as `openPanel`.
    */
   togglePanel(id: string): void;
+  /**
+   * dock-chrome-strip.md, Section C: toggles a panel's GROUP-level dockview
+   * visibility (size-to-zero / restore-to-slot — `lib/openPanel.ts`'s
+   * `togglePanelGroupVisibility`, see its own doc for why this is NOT the
+   * same as `togglePanel` above). Generic by panel id, like `openPanel`/
+   * `togglePanel` — this component stays a generic layout engine with no
+   * sidebar-specific concept of its own; `ChatDock.tsx`/`chatDockHandle.ts`
+   * are what apply this to the sidebar panel specifically. No-op when `id`
+   * isn't currently an open panel.
+   */
+  togglePanelGroupVisibility(id: string): void;
+  /** Paired with `togglePanelGroupVisibility` — defaults to `true` when `id`
+   * isn't currently an open panel (nothing to hide). */
+  isPanelGroupVisible(id: string): boolean;
+  /** Paired with the two above: notifies `listener` with the panel's
+   * group's live visibility on every change. Returns a no-op unsubscribe
+   * when `id` isn't currently an open panel. */
+  subscribePanelGroupVisibility(id: string, listener: (isVisible: boolean) => void): () => void;
+}
+
+/**
+ * The Reset + Restore-maximized control cluster overlaid on the dock.
+ * Pulled out into its own named, exported component for one reason only —
+ * testability under QA round 2's fix (#125, see the call site's own doc
+ * comment for the full defect and the positioning fix itself): DockviewLayout
+ * only ever sets `maximizedGroupId` from the mount effect's
+ * `onDidMaximizedGroupChange` subscription, and this codebase's tests render
+ * via `renderToStaticMarkup` (no jsdom/testing-library — see
+ * `TerminalDockPanel.test.tsx`'s own doc comment), which never runs
+ * `useEffect`. There is no way to drive that state through the real
+ * `DockviewLayout` component in a test. This component takes it as a plain
+ * prop instead, so `DockControlsCluster.test.tsx` can render it directly
+ * with `maximizedGroupId` set and assert the real markup.
+ */
+export function DockControlsCluster(props: {
+  readonly maximizedGroupId: string | null;
+  readonly onReset: () => void;
+  readonly onRestoreMaximized: () => void;
+}) {
+  return (
+    <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
+      {/*
+        Task #109: dockview's own maximize (right-click a tab -> Maximize)
+        had NO visible way back — only the same right-click menu's "Restore"
+        item, or Escape (fix-round finding #6, added for the identical "no
+        way out" complaint but equally undiscoverable without already
+        knowing it exists). Rendered first (left side of this cluster) so it
+        never shifts Reset's position when it appears/disappears — Reset
+        stays flush against the cluster's own right edge either way.
+      */}
+      {props.maximizedGroupId !== null ? (
+        <Button
+          type="button"
+          variant="outline"
+          size="xs"
+          aria-label="Restore maximized panel"
+          title="Restore maximized panel"
+          onClick={props.onRestoreMaximized}
+        >
+          <Minimize2 size={14} strokeWidth={2} />
+          Restore
+        </Button>
+      ) : null}
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-xs"
+        aria-label="Reset workspace layout"
+        title="Reset workspace layout"
+        onClick={props.onReset}
+        className="text-muted-foreground hover:text-foreground"
+      >
+        <RotateCcw size={14} strokeWidth={2} />
+      </Button>
+    </div>
+  );
 }
 
 /**
@@ -272,7 +373,64 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
     const apiRef = useRef<DockviewApi | null>(null);
+    // Task #108: lets the mount effect's `onDidActivePanelChange`
+    // subscription below (set up ONCE, never re-created on a thread switch —
+    // see that effect's own comment) always persist to the CURRENT thread's
+    // key, not whichever key was live when the dock first mounted. Kept in
+    // sync by the activationKey-change effect further down, the only other
+    // place `activationKey` is read.
+    const activationKeyRef = useRef(activationKey);
+    // Task #108, round 4 (live QA, merge-gate finding F7): true for the
+    // duration of a `restoreActivePanelForCurrentThread` call — every
+    // record-side subscription below checks this and skips writing while
+    // it's true. Root cause: `restoreActivePanelForKey`'s own
+    // `panel.group.api.setActive()` call (activating the panel's group
+    // BEFORE the panel itself — see that function's doc comment) can
+    // transiently re-fire dockview's top-level `onDidActivePanelChange`
+    // carrying the group's OLD active panel, not the one restore is trying
+    // to apply: `dockviewComponent.js`'s `doSetGroupActive` override calls
+    // `fireActivePanelChange(this.activePanel)` using whichever panel was
+    // ALREADY active in the group at that instant — confirmed as a REAL,
+    // reproducible transient via a headless dockview-core@7.0.4 + jsdom
+    // repro (not just source reading; see this round's report for the
+    // script). That same repro also showed the transient is synchronously
+    // superseded, within the SAME call, by the subsequent
+    // `panel.api.setActive()` — so the store's FINAL value already comes
+    // out correct without this guard in every scenario the repro could
+    // construct. This flag is added anyway, per explicit instruction: it
+    // makes restore READ-ONLY with respect to the store by construction,
+    // removing the whole transient-wrong-write risk class rather than
+    // relying on dockview-core's own correction timing to keep bailing it
+    // out — restore never NEEDS to write, since it's only ever applying a
+    // value the store already holds.
+    const isRestoringRef = useRef(false);
+    // Task #108, round 7 (live QA, diagnostic-build repro): stamped with
+    // `Date.now()` on every activation-key change (below) — the record-side
+    // subscriptions compute `Date.now() - switchedAtRef.current` and pass it
+    // to `recordActivePanelForKeyUnlessRestoring`, which ignores anything
+    // within `SETTLE_MS` (`dockActiveSelectionStore.ts`) of the switch.
+    // Root cause this closes: T3's Chat panel autofocuses shortly after each
+    // thread's content mounts, and dockview-core's own
+    // `contentContainer.onDidFocus -> doSetGroupActive` wiring turns that
+    // focus into an unsuppressed top-level activation write 9-23ms AFTER
+    // restore completes — outside `isRestoringRef`'s synchronous window
+    // above, since the focus event is asynchronous relative to the restore
+    // call, not part of it (measured via a diagnostic build, dock-diag2,
+    // 2026-08-05 — see evidence/task-108-round7-focus-echo-diagnosis/).
+    // Anchored to the SWITCH, not the restore call, because that's the true
+    // invariant: restore, autofocus and mount churn are all machinery
+    // triggered by the SAME thread switch, not independent events that each
+    // need their own suppression window.
+    const switchedAtRef = useRef(Date.now());
     const [notice, setNotice] = useState<string | null>(null);
+    // Task #109: which group (if any) is currently maximized — drives the
+    // visible "Restore" button below. dockview's own maximize mechanism
+    // (right-click a tab -> Maximize) has NO visible affordance to get back
+    // out; the only documented ways are that same context menu's "Restore"
+    // item or Escape (fix-round finding #6, added earlier for the identical
+    // "no way out" complaint). Neither is discoverable without already
+    // knowing it exists — this button is the third, visible one.
+    const [maximizedGroupId, setMaximizedGroupId] = useState<string | null>(null);
     // When the saved layout was refused because it's a *newer* schema version
     // than this build understands, the automatic save must not overwrite it
     // with a current-version file the instant the user touches anything —
@@ -320,22 +478,76 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [storage]);
 
-    // Fix round, finding #5: brings `activateOnChangeId`'s panel (Chat, from
-    // ChatDock.tsx) to the front of its group whenever `activationKey`
-    // (that route's thread identity) changes — including on this
-    // component's OWN first render, which naturally no-ops harmlessly if
-    // `apiRef.current` isn't populated yet (nothing has loaded to activate)
-    // or if the panel isn't open. Deliberately NOT part of the main mount
-    // effect below: that effect intentionally does NOT re-run on a thread
-    // switch (see ChatDock.tsx's own doc on why the dock must not remount
-    // when the route's thread changes) — this needs the opposite behaviour,
-    // firing on EVERY thread switch while touching nothing else about the
-    // live dockview instance.
+    // Fix round, finding #5, EXTENDED for task #108 ("dock tab selection
+    // leaks across chats") and F3 (2026-08-05, merge-gate review): brings
+    // THIS thread's own remembered selection (`dockActiveSelectionStore.ts`,
+    // written by the mount effect's `onDidActivePanelChange` subscription
+    // below) to the front of its group if it has one and that panel is
+    // still open; otherwise `activateOnChangeId`'s panel (Chat), the
+    // original fix-round #5 behaviour, unchanged for a thread with no
+    // remembered selection yet (never visited before) — see
+    // `restoreActivePanelForKey`'s own doc comment for why that precedence,
+    // not a flag, is what keeps #5's original guarantee true. Takes `api`
+    // directly (not read from `apiRef.current` internally) so the SAME
+    // function serves two call sites with different timing: the
+    // activation-key-change effect below (`api` already lives in
+    // `apiRef.current` there) AND `loadInitialLayout`'s own correction
+    // inside the mount effect further down (`api` is a fresh local variable
+    // there — `apiRef.current` isn't assigned until AFTER `createDockview`
+    // returns, later in that same effect).
+    //
+    // F3 root cause this closes: `activationKeyRef.current` is what makes
+    // this safe to call from `loadInitialLayout` — it's set by the
+    // activation-key effect below, which (by React's declaration-order
+    // effect execution) always runs BEFORE the mount effect within the same
+    // commit, even on this component's very first render, when the mount
+    // effect hasn't assigned `apiRef.current` yet and that effect's own
+    // `api`-dependent branch below no-ops for exactly that reason.
+    const restoreActivePanelForCurrentThread = useCallback(
+      (api: DockviewApi) => {
+        // See `isRestoringRef`'s own declaration above for the round-4 (F7)
+        // reasoning — every write this call's own `setActive()`s trigger,
+        // right or transiently wrong, is suppressed; a `finally` so a throw
+        // inside restore can't leave the guard stuck on.
+        isRestoringRef.current = true;
+        try {
+          restoreActivePanelForThread(api, {
+            byActivationKey: useDockActiveSelectionStore.getState().byActivationKey,
+            activationKey: activationKeyRef.current,
+            ...(activateOnChangeId !== undefined ? { fallbackPanelId: activateOnChangeId } : {}),
+          });
+        } finally {
+          isRestoringRef.current = false;
+        }
+      },
+      [activateOnChangeId],
+    );
+
+    // Whenever `activationKey` (that route's thread identity) changes —
+    // including on this component's OWN first render, which naturally
+    // no-ops harmlessly if `apiRef.current` isn't populated yet (nothing
+    // has loaded to activate; `loadInitialLayout`'s own correction below
+    // covers that first-mount case instead, once the dock actually
+    // exists) — restore this thread's own panel selection.
+    //
+    // Deliberately NOT part of the main mount effect below: that effect
+    // intentionally does NOT re-run on a thread switch (see ChatDock.tsx's
+    // own doc on why the dock must not remount when the route's thread
+    // changes) — this needs the opposite behaviour, firing on EVERY thread
+    // switch while touching nothing else about the live dockview instance.
     useEffect(() => {
-      if (activateOnChangeId === undefined) return;
-      apiRef.current?.getPanel(activateOnChangeId)?.api.setActive();
-      // Deliberately `activateOnChangeId`-less deps — it's a caller-supplied
-      // constant (ChatDock.tsx passes the same panel id every render); only
+      activationKeyRef.current = activationKey;
+      // See `switchedAtRef`'s own declaration above — stamped on EVERY
+      // activation-key change (including this effect's first, mount-time
+      // run), not just when a restore is about to fire, so the settle
+      // window covers the switch itself, not merely restore's own duration.
+      switchedAtRef.current = Date.now();
+      const api = apiRef.current;
+      if (!api || activationKey === undefined) return;
+      restoreActivePanelForCurrentThread(api);
+      // Deliberately `restoreActivePanelForCurrentThread`-less deps — same
+      // "stable caller-supplied identity" reasoning that function's own
+      // `useCallback` already applies to `activateOnChangeId`; only
       // `activationKey`'s IDENTITY is meant to retrigger this.
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activationKey]);
@@ -448,8 +660,46 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           createReactTabRenderer(options.name !== TAB_COMPONENT_NO_CLOSE),
         getTabContextMenuItems: ({ panel, group }) =>
           buildTabContextMenuItems({ panel, group, api, registry: panelRegistry }),
+        // docs/specs/unified-topband.md, Section A (critique B2 — this was
+        // NOT set before rev 4; grep proves it): kills the shift+drag
+        // float-detach gesture everywhere (band or not) and removes "Float"
+        // from tab context menus. Owner ruling recorded here, not just in
+        // the spec: floating windows were never part of this fork's dock
+        // design, and this is what the owner's original complaint ("empty
+        // space starts a dockview group drag, which renders a 'multiple
+        // panels sort of view'") actually names. Reversible in one line.
+        disableFloatingGroups: true,
       });
       apiRef.current = api;
+
+      // docs/specs/unified-topband.md, Section A: defense-in-depth for the
+      // web build (no Electron app-region) and any pointer-backend path
+      // where app-region is absent or inert. CAPTURE phase so this runs
+      // before dockview's own bubble-phase dragstart listener on the void
+      // container's own element (dnd/backend.js's Html5DragSource — checks
+      // `event.defaultPrevented` FIRST, before calling `getData()`, which is
+      // what populates `LocalSelectionTransfer` — confirmed against the
+      // installed dockview-core@7.0.4 dist/esm source, not assumed). Scoped
+      // to band void containers only via the same `data-dv-topband`
+      // ancestor stamp dockviewTheme.css's CSS rules key off — a band tab
+      // itself must keep firing its own drag (tab-to-tab reorder / drag onto
+      // another group's tab, acceptance check 2), so this must NOT catch
+      // `.dv-tab` dragstarts, only `.dv-void-container` ones. Red-first
+      // headless proof against the real dockview-core@7.0.4 dist/esm build
+      // (not just source reading): evidence/task-137-topband-headless-repro/
+      // — same jsdom+dockview harness precedent as
+      // evidence/task-108-f7-headless-repro/, run against a dock with NO
+      // guard installed first (asserts the drag DOES leak, proving the repro
+      // exercises the real path) and then WITH this exact logic installed
+      // (asserts defaultPrevented + empty LocalSelectionTransfer).
+      const handleTopBandDragStartCapture = (event: DragEvent) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (target.closest("[data-dv-topband] .dv-void-container")) {
+          event.preventDefault();
+        }
+      };
+      container.addEventListener("dragstart", handleTopBandDragStartCapture, true);
 
       // Fix round, finding #6: a maximized group hides the sidebar, every
       // other tab, and any navigation — indistinguishable, at a glance,
@@ -480,6 +730,82 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // just loaded.
       let layoutChangeSub: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
       let mutateLayoutSub: ReturnType<DockviewApi["onDidMutateLayout"]> | undefined;
+      // Task #108: the WRITE half of per-thread selection memory — set up in
+      // the same place and for the same "don't capture phantom events while
+      // the loaded/default tree is still being applied" reason as the two
+      // subscriptions above.
+      let activePanelChangeSub: ReturnType<DockviewApi["onDidActivePanelChange"]> | undefined;
+      // Task #108, QA round 3 reopen ("per-thread tab selection leaks when
+      // two panels share ONE dock group"): `activePanelChangeSub` above only
+      // hears a tab flip once dockview-core's own top-level re-broadcast
+      // guard lets it through (`dockviewComponent.js`: `if (event.panel !==
+      // this.activePanel) return`, where `activePanel` reads as
+      // `activeGroup?.activePanel` — confirmed directly in the installed
+      // dockview-core@7.0.4 source, not assumed) — true ONLY for whichever
+      // group is CURRENTLY dockview's own active group. Two panels sharing
+      // one group (Files+Diff) can flip which of THEM is that group's own
+      // active tab while some OTHER group is dockview's active one; that
+      // flip is invisible to the guard, so the store never heard it and had
+      // nothing correct to restore on the next thread switch (see
+      // `restoreActivePanel.ts`'s doc comment for the restore-side half of
+      // this same fix). Each group's OWN `DockviewGroupPanelApi`
+      // `onDidActivePanelChange` has no such guard —
+      // `dockview/dockviewGroupPanel.js` wires it straight off the group's
+      // own model unconditionally (`this.model.onDidActivePanelChange(event
+      // => this.api._onDidActivePanelChange.fire(event))`) — so subscribing
+      // to EVERY group's own event, not just the top-level one, is what
+      // finally hears it. Kept alongside `activePanelChangeSub`, not instead
+      // of it: that subscription is still the only one that fires when
+      // dockview's ACTIVE GROUP itself changes with no tab flip inside it
+      // (switching focus to a different group whose own active tab was
+      // already correct) — `doSetGroupActive` fires the top-level event for
+      // exactly that case, and no group-scoped event does. Both routes
+      // converge on `recordActivePanelForKeyUnlessRestoring`
+      // (`dockActiveSelectionStore.ts`), which is idempotent, so the same
+      // literal tab click firing both subscriptions is harmless, not a
+      // double-write bug — see `isRestoringRef`'s own comment for the
+      // "unless restoring" half, added round 4.
+      //
+      // Keyed by group id (not held as a flat array/Set of disposables) so a
+      // group that's removed (its tabs all closed, or the split collapsed)
+      // can have its OWN subscription torn down individually via
+      // `onDidRemoveGroup` below, rather than leaking a disposable for a
+      // group that no longer exists until this whole effect unmounts.
+      const groupActivePanelChangeSubs = new Map<
+        string,
+        ReturnType<DockviewGroupPanel["api"]["onDidActivePanelChange"]>
+      >();
+      let addGroupSub: ReturnType<DockviewApi["onDidAddGroup"]> | undefined;
+      let removeGroupSub: ReturnType<DockviewApi["onDidRemoveGroup"]> | undefined;
+      // Task #109: drives both the visible Restore button and the
+      // hidden-from-assistive-tech attributes on every non-maximized group.
+      let maximizedGroupSub: ReturnType<DockviewApi["onDidMaximizedGroupChange"]> | undefined;
+      // docs/specs/unified-topband.md, Section A: stamps `data-dv-topband`
+      // on top-row groups and applies the corner owner's clearance — see
+      // `applyTopBandLayout` below for the full reasoning, including why
+      // this subscribes to BOTH `onDidLayoutChange` and `onDidMutateLayout`
+      // and why registration ORDER (after `layoutChangeSub`/`mutateLayoutSub`
+      // below) is load-bearing, not incidental.
+      let topBandLayoutSub: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
+      let topBandMutateSub: ReturnType<DockviewApi["onDidMutateLayout"]> | undefined;
+      // QA round 12 fix: event-driven application alone is hopeful about
+      // dockview's own geometry-settlement timing (see `applyTopBandLayout`'s
+      // own comment for the two concrete failures this closes). These make
+      // the application self-correcting against the ACTUAL DOM geometry
+      // instead: a ResizeObserver (fires whenever a watched element's own
+      // box genuinely changes size, independent of which dockview event did
+      // or didn't fire) and the first-paint rAF follow-up id (so it can be
+      // cancelled on an early unmount).
+      let topBandResizeObserver: ResizeObserver | undefined;
+      let topBandInitialRafId: number | undefined;
+      // Independent of `addGroupSub`/`removeGroupSub` below — keeps the
+      // ResizeObserver's watch list current as groups come and go (a real
+      // split adds one; closing the last tab in a group removes it), same
+      // "subscribe now, keep current via add/remove" shape as that pair's
+      // own per-group tracking, but for an unrelated concern (see the
+      // subscription's own comment for why this stays a separate pair).
+      let topBandAddGroupSub: ReturnType<DockviewApi["onDidAddGroup"]> | undefined;
+      let topBandRemoveGroupSub: ReturnType<DockviewApi["onDidRemoveGroup"]> | undefined;
       let persistTimer: ReturnType<typeof setTimeout> | undefined;
       // Tracks whether a debounced save is currently outstanding — separate
       // from `persistTimer` itself, which still holds the last timer id even
@@ -544,6 +870,84 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           }
           maybePersist();
         }, PERSIST_DEBOUNCE_MS);
+      };
+
+      // docs/specs/unified-topband.md, Section A/B: computes the band's
+      // structural facts (computeTopBandLayout, topBandLayout.ts) off each
+      // group's LIVE `boundingBox` (dockview-root-relative — only
+      // meaningful once the layout has actually been sized, per
+      // DockviewGroupPanelApiImpl.boundingBox's own doc comment) and applies
+      // them to the DOM: `data-dv-topband` on every top-row group's
+      // `.dv-tabs-and-actions-container` (dockviewTheme.css's band-scoped
+      // app-region rules key off this), and on the (0,0) corner owner
+      // specifically, the tab-strip clearance (padding-left, capped at the
+      // group's own width — NARROW-COLUMN RULE) plus a DOCKED minimum width
+      // so a sash drag can't pull that column narrower than the corner cell
+      // it sits under.
+      //
+      // Reads `--workspace-corner-width` live off `container` (single
+      // source shared with the corner cell's own CSS, index.css) rather
+      // than a hardcoded duplicate — a designer widening the corner in CSS
+      // needs no matching code change here.
+      //
+      // ORDERING (why this is a SEPARATE subscription registered AFTER
+      // `layoutChangeSub`/`mutateLayoutSub` below, not folded into
+      // `scheduleSave` itself): `scheduleSave`'s own `syncFloatingConstraints`
+      // loop (constraints.ts) resets EVERY group's explicit constraints to
+      // `{minimumWidth: 0, minimumHeight: 0}` while docked — an existing,
+      // load-bearing contract this function must not fight, only follow.
+      // Both `onDidLayoutChange` and `onDidMutateLayout` fire their
+      // listeners in subscription order within the same dispatch, so
+      // registering this listener SECOND on both events guarantees it always
+      // runs after that reset, on the same tick — the corner owner's docked
+      // minimum is re-applied fresh every time, which is also what makes
+      // ownership changes (dragging the Sidebar tab elsewhere, acceptance
+      // check 4) "just work": whichever group is at (0,0) THIS tick gets the
+      // constraint, and the group that lost it was already reset to 0 by
+      // the same tick's `syncFloatingConstraints` pass.
+      const applyTopBandLayout = () => {
+        const rawCornerWidth = getComputedStyle(container)
+          .getPropertyValue("--workspace-corner-width")
+          .trim();
+        const parsedCornerWidth = Number.parseFloat(rawCornerWidth);
+        const cornerWidthPx =
+          Number.isFinite(parsedCornerWidth) && parsedCornerWidth > 0 ? parsedCornerWidth : 220;
+
+        const { topRowGroupIds, cornerOwnerGroupId, cornerPaddingPx } = computeTopBandLayout(
+          api.groups.map((group) => ({ id: group.id, boundingBox: group.api.boundingBox })),
+          cornerWidthPx,
+        );
+
+        for (const group of api.groups) {
+          // `group.header` is typed as the narrow public `IHeader`
+          // (`hidden`/`direction` only — dockviewGroupPanelModel.d.ts), which
+          // does NOT expose `.element` even though the concrete
+          // `TabsContainer` instance it wraps has one at runtime. `group`
+          // itself, though, is typed `DockviewGroupPanel` (the concrete
+          // class — `DockviewApi.groups: DockviewGroupPanel[]`, not the
+          // narrower `IDockviewGroupPanel`), which DOES publicly expose
+          // `.element` (`BasePanelView`'s `get element(): HTMLElement`) —
+          // the group's own `.dv-groupview` root. Querying within it for its
+          // own `.dv-tabs-and-actions-container` child (always exactly one,
+          // appended unconditionally in dockviewGroupPanelModel.js's
+          // constructor) reaches the same DOM node without relying on a
+          // non-exported internal type.
+          const headerElement = group.element.querySelector<HTMLElement>(
+            ".dv-tabs-and-actions-container",
+          );
+          if (!headerElement) continue;
+          if (topRowGroupIds.has(group.id)) {
+            headerElement.setAttribute("data-dv-topband", "");
+          } else {
+            headerElement.removeAttribute("data-dv-topband");
+          }
+          if (group.id === cornerOwnerGroupId) {
+            headerElement.style.paddingLeft = `${cornerPaddingPx}px`;
+            group.api.setConstraints({ minimumWidth: cornerWidthPx });
+          } else {
+            headerElement.style.paddingLeft = "";
+          }
+        }
       };
 
       async function loadInitialLayout() {
@@ -674,6 +1078,25 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
 
         for (const group of api.groups) syncFloatingConstraints(group, panelRegistry);
 
+        // F3 (2026-08-05, merge-gate review): every branch above —
+        // `api.fromJSON(migration.tree)` on the success path, or
+        // `applyPreset`'s own `api.fromJSON(...)` on every fallback path —
+        // applies a tree whose `activeGroup`/`activeView` came from the
+        // SHARED, per-workspace blob (or the preset's own static default),
+        // neither of which knows about the CURRENT thread. That is exactly
+        // the global-selection leak task #108 removed everywhere else;
+        // this was the one path (the dock's OWN initial mount) it never
+        // reached, because the activation-key effect above only fires on a
+        // CHANGE to `activationKey`, and this component's first mount does
+        // not produce one. Correcting here — using
+        // `activationKeyRef.current`, already set by that effect earlier in
+        // this same commit, before `apiRef.current` even existed — closes
+        // that gap. Must run BEFORE the auto-save subscriptions just below:
+        // `restoreActivePanelForKey`'s `panel.api.setActive()` fires
+        // `onDidLayoutChange`, and this correction is not itself a change
+        // worth persisting.
+        restoreActivePanelForCurrentThread(api);
+
         // Two subscriptions, not one: `onDidLayoutChange` is buffered onto a
         // microtask and covers general layout changes (resize, move, add,
         // remove), but does NOT fire for `maximizeGroup`/`exitMaximizedGroup`.
@@ -684,6 +1107,167 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // to follow it.
         layoutChangeSub = api.onDidLayoutChange(scheduleSave);
         mutateLayoutSub = api.onDidMutateLayout(scheduleSave);
+        // Registered AFTER the two subscriptions above — see
+        // `applyTopBandLayout`'s own doc comment for why this ordering,
+        // on BOTH events, is load-bearing.
+        topBandLayoutSub = api.onDidLayoutChange(applyTopBandLayout);
+        topBandMutateSub = api.onDidMutateLayout(applyTopBandLayout);
+        // QA round 12 fix (real defect, live-QA-confirmed, not a false
+        // positive): the two event subscriptions above fire at the MOMENT a
+        // layout mutation is REQUESTED, not once the resulting DOM geometry
+        // has actually settled — `DockviewGroupPanelApiImpl.boundingBox`'s
+        // own doc comment warns "only meaningful once the layout has
+        // actually been sized." Round 12 observed this live twice: (1) a
+        // `setVisible` transition (the sidebar hide/show toggle) redistributes
+        // the splitview's pixel widths on a LATER tick than the
+        // onDidLayoutChange/onDidMutateLayout events announcing the change —
+        // the new (0,0) group's strip rendered under the corner with no
+        // clearance, uncorrected until some unrelated later event happened
+        // to fire (the restore, by accident); (2) first paint, covered
+        // separately below.
+        //
+        // A ResizeObserver makes the application self-correcting against the
+        // ACTUAL geometry instead of hopeful about dockview's event timing —
+        // it fires whenever an OBSERVED element's own box genuinely changes
+        // size, regardless of which (if any) dockview event did or didn't
+        // fire for that change. Observed at TWO levels:
+        //   - every GROUP's own `.element` — this is the level that actually
+        //     catches a `setVisible` splitview redistribution: dockview
+        //     resizes each SIBLING group's own box individually (pixel
+        //     widths set via inline style on each `.dv-groupview`), while
+        //     the OUTER `container` element's own box stays constant across
+        //     that internal redistribution (ResizeObserver only fires for
+        //     the exact observed element's own box, never a descendant's —
+        //     per spec, not assumed).
+        //   - `container` itself — the general case (window resizes, or any
+        //     other change to the container's own box), cheap to add on the
+        //     SAME observer instance.
+        // Idempotent + cheap either way: `applyTopBandLayout` already
+        // recomputes fresh from live boundingBoxes every call and clears
+        // stale `data-dv-topband`/padding from any group that left the band
+        // or lost corner-owner status (its own `else` branches), so an
+        // observer firing when nothing meaningful actually changed is a
+        // harmless no-op write, not a correctness risk.
+        topBandResizeObserver = new ResizeObserver(() => {
+          applyTopBandLayout();
+        });
+        // `container` was narrowed non-null at the top of this effect (the
+        // early `if (!container) return undefined;` above) and is never
+        // reassigned — safe to assert here. TypeScript doesn't carry that
+        // narrowing through a hoisted `function loadInitialLayout()`
+        // declaration's body the way it does for the arrow-function `const`s
+        // above (e.g. `applyTopBandLayout`, which reads `container`
+        // un-asserted).
+        topBandResizeObserver.observe(container!);
+        const topBandObservedGroupIds = new Set<string>();
+        const observeGroupForTopBand = (group: DockviewGroupPanel) => {
+          if (topBandObservedGroupIds.has(group.id)) return;
+          topBandObservedGroupIds.add(group.id);
+          topBandResizeObserver?.observe(group.element);
+        };
+        for (const group of api.groups) observeGroupForTopBand(group);
+        // Independent of `addGroupSub`/`removeGroupSub` below (which drive
+        // the UNRELATED per-group active-panel-change tracking) — dockview's
+        // events support multiple independent subscribers, and coupling two
+        // unrelated concerns into one callback would make either harder to
+        // reason about or safely change later.
+        topBandAddGroupSub = api.onDidAddGroup(observeGroupForTopBand);
+        topBandRemoveGroupSub = api.onDidRemoveGroup((group) => {
+          topBandObservedGroupIds.delete(group.id);
+          topBandResizeObserver?.unobserve(group.element);
+        });
+        // Task #108: records which panel is active RIGHT NOW under the
+        // CURRENT thread's key — fires for every activation, whatever
+        // triggered it (a genuine tab click, or the initial load applying a
+        // saved/default tree), which is exactly right: the store's only job
+        // is to reflect "whatever is showing now, for whichever thread is
+        // now active," not to distinguish user-driven from programmatic.
+        // Round 4 correction: this file's OWN restore call (just above) is
+        // the one exception, not an example — see `isRestoringRef`'s own
+        // comment for why restore must NOT feed back into the store it
+        // reads from. Reads `activationKeyRef` (NOT the `activationKey`
+        // closure captured when this effect first ran) because this
+        // subscription is never recreated on a thread switch — see the
+        // activationKey-change effect above, the one place that ref is kept
+        // current.
+        activePanelChangeSub = api.onDidActivePanelChange(({ panel }) => {
+          recordActivePanelForKeyUnlessRestoring(
+            isRestoringRef.current,
+            Date.now() - switchedAtRef.current,
+            activationKeyRef.current,
+            panel?.id ?? null,
+          );
+        });
+        // Task #108, QA round 3 reopen: the per-GROUP half of the write
+        // side — see `groupActivePanelChangeSubs`'s own declaration above
+        // for why this is needed IN ADDITION TO `activePanelChangeSub`.
+        // Subscribes every group that exists right now, then keeps that set
+        // current as groups come and go (a split adds one; closing the last
+        // tab in a group removes it) via `onDidAddGroup`/`onDidRemoveGroup`.
+        const subscribeGroupActivePanelChange = (group: DockviewGroupPanel) => {
+          groupActivePanelChangeSubs.set(
+            group.id,
+            group.api.onDidActivePanelChange(({ panel }) => {
+              recordActivePanelForKeyUnlessRestoring(
+                isRestoringRef.current,
+                Date.now() - switchedAtRef.current,
+                activationKeyRef.current,
+                panel.id,
+              );
+            }),
+          );
+        };
+        for (const group of api.groups) subscribeGroupActivePanelChange(group);
+        addGroupSub = api.onDidAddGroup(subscribeGroupActivePanelChange);
+        removeGroupSub = api.onDidRemoveGroup((group) => {
+          groupActivePanelChangeSubs.get(group.id)?.dispose();
+          groupActivePanelChangeSubs.delete(group.id);
+        });
+        // Task #109: both the visible "Restore" button's state AND the
+        // hidden-from-assistive-tech attributes on every OTHER group are
+        // driven off this one subscription — one source of truth for
+        // "what's currently maximized," so the button and the a11y
+        // attributes can never disagree about it.
+        maximizedGroupSub = api.onDidMaximizedGroupChange(({ group, isMaximized }) => {
+          const nextMaximizedGroupId = isMaximized ? group.id : null;
+          setMaximizedGroupId(nextMaximizedGroupId);
+          applyMaximizedGroupAccessibility(api.groups, nextMaximizedGroupId);
+        });
+        // A saved layout CAN load already maximized (`gridview.js`'s
+        // `serialize()` includes `maximizedNode`) — `api.fromJSON()` above
+        // fires `onDidMaximizedGroupChange` internally when it does, but
+        // this subscription wasn't listening yet (deliberately — see this
+        // block's own opening comment on why subscriptions start only after
+        // load settles). Without this, a workspace that was left maximized
+        // would reopen maximized with no visible Restore button and no a11y
+        // attributes applied until the NEXT maximize-state change.
+        const initiallyMaximized = api.groups.find((group) => group.api.isMaximized());
+        setMaximizedGroupId(initiallyMaximized?.id ?? null);
+        applyMaximizedGroupAccessibility(api.groups, initiallyMaximized?.id ?? null);
+
+        // Same reasoning as `initiallyMaximized` immediately above: the
+        // topband subscriptions just wired up don't cover the tree
+        // `api.fromJSON()`/`applyPreset()` already applied earlier in this
+        // same function — run it once explicitly so the very first paint
+        // already has `data-dv-topband`/corner clearance applied, not just
+        // whichever layout change happens to fire next.
+        //
+        // QA round 12 fix: a SINGLE explicit call here was the first-paint
+        // failure — it fires before dockview has actually SIZED the
+        // just-created groups (the Sidebar tab rendered under the corner
+        // live, no clearance). "now" still runs immediately (cheap, and
+        // right the majority of the time), but a `requestAnimationFrame`
+        // follow-up re-applies once the browser has completed a layout/paint
+        // pass, catching the case where "now" was too early. Guarded by
+        // `cancelled` (this file's own established async-continuation guard
+        // — see `loadInitialLayout`'s own top-of-function comment) since the
+        // frame can land after an early unmount/workspace-switch; the rAF id
+        // is also cancelled directly in cleanup as a second line of defense.
+        applyTopBandLayout();
+        topBandInitialRafId = requestAnimationFrame(() => {
+          if (cancelled) return;
+          applyTopBandLayout();
+        });
       }
 
       void loadInitialLayout();
@@ -712,8 +1296,21 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
           maybePersist();
         }
         window.removeEventListener("keydown", handleEscape);
+        container.removeEventListener("dragstart", handleTopBandDragStartCapture, true);
+        if (topBandInitialRafId !== undefined) cancelAnimationFrame(topBandInitialRafId);
+        topBandResizeObserver?.disconnect();
+        topBandAddGroupSub?.dispose();
+        topBandRemoveGroupSub?.dispose();
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
+        topBandLayoutSub?.dispose();
+        topBandMutateSub?.dispose();
+        activePanelChangeSub?.dispose();
+        for (const sub of groupActivePanelChangeSubs.values()) sub.dispose();
+        groupActivePanelChangeSubs.clear();
+        addGroupSub?.dispose();
+        removeGroupSub?.dispose();
+        maximizedGroupSub?.dispose();
         api.dispose();
         apiRef.current = null;
       };
@@ -846,6 +1443,38 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       [panelRegistry],
     );
 
+    // Task #109: the visible counterpart to the context-menu "Restore" item
+    // and Escape (fix-round finding #6) — see `maximizedGroupId`'s own
+    // comment for why neither of those is discoverable on its own.
+    const handleRestoreMaximized = useCallback(() => {
+      apiRef.current?.exitMaximizedGroup();
+    }, []);
+
+    // dock-chrome-strip.md, Section C: same "no live DockviewApi yet" timing
+    // guard as handleOpenPanel/handleTogglePanel above. The actual decisions
+    // are lib/openPanel.ts's togglePanelGroupVisibility/isPanelGroupVisible/
+    // subscribePanelGroupVisibility — see that file's own doc for why.
+    const handleTogglePanelGroupVisibility = useCallback((id: string) => {
+      const api = apiRef.current;
+      if (!api) return;
+      togglePanelGroupVisibility(id, { api });
+    }, []);
+
+    const handleIsPanelGroupVisible = useCallback((id: string) => {
+      const api = apiRef.current;
+      if (!api) return true;
+      return isPanelGroupVisible(id, { api });
+    }, []);
+
+    const handleSubscribePanelGroupVisibility = useCallback(
+      (id: string, listener: (isVisible: boolean) => void) => {
+        const api = apiRef.current;
+        if (!api) return () => {};
+        return subscribePanelGroupVisibility(id, listener, { api });
+      },
+      [],
+    );
+
     useImperativeHandle(
       forwardedRef,
       () => ({
@@ -854,8 +1483,20 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         importLayoutFile: handleImportFile,
         openPanel: handleOpenPanel,
         togglePanel: handleTogglePanel,
+        togglePanelGroupVisibility: handleTogglePanelGroupVisibility,
+        isPanelGroupVisible: handleIsPanelGroupVisible,
+        subscribePanelGroupVisibility: handleSubscribePanelGroupVisibility,
       }),
-      [handleReset, handleExport, handleImportFile, handleOpenPanel, handleTogglePanel],
+      [
+        handleReset,
+        handleExport,
+        handleImportFile,
+        handleOpenPanel,
+        handleTogglePanel,
+        handleTogglePanelGroupVisibility,
+        handleIsPanelGroupVisible,
+        handleSubscribePanelGroupVisibility,
+      ],
     );
 
     // Fix-round finding #1: recomputed every render — cheap (a linear scan
@@ -871,33 +1512,63 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
     );
 
     return (
-      <div className={cn("relative flex h-full min-h-0 flex-col", className)}>
+      // dock-chrome-strip.md, Section A (critique M3, "a proven overflow,
+      // not a 'verify'"): `h-full` -> `flex-1`, an explicit class change.
+      // `_chat.tsx`'s hoisted chrome strip sits ABOVE this dock inside the
+      // same `SidebarProvider`/`SidebarInset` flex column; a `h-full` dock
+      // root claims 100% of `SidebarInset`'s own declared height on top of
+      // the strip's 52px, clipping the composer's bottom edge. `flex-1`
+      // takes the REMAINING flex space instead, whatever `SidebarInset`
+      // actually renders as once the strip's height is accounted for.
+      <div className={cn("relative flex min-h-0 flex-1 flex-col", className)}>
         {notice ? <LayoutNotice message={notice} onDismiss={() => setNotice(null)} /> : null}
         {/*
-          Fix round, finding #1 ("app bricks in 3 clicks"): the reachable
-          recovery affordance for `DockviewLayoutHandle.reset()` — implemented
-          since step 1, never attached to anything a person could actually
-          click. A SIBLING of `containerRef`'s div, not a child, and
-          absolutely positioned over it: it must render (and stay clickable)
+          Fix round, finding #1 ("app bricks in 3 clicks") + task #109 +
+          QA round 2 (#125): both the Reset and Restore-maximized controls
+          are a SIBLING of `containerRef`'s div, not a child, absolutely
+          positioned over it — they must render (and stay clickable)
           regardless of whatever dockview itself is currently showing in
-          there, blank or not — the whole point is this can't itself become
-          part of the brick. The empty-layout guards above make reaching a
-          genuinely blank dock unlikely now, but this is deliberately
-          unconditional, not shown only when things look broken: a
-          defense-in-depth escape hatch for any OTHER way this workspace's
-          layout could end up stuck that this fix round didn't anticipate.
+          there, blank or not.
+
+          Originally two INDEPENDENTLY absolutely-positioned buttons —
+          Restore at `top-1.5 left-1.5`, deliberately the opposite corner
+          from Reset's `top-1.5 right-1.5` — reasoned (correctly, for two
+          buttons that can each only collide with each other) to never
+          overlap. What that reasoning missed: in the packaged Electron
+          window, the macOS traffic-light controls are ALWAYS overlaid at
+          the extreme top-left, a THIRD occupant of that corner neither
+          button's own positioning accounted for. Restore landed
+          underneath/against them — technically clickable, but a QA pass
+          reported it wasn't findable without already being told it was
+          there, and looked broken.
+
+          Fixed by giving up on per-button absolute coordinates entirely:
+          both controls now live in `DockControlsCluster` (above) as ONE
+          absolutely-positioned flex cluster anchored at `top-1.5 right-1.5`
+          — Reset's old corner, and clear of macOS's traffic lights, which is
+          the CONFIRMED defect this fixes. That corner is NOT universally
+          safe, though: on every platform other than macOS this app frames
+          its window with `titleBarStyle: "hidden"` + a `titleBarOverlay`
+          (`apps/desktop/src/window/DesktopWindow.ts:185-204`), and on
+          Windows that overlay draws minimize/maximize/close at the top
+          RIGHT — the exact corner this cluster now occupies. That is NOT a
+          regression from this change: Reset alone has lived at
+          `top-1.5 right-1.5` since long before this fix, so whatever
+          Windows collision exists in that corner exists today regardless
+          and isn't something this change introduces or worsens (see #127,
+          filed and left open rather than guessed at — nobody has run this
+          app on Windows, so a platform-conditional position would be
+          invented, not verified). A flex row with `gap-1` can't overlap its
+          own children by construction, so the never-overlap property
+          between Reset and Restore THEMSELVES is preserved for free, and
+          stays true even if a third control is ever added here later — no
+          new magic offset to pick and verify for THAT part.
         */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label="Reset workspace layout"
-          title="Reset workspace layout"
-          onClick={handleReset}
-          className="absolute top-1.5 right-1.5 z-10 text-muted-foreground hover:text-foreground"
-        >
-          <RotateCcw size={14} strokeWidth={2} />
-        </Button>
+        <DockControlsCluster
+          maximizedGroupId={maximizedGroupId}
+          onReset={handleReset}
+          onRestoreMaximized={handleRestoreMaximized}
+        />
         <div ref={containerRef} className="min-h-0 flex-1" />
         {panelEntries.map((entry) =>
           createPortal(

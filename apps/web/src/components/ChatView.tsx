@@ -1,13 +1,16 @@
 import {
   type ApprovalRequestId,
+  AuthPresenceCommandScope,
   DEFAULT_MODEL,
   defaultInstanceIdForDriver,
+  type EngineType,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
+  type PreviewAnnotationPayload,
   ProviderInstanceId,
   type ServerProvider,
   type ResolvedKeybindingsConfig,
@@ -25,11 +28,16 @@ import {
   connectionStatusTitle,
   type EnvironmentConnectionPresentation,
 } from "@t3tools/client-runtime/connection";
-import { effectiveSettled, effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
+import {
+  effectiveSettled,
+  effectiveSnoozed,
+  threadWokeAt,
+} from "@t3tools/client-runtime/state/thread-settled";
 import {
   parseScopedThreadKey,
   scopedThreadKey,
   scopeProjectRef,
+  scopedProjectKey,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import {
@@ -80,7 +88,7 @@ import {
   deriveTimelineEntries,
   deriveActiveWorkStartedAt,
   deriveActivePlanState,
-  findSidebarProposedPlan,
+  deriveTurnPlans,
   findLatestProposedPlan,
   deriveWorkLogEntries,
   hasActionableProposedPlan,
@@ -124,38 +132,50 @@ import {
   type RightPanelSurface,
   useRightPanelStore,
 } from "../rightPanelStore";
+import { useFileExplorerStore } from "~/fileExplorerStore";
 import {
-  isPreviewSupportedInRuntime,
-  setActivePreviewTab,
-  useThreadPreviewState,
-} from "../previewStateStore";
+  selectTerminalDockPanelTerminalIds,
+  selectThreadTerminalDockState,
+  useTerminalDockStore,
+} from "~/terminalDockStore";
+import { isPreviewSupportedInRuntime, useThreadPreviewState } from "../previewStateStore";
 import { addBrowserSurface } from "./preview/addBrowserSurface";
-import { closePreviewSession } from "./preview/closePreviewSession";
 import { ThreadPreviewMiniPlayer } from "./preview/ThreadPreviewMiniPlayer";
 import { subscribePreviewAction } from "./preview/previewActionBus";
-import { getConfiguredPreviewUrls } from "./preview/previewEmptyStateLogic";
 import { triggerAutoOpenPreview } from "./preview/autoOpenPreviewForScript";
+import { resolveThreeJsPlayScript } from "./preview/resolveThreeJsPlayScript";
+import { resolveEngineToolbarView, type EngineToolbarAction } from "./EngineToolbar.logic";
 import { useTerminalDiscoveredPorts } from "~/portDiscoveryState";
 import {
   selectThreadPreviewMiniPlayer,
   usePreviewMiniPlayerStore,
 } from "../previewMiniPlayerStore";
 import { RightPanelTabs } from "./RightPanelTabs";
+import { AgentsPanel } from "./AgentsPanel";
+import {
+  deriveAgentPanelModel,
+  foldSubagentActivities,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 import { BranchToolbar } from "./BranchToolbar";
 import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
-import PlanSidebar from "./PlanSidebar";
 import ThreadTerminalDrawer from "./ThreadTerminalDrawer";
 import {
   AlarmClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
-  TriangleAlertIcon,
   WifiOffIcon,
 } from "lucide-react";
 import { cn, randomHex } from "~/lib/utils";
-import { DIFF_PANEL_ID, openChatDockPanel, toggleChatDockPanel } from "~/dock/chatDockHandle";
+import {
+  BROWSER_PANEL_ID,
+  DIFF_PANEL_ID,
+  FILES_PANEL_ID,
+  openChatDockPanel,
+  TERMINAL_PANEL_ID,
+  toggleChatDockPanel,
+} from "~/dock/chatDockHandle";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
@@ -167,18 +187,26 @@ import {
   projectScriptIdFromCommand,
 } from "~/projectScripts";
 import { newDraftId, newMessageId, newThreadId } from "~/lib/utils";
+import { useBrowserHistoryStore } from "~/browserHistoryStore";
 import { getProviderModelCapabilities, resolveSelectableProvider } from "../providerModels";
 import { NO_PROVIDER_MODEL_SELECTION } from "../providerInstances";
-import { useClientSettings, useEnvironmentSettings } from "../hooks/useSettings";
+import {
+  useClientSettings,
+  useClientSettingsHydrated,
+  useEnvironmentSettings,
+} from "../hooks/useSettings";
 import { useNowMinute } from "../hooks/useNowMinute";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { resolveAppModelSelectionForInstance } from "../modelSelection";
 import { getTerminalFocusOwner } from "../lib/terminalFocus";
+import { preventRepeatedTerminalCloseShortcut } from "../lib/terminalCloseShortcut";
 import { resolveNewDraftStartFromOrigin } from "../lib/chatThreadActions";
 import {
+  derivePhysicalProjectKey,
   deriveLogicalProjectKeyFromSettings,
   selectProjectGroupingSettings,
 } from "../logicalProject";
+import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
   type ComposerImageAttachment,
@@ -200,7 +228,24 @@ import {
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
 import { appendEditorSelectionToPrompt } from "../editorPresence/editorSelectionContext";
-import { getCurrentEditorPresenceChips } from "../editorPresence/store";
+import {
+  getCurrentEditorPresenceChips,
+  getCurrentEditorPresenceEditors,
+  selectEditorPresenceChipsForProject,
+} from "../editorPresence/store";
+import { appendEngineHeadlineToPrompt } from "../editorPresence/engineHeadline";
+import { useEditorPresence } from "../editorPresence/useEditorPresence";
+import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
+import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
+import type { EditorPresencePlayState } from "../editorPresence/protocol";
+import { dispatchUnityCommand } from "../unity/dispatchCommand";
+import { unitySetupProbeAtom } from "../unity/unitySetupProbeAtom";
+import { postUnityPipelineInstall } from "../unity/postPipelineInstall";
+import { describeUnityPipelineInstallOutcome } from "../unity/unityPipelineInstallReport";
+import { describeUnityRaiseFailure, postUnityRaise } from "../unity/postUnityRaise";
+import { invalidateUnitySetupProbeCache } from "../unity/setupProbeCache";
+import { usePrimarySessionState } from "../environments/primary/sessionState";
+import { readPreparedConnection } from "../state/session";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -213,14 +258,17 @@ import {
   serverEnvironment,
 } from "../state/server";
 import { terminalEnvironment } from "../state/terminal";
-import { threadEnvironment } from "../state/threads";
+import { threadEnvironment, useEnvironmentThread } from "../state/threads";
+import {
+  requestOlderThreadTurns,
+  threadHasOlderTurns,
+} from "@t3tools/client-runtime/state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironments, usePrimaryEnvironment } from "../state/environments";
 import {
   useProject,
   useProjects,
   useThread,
-  useThreadProposedPlans,
   useThreadRefs,
   useThreadShell,
 } from "../state/entities";
@@ -230,11 +278,17 @@ import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
+import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
 import { ChatHeader } from "./chat/ChatHeader";
 import { PanelLayoutControls, RightPanelMaximizeControl } from "./chat/PanelLayoutControls";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
-import { resolveEffectiveEnvMode, resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
+import {
+  resolveEffectiveEnvMode,
+  resolveLocalCheckoutBranchMismatch,
+  shouldShowComposerContextStrip,
+  shouldShowEnvironmentIndicator,
+} from "./BranchToolbar.logic";
 import {
   getProviderStatusBannerKey,
   ProviderStatusBanner,
@@ -263,6 +317,8 @@ import {
   createLocalDispatchSnapshot,
   deriveComposerSendState,
   dismissBranchMismatchForSession,
+  hasEnvironmentReconnectWarningGraceElapsed,
+  scheduleEnvironmentReconnectWarning,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
   shouldShowBranchMismatchBanner,
@@ -275,12 +331,16 @@ import {
   deriveLockedProvider,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
+  resolveEngineChipState,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
+  resolveUnitySetupForView,
   revokeUserMessagePreviewUrls,
   shouldWriteThreadErrorToCurrentServerThread,
   startNewThreadForProject,
+  tryBeginUnitySetupInstall,
+  tryBeginUnityRaise,
   waitForStartedServerThread,
 } from "./ChatView.logic";
 import type { ThreadSyncPhase } from "../threadSync";
@@ -390,10 +450,16 @@ function useDraftHeroLayoutTransition(isDraftHeroState: boolean) {
 
   return [attachTransitionGroupRef, attachComposerAnchorRef, captureComposerRect] as const;
 }
-const PreviewPanel = lazy(() =>
-  import("./preview/PreviewPanel").then((module) => ({ default: module.PreviewPanel })),
-);
-const FilePreviewPanel = lazy(() => import("./files/FilePreviewPanel"));
+// Task #53: the lazy `PreviewPanel` binding that used to live here is
+// DELETED — its only render site was `rightPanelContent`'s own now-removed
+// "preview" branch. `dock/BrowserDockPanel.tsx` imports
+// `~/components/preview/PreviewPanel` directly instead (not through this
+// file at all).
+// Files moved to a first-class dock panel (task #61) — RightPanelTabs' own
+// pendingSurfaceIds mechanism stays (generic infrastructure a future surface
+// could still use), but nothing here populates it anymore, so this constant
+// is what both call sites below pass instead of a computed, always-empty
+// Map lookup.
 const EMPTY_PENDING_FILE_SURFACE_IDS: ReadonlySet<string> = new Set();
 const TYPE_TO_FOCUS_EDITABLE_SELECTOR = [
   "input",
@@ -429,8 +495,6 @@ type EnvironmentUnavailableState = {
   readonly label: string;
   readonly connection: EnvironmentConnectionPresentation;
 };
-
-type ThreadPlanCatalogEntry = Pick<Thread, "id" | "proposedPlans">;
 
 function eventPathContainsSelector(event: Event, selector: string): boolean {
   const path = event.composedPath();
@@ -645,17 +709,13 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
     environmentId: threadRef.environmentId,
     threadId,
   });
-  const panelSurfaces = useRightPanelStore(
-    (state) => selectThreadRightPanelState(state.byThreadKey, threadRef).surfaces,
-  );
-  const panelTerminalIds = useMemo(
-    () =>
-      new Set(
-        panelSurfaces.flatMap((surface) =>
-          surface.kind === "terminal" ? surface.terminalIds : [],
-        ),
-      ),
-    [panelSurfaces],
+  // Task #53: Terminal moved to a dock panel — this exclusion, which used
+  // to read `rightPanelStore`'s "terminal" surfaces, now reads
+  // `terminalDockStore` instead (see that file's own doc comment). Same
+  // purpose as before: a terminal claimed by the dock panel must never ALSO
+  // render in the drawer.
+  const panelTerminalIds = useTerminalDockStore((state) =>
+    selectTerminalDockPanelTerminalIds(state.byThreadKey, threadRef),
   );
   const drawerTerminalSessions = useMemo(
     () =>
@@ -964,174 +1024,13 @@ const PersistentThreadTerminalDrawer = memo(function PersistentThreadTerminalDra
   );
 });
 
-interface PersistentThreadTerminalPanelProps {
-  threadRef: ScopedThreadRef;
-  surface: Extract<RightPanelSurface, { kind: "terminal" }>;
-  launchContext: PersistentTerminalLaunchContext | null;
-  focusRequestId: number;
-  keybindings: ResolvedKeybindingsConfig;
-  onAddTerminalContext: (selection: TerminalContextSelection) => void;
-  onSplitTerminal: () => void;
-  onSplitTerminalVertical: () => void;
-  onNewTerminal: () => void;
-  onActiveTerminalChange: (terminalId: string) => void;
-  onCloseTerminal: (terminalId: string) => void;
-  splitShortcutLabel?: string | undefined;
-  splitVerticalShortcutLabel?: string | undefined;
-  newShortcutLabel?: string | undefined;
-  closeShortcutLabel?: string | undefined;
-}
-
-const PersistentThreadTerminalPanel = memo(function PersistentThreadTerminalPanel({
-  threadRef,
-  surface,
-  launchContext,
-  focusRequestId,
-  keybindings,
-  onAddTerminalContext,
-  onSplitTerminal,
-  onSplitTerminalVertical,
-  onNewTerminal,
-  onActiveTerminalChange,
-  onCloseTerminal,
-  splitShortcutLabel,
-  splitVerticalShortcutLabel,
-  newShortcutLabel,
-  closeShortcutLabel,
-}: PersistentThreadTerminalPanelProps) {
-  const draftThread = useComposerDraftStore((store) => store.getDraftThreadByRef(threadRef));
-  const serverThread = useThread(threadRef, { waitForShell: draftThread !== null });
-  const projectRef = serverThread
-    ? scopeProjectRef(serverThread.environmentId, serverThread.projectId)
-    : draftThread
-      ? scopeProjectRef(draftThread.environmentId, draftThread.projectId)
-      : null;
-  const project = useProject(projectRef);
-  const knownTerminalSessions = useKnownTerminalSessions({
-    environmentId: threadRef.environmentId,
-    threadId: threadRef.threadId,
-  });
-  const threadWorktreePath = serverThread?.worktreePath ?? draftThread?.worktreePath ?? null;
-  const activeSummary =
-    knownTerminalSessions.find((session) => session.target.terminalId === surface.activeTerminalId)
-      ?.state.summary ?? null;
-  const worktreePath =
-    launchContext?.worktreePath ?? activeSummary?.worktreePath ?? threadWorktreePath;
-  const cwd = useMemo(
-    () =>
-      launchContext?.cwd ??
-      activeSummary?.cwd ??
-      (project
-        ? projectScriptCwd({
-            project: { cwd: project.workspaceRoot },
-            worktreePath,
-          })
-        : null),
-    [activeSummary?.cwd, launchContext?.cwd, project, worktreePath],
-  );
-  const runtimeEnv = useMemo(
-    () =>
-      project
-        ? projectScriptRuntimeEnv({
-            project: { cwd: project.workspaceRoot },
-            worktreePath,
-          })
-        : {},
-    [project, worktreePath],
-  );
-  const terminalLabelsById = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const terminalId of surface.terminalIds) {
-      const summary =
-        knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
-          .summary ?? null;
-      labels.set(terminalId, resolveTerminalSessionLabel(terminalId, summary));
-    }
-    return labels;
-  }, [knownTerminalSessions, surface.terminalIds]);
-  const terminalLaunchLocationsById = useMemo(() => {
-    const locations = new Map<
-      string,
-      {
-        readonly cwd: string;
-        readonly worktreePath: string | null;
-        readonly runtimeEnv: Record<string, string>;
-      }
-    >();
-    for (const terminalId of surface.terminalIds) {
-      const summary =
-        knownTerminalSessions.find((session) => session.target.terminalId === terminalId)?.state
-          .summary ?? null;
-      const terminalWorktreePath =
-        launchContext?.worktreePath ?? summary?.worktreePath ?? threadWorktreePath;
-      const terminalCwd =
-        launchContext?.cwd ??
-        summary?.cwd ??
-        (project
-          ? projectScriptCwd({
-              project: { cwd: project.workspaceRoot },
-              worktreePath: terminalWorktreePath,
-            })
-          : null);
-      if (!terminalCwd || !project) continue;
-      locations.set(terminalId, {
-        cwd: terminalCwd,
-        worktreePath: terminalWorktreePath,
-        runtimeEnv: projectScriptRuntimeEnv({
-          project: { cwd: project.workspaceRoot },
-          worktreePath: terminalWorktreePath,
-        }),
-      });
-    }
-    return locations;
-  }, [
-    knownTerminalSessions,
-    launchContext?.cwd,
-    launchContext?.worktreePath,
-    project,
-    surface.terminalIds,
-    threadWorktreePath,
-  ]);
-
-  if (!project || !cwd) return null;
-
-  return (
-    <ThreadTerminalDrawer
-      mode="panel"
-      threadRef={threadRef}
-      threadId={threadRef.threadId}
-      cwd={cwd}
-      worktreePath={worktreePath}
-      runtimeEnv={runtimeEnv}
-      height={0}
-      terminalIds={surface.terminalIds}
-      activeTerminalId={surface.activeTerminalId}
-      terminalGroups={[
-        {
-          id: surface.id,
-          terminalIds: surface.terminalIds,
-          ...(surface.splitDirection === "vertical" ? { splitDirection: "vertical" as const } : {}),
-        },
-      ]}
-      activeTerminalGroupId={surface.id}
-      focusRequestId={focusRequestId}
-      onSplitTerminal={onSplitTerminal}
-      onSplitTerminalVertical={onSplitTerminalVertical}
-      onNewTerminal={onNewTerminal}
-      splitShortcutLabel={splitShortcutLabel}
-      splitVerticalShortcutLabel={splitVerticalShortcutLabel}
-      newShortcutLabel={newShortcutLabel}
-      closeShortcutLabel={closeShortcutLabel}
-      onActiveTerminalChange={onActiveTerminalChange}
-      onCloseTerminal={onCloseTerminal}
-      onHeightChange={() => undefined}
-      onAddTerminalContext={onAddTerminalContext}
-      terminalLabelsById={terminalLabelsById}
-      terminalLaunchLocationsById={terminalLaunchLocationsById}
-      keybindings={keybindings}
-    />
-  );
-});
+// Task #53: `PersistentThreadTerminalPanel` (the right-panel terminal
+// surface's own renderer) is DELETED here, same as Diff/Files' own inline
+// renderers before it — Terminal is now `dock/TerminalDockPanel.tsx`, a
+// fully self-contained dock panel (its own `ThreadTerminalDrawer` mode=
+// "panel" usage, own thread/project/cwd resolution, own
+// `terminalDockStore.ts`-backed group state), no longer threaded down from
+// ChatView at all.
 
 // Errors surface through two maps (draft-keyed and thread-keyed) whose entries
 // can race around promotion, so each write carries its time to let the latest
@@ -1196,7 +1095,6 @@ function ChatViewContent(props: ChatViewProps) {
     reportFailure: false,
   });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
-  const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
   const primaryEnvironment = usePrimaryEnvironment();
   const retryEnvironment = useAtomCommand(environmentCatalog.retryNow, { reportFailure: false });
@@ -1223,10 +1121,24 @@ function ChatViewContent(props: ChatViewProps) {
     [routeServerThreadShell, threadDetailLoading],
   );
   const activeServerThread = serverThread ?? loadingServerThread;
-  const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
-  const activeThreadLastVisitedAt = useUiStateStore(
-    (store) => store.threadLastVisitedAtById[routeThreadKey],
+  // Pagination window state for the routed server thread: drives the
+  // "load earlier turns" header when the loaded window has older history.
+  const routeThreadState = useEnvironmentThread(
+    routeKind === "server" ? routeThreadRef.environmentId : null,
+    routeKind === "server" ? routeThreadRef.threadId : null,
   );
+  const loadEarlierTurns = useMemo(() => {
+    if (routeKind !== "server" || !threadHasOlderTurns(routeThreadState)) {
+      return null;
+    }
+    return {
+      loading: routeThreadState.page._tag === "Some" && routeThreadState.page.value.loadingOlder,
+      onLoadEarlier: () => {
+        requestOlderThreadTurns(routeThreadRef.environmentId, routeThreadRef.threadId);
+      },
+    };
+  }, [routeKind, routeThreadRef, routeThreadState]);
+  const markThreadVisited = useUiStateStore((store) => store.markThreadVisited);
   const settings = useEnvironmentSettings(environmentId);
   // New-thread defaults live in the primary environment's settings.json (the
   // settings UI never writes to remote environments), so read them from the
@@ -1236,7 +1148,6 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setStickyModelSelection,
   );
   const timestampFormat = settings.timestampFormat;
-  const autoOpenPlanSidebar = settings.autoOpenPlanSidebar;
   const navigate = useNavigate();
   const { resolvedTheme } = useTheme();
   // Granular store selectors — avoid subscribing to prompt changes.
@@ -1306,12 +1217,7 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [pendingUserInputQuestionIndexByRequestId, setPendingUserInputQuestionIndexByRequestId] =
     useState<Record<string, number>>({});
-  const shouldUsePlanSidebarSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
-  // Tracks whether the user explicitly dismissed the sidebar for the active turn.
-  const planSidebarDismissedForTurnRef = useRef<string | null>(null);
-  // When set, the thread-change reset effect will open the sidebar instead of closing it.
-  // Used by "Implement in a new thread" to carry the sidebar-open intent across navigation.
-  const planSidebarOpenOnNextThreadRef = useRef(false);
+  const shouldUseRightPanelSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
@@ -1339,6 +1245,8 @@ function ChatViewContent(props: ChatViewProps) {
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewPromotionInFlightByMessageIdRef = useRef<Record<string, true>>({});
   const sendInFlightRef = useRef(false);
+  const unitySetupInstallInFlightRef = useRef(false);
+  const unityRaiseInFlightRef = useRef(false);
   const terminalUiOpenByThreadRef = useRef<Record<string, boolean>>({});
 
   useLayoutEffect(() => {
@@ -1461,11 +1369,17 @@ function ChatViewContent(props: ChatViewProps) {
     ? (localServerError ?? activeServerThread?.session?.lastError ?? null)
     : localDraftError;
   const runtimeMode = composerRuntimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
-  const interactionMode =
-    composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE;
+  // Plan mode is legacy (Settings → Beta). With the flag off the effective
+  // mode is forced to "default" — even for threads with a stored plan mode —
+  // so nobody is trapped in plan mode while its toggle is hidden. The next
+  // send persists "default" back to the thread.
+  const interactionMode = settings.planModeEnabled
+    ? (composerInteractionMode ?? activeThread?.interactionMode ?? DEFAULT_INTERACTION_MODE)
+    : DEFAULT_INTERACTION_MODE;
   const isLocalDraftThread = !isServerThread && localDraftThread !== undefined;
   const canCheckoutPullRequestIntoThread = isLocalDraftThread;
   const activeThreadId = activeThread?.id ?? null;
+  const activeThreadEnvironmentId = activeThread?.environmentId ?? null;
   const runningTerminalIds = useThreadRunningTerminalIds({
     environmentId: activeThread?.environmentId ?? null,
     threadId: activeThreadId,
@@ -1490,19 +1404,12 @@ function ChatViewContent(props: ChatViewProps) {
     () => [...new Set([...activeServerOrderedTerminalIds, ...terminalUiState.terminalIds])],
     [activeServerOrderedTerminalIds, terminalUiState.terminalIds],
   );
-  const activeTerminalLabelsById = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const session of activeThreadKnownSessions) {
-      labels.set(
-        session.target.terminalId,
-        resolveTerminalSessionLabel(session.target.terminalId, session.state.summary),
-      );
-    }
-    return labels;
-  }, [activeThreadKnownSessions]);
   const activeThreadRef = useMemo(
-    () => (activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null),
-    [activeThread],
+    () =>
+      activeThreadEnvironmentId && activeThreadId
+        ? scopeThreadRef(activeThreadEnvironmentId, activeThreadId)
+        : null,
+    [activeThreadEnvironmentId, activeThreadId],
   );
   const activeThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
   const [timelineAnchor, setTimelineAnchor] = useState<{
@@ -1513,96 +1420,94 @@ function ChatViewContent(props: ChatViewProps) {
     setTimelineAnchor({ threadKey: activeThreadKey, messageId: null });
   }
   const timelineAnchorMessageId = timelineAnchor.messageId;
-  const activeRightPanelKind = useRightPanelStore((state) =>
-    selectActiveRightPanel(state.byThreadKey, activeThreadRef),
-  );
   const rightPanelState = useRightPanelStore((state) =>
     selectThreadRightPanelState(state.byThreadKey, activeThreadRef),
   );
   const activeRightPanelSurface = useRightPanelStore((state) =>
     selectActiveRightPanelSurface(state.byThreadKey, activeThreadRef),
   );
-  const activeFileSurface =
-    activeRightPanelSurface?.kind === "file" ? activeRightPanelSurface : null;
   const activePreviewState = useThreadPreviewState(activeThreadRef);
   const activePreviewMiniPlayer = usePreviewMiniPlayerStore((state) =>
     selectThreadPreviewMiniPlayer(state.byThreadKey, activeThreadRef),
   );
+  // Task #53: reads `terminalDockStore` instead of `rightPanelStore` — see
+  // that store's own doc comment. `terminalDockState` (not just the id set)
+  // is also kept here: the global `terminal.split`/`terminal.splitVertical`/
+  // `terminal.close` keyboard shortcuts (keybindings.ts) still need to
+  // reach the PANEL's active group when focus is inside it, and there is no
+  // ChatView-reachable ref into a sibling dock panel the way there was into
+  // the old right-panel `activeRightPanelSurface` — this store IS that
+  // reachable state, same as `TerminalDockPanel.tsx` reads for itself.
+  const terminalDockState = useTerminalDockStore((state) =>
+    selectThreadTerminalDockState(state.byThreadKey, activeThreadRef),
+  );
+  const activeTerminalDockGroup =
+    terminalDockState.groups.find((group) => group.id === terminalDockState.activeGroupId) ?? null;
   const panelTerminalIds = useMemo(
-    () =>
-      new Set(
-        rightPanelState.surfaces.flatMap((surface) =>
-          surface.kind === "terminal" ? surface.terminalIds : [],
-        ),
-      ),
-    [rightPanelState.surfaces],
+    () => new Set(terminalDockState.groups.flatMap((group) => group.terminalIds)),
+    [terminalDockState.groups],
   );
   const allocatableActiveTerminalIds = useMemo(
     () => [...new Set([...activeKnownTerminalIds, ...panelTerminalIds])],
     [activeKnownTerminalIds, panelTerminalIds],
   );
-  const previewPanelOpen = activeRightPanelKind === "preview" && isPreviewSupportedInRuntime();
   const rightPanelOpen = rightPanelState.isOpen;
-  const canMaximizeRightPanel = rightPanelOpen && !shouldUsePlanSidebarSheet;
+  const canMaximizeRightPanel = rightPanelOpen && !shouldUseRightPanelSheet;
   const rightPanelMaximized =
     canMaximizeRightPanel && maximizedRightPanelThreadKey === routeThreadKey;
-  const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUsePlanSidebarSheet;
+  const inlineRightPanelOwnsTitleBar = rightPanelOpen && !shouldUseRightPanelSheet;
 
-  useEffect(() => {
-    if (!activeThreadRef) return;
-    useRightPanelStore
-      .getState()
-      .reconcileBrowserSurfaces(activeThreadRef, Object.keys(activePreviewState.sessions));
-  }, [activePreviewState.sessions, activeThreadRef]);
+  // Task #53: the `reconcileBrowserSurfaces` effect that used to live here
+  // is DELETED, not ported — `BrowserDockPanel.tsx` reads
+  // `previewStateStore`'s own `sessions` directly (see its own doc
+  // comment), so there is no separate right-panel surface list left to
+  // keep in sync with the server's known tabs.
 
   useEffect(() => {
     if (!activeThreadRef || !activePreviewMiniPlayer) return;
     const miniTabStillExists = Boolean(activePreviewState.sessions[activePreviewMiniPlayer.tabId]);
-    const sameTabOpenInPanel =
-      previewPanelOpen &&
-      activeRightPanelSurface?.kind === "preview" &&
-      activeRightPanelSurface.resourceId === activePreviewMiniPlayer.tabId;
-    if (!miniTabStillExists || sameTabOpenInPanel) {
+    // Task #53: used to also check `previewPanelOpen && activeRightPanel-
+    // Surface?.kind === "preview" && ....resourceId === tabId` — whether
+    // the SAME tab was ALSO the active surface in the (then-shared) right
+    // panel. Now that Browser is its own dock panel, there is no
+    // synchronous way to ask dockview "is this panel currently open" (no
+    // such query exists on `chatDockHandle.ts`/`DockviewLayout.tsx`,
+    // unlike the old `rightPanelStore`'s plain `isOpen` boolean). This
+    // compares against `previewStateStore`'s own `activeTabId` instead —
+    // directionally the same signal ("this tab became the one showing
+    // elsewhere"), just without the extra "and the panel is visible"
+    // guard. Slightly more eager to auto-close the mini-player than
+    // before; never wrong in the other direction (never leaves a
+    // duplicate-content mini-player open when it shouldn't).
+    const sameTabActiveElsewhere = activePreviewState.activeTabId === activePreviewMiniPlayer.tabId;
+    if (!miniTabStillExists || sameTabActiveElsewhere) {
       usePreviewMiniPlayerStore.getState().close(activeThreadRef);
     }
-  }, [
-    activePreviewMiniPlayer,
-    activePreviewState.sessions,
-    activeRightPanelSurface,
-    activeThreadRef,
-    previewPanelOpen,
-  ]);
-
-  const planSidebarOpen = activeRightPanelKind === "plan";
+  }, [activePreviewMiniPlayer, activePreviewState, activeThreadRef]);
 
   const existingOpenTerminalThreadKeys = useMemo(() => {
     const existingThreadKeys = new Set<string>([...serverThreadKeys, ...draftThreadKeys]);
     return openTerminalThreadKeys.filter((nextThreadKey) => existingThreadKeys.has(nextThreadKey));
   }, [draftThreadKeys, openTerminalThreadKeys, serverThreadKeys]);
   const activeLatestTurn = activeThread?.latestTurn ?? null;
-  const sourcePlanThreadRef = useMemo(() => {
-    const sourceThreadId = activeLatestTurn?.sourceProposedPlan?.threadId;
-    if (!activeThread || !sourceThreadId || sourceThreadId === activeThread.id) {
-      return null;
-    }
-    return scopeThreadRef(activeThread.environmentId, sourceThreadId);
-  }, [activeLatestTurn?.sourceProposedPlan?.threadId, activeThread]);
-  const sourceThreadProposedPlans = useThreadProposedPlans(sourcePlanThreadRef);
-  const threadPlanCatalog = useMemo<ThreadPlanCatalogEntry[]>(() => {
-    if (!activeThread) {
-      return [];
-    }
-    const entries: ThreadPlanCatalogEntry[] = [
-      { id: activeThread.id, proposedPlans: activeThread.proposedPlans },
-    ];
-    if (sourcePlanThreadRef) {
-      entries.push({
-        id: sourcePlanThreadRef.threadId,
-        proposedPlans: sourceThreadProposedPlans,
-      });
-    }
-    return entries;
-  }, [activeThread, sourcePlanThreadRef, sourceThreadProposedPlans]);
+  // Reading a finished thread clears the sidebar's Done badge. The visit is
+  // stamped at the turn's completion time — not now/updatedAt — so it clears
+  // exactly the completion the user is looking at: a wake or completion that
+  // lands later still gets its signal (markThreadVisited never moves the
+  // timestamp backwards).
+  useEffect(() => {
+    const completedAt = serverThread?.latestTurn?.completedAt;
+    if (!serverThread?.id || !completedAt) return;
+    markThreadVisited(
+      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
+      completedAt,
+    );
+  }, [
+    markThreadVisited,
+    serverThread?.environmentId,
+    serverThread?.id,
+    serverThread?.latestTurn?.completedAt,
+  ]);
   useEffect(() => {
     setMountedTerminalThreadKeys((currentThreadIds) => {
       const nextThreadIds = reconcileMountedTerminalThreadIds({
@@ -1619,9 +1524,24 @@ function ChatViewContent(props: ChatViewProps) {
     });
   }, [activeThreadKey, existingOpenTerminalThreadKeys, terminalUiState.terminalOpen]);
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
-  const activeProjectRef = activeThread
-    ? scopeProjectRef(activeThread.environmentId, activeThread.projectId)
-    : null;
+  // Memoized on the underlying primitives, not recomputed as a fresh object
+  // every render — `scopeProjectRef` returns a plain object literal
+  // (`packages/client-runtime/src/environment/scoped.ts`), so an
+  // unmemoized call here is a NEW reference on every render regardless of
+  // whether the project actually changed. Found live (2026-08-04,
+  // team-lead + presence-authz): this fed straight into the Unity
+  // setup-probe `useEffect` below (dependency array includes
+  // `activeProjectRef`), which re-fired on every ChatView re-render for
+  // any reason — measured at ~10 requests/second sustained on the
+  // owner's real build, each one shelling out to the real `unity` CLI.
+  // `useProject` a few lines down, and every OTHER consumer of
+  // `activeProjectRef` in this component, get the same stability fix for
+  // free.
+  const activeProjectRef = useMemo(
+    () =>
+      activeThread ? scopeProjectRef(activeThread.environmentId, activeThread.projectId) : null,
+    [activeThread?.environmentId, activeThread?.projectId],
+  );
   const activeProject = useProject(activeProjectRef);
   const handleNewThreadInActiveProject = useCallback(() => {
     startNewThreadForProject(activeProjectRef, handleNewThread);
@@ -1630,52 +1550,309 @@ function ChatViewContent(props: ChatViewProps) {
     activeThread ? environmentShell.stateAtom(activeThread.environmentId) : null,
   );
   const activeEnvironmentBootstrapComplete = activeEnvironmentShell.data?.snapshot._tag === "Some";
-  const activeProjectKey = activeProject
-    ? `${activeProject.environmentId}:${activeProject.workspaceRoot}`
-    : null;
-  const [pendingFileSurfaceIdsByProject, setPendingFileSurfaceIdsByProject] = useState<
-    ReadonlyMap<string, ReadonlySet<string>>
-  >(() => new Map());
-  const pendingFileSurfaceIds = activeProjectKey
-    ? (pendingFileSurfaceIdsByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS)
-    : EMPTY_PENDING_FILE_SURFACE_IDS;
-  const handleFilePendingChange = useCallback(
-    (relativePath: string, pending: boolean) => {
-      if (!activeProjectKey) return;
-      setPendingFileSurfaceIdsByProject((currentByProject) => {
-        const current = currentByProject.get(activeProjectKey) ?? EMPTY_PENDING_FILE_SURFACE_IDS;
-        const surfaceId = `file:${relativePath}`;
-        if (current.has(surfaceId) === pending) return currentByProject;
-        const next = new Set(current);
-        if (pending) next.add(surfaceId);
-        else next.delete(surfaceId);
-        const nextByProject = new Map(currentByProject);
-        if (next.size === 0) nextByProject.delete(activeProjectKey);
-        else nextByProject.set(activeProjectKey, next);
-        return nextByProject;
-      });
-    },
-    [activeProjectKey],
+
+  // Task #52 (Play/Stop toolbar): a SECOND `useEditorPresence` connection,
+  // alongside the one `EditorPresenceChips.tsx` already opens inside
+  // ChatComposer — a known, deliberate simplification, not an oversight.
+  // Sharing one connection across both call sites is a real improvement but
+  // a separate refactor from building the toolbar; this hook was designed
+  // to be callable from anywhere (plain React hook, no singleton guard), so
+  // a second subscriber is correct today, just not the cheapest shape.
+  const engineToolbarEditorPresence = useEditorPresence(environmentId);
+  // Owner ruling: "it's not a 'pick your project', it's just detection of
+  // project type, so we should not have it selectable." Was
+  // `selectProjectEngineType(overrideByProjectKey, ref, detectedEngineType)`
+  // — a client-local localStorage override (`engineSelectorStore.ts`,
+  // deleted with this change) that always won over detection. Now
+  // `resolvedEngineType` IS `activeProject.engineType`, full stop — no
+  // client-side value can ever disagree with the server's own detection
+  // again.
+  const resolvedEngineType: EngineType | null = activeProject?.engineType ?? null;
+  // no-engine-ui-for-non-game-projects spec (rev 2): the THREE-state signal
+  // every game-harness UI gate must key off — never `resolvedEngineType`
+  // above, whose `?? null` collapse conflates "not a game" with "haven't
+  // loaded the project yet" (see `resolveEngineChipState`'s own doc comment
+  // for why that collapse is safe for the toolbar's badge but not here).
+  // Drives the composer's editor-presence mount gate and the send-path
+  // prompt-content gate (Scope B/C); `resolvedEngineType` above stays as
+  // EngineToolbar's own input, unchanged.
+  const engineChipState = resolveEngineChipState(activeProject);
+  // Same expression `activeProjectCwd` (this file, further down) computes
+  // for git/"open in" purposes — recomputed here under its own name so a
+  // reader sees why the composer's chip row is scoped this way without
+  // tracing an unrelated git/cwd variable.
+  const presenceWorkspaceRoot: string | null = activeProject?.workspaceRoot ?? null;
+  const connectedProjectEditor = resolveConnectedEditorForProject(
+    engineToolbarEditorPresence.editors,
+    activeProject,
   );
-  const configuredPreviewUrls = useMemo(
-    () => getConfiguredPreviewUrls(activeProject?.scripts),
-    [activeProject?.scripts],
+  const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
+  const clientSettingsHydrated = useClientSettingsHydrated();
+  // Upstream's per-project pending-file-surface state ("file" right-panel
+  // surfaces) is deliberately NOT taken: the fork's Files panel is a dock
+  // panel (#61) and its pending state lives there — the RightPanelTabs call
+  // sites pass EMPTY_PENDING_FILE_SURFACE_IDS by construction.
+  // SUPERSEDED 2026-08-10 (unity-playstate-presence.md): this used to
+  // say "Unity has no presence feed to read a play state from" — it does
+  // now (Unity package >=0.3.1 publishes `playState`; see
+  // `resolveEngineToolbarView`'s unity-cli branch, which prefers
+  // `connectedProjectEditor?.playState` over this echo). This state stays
+  // as the FALLBACK for when presence has no opinion (no publisher
+  // connected, an older package, or the post-reconnect null window): the
+  // CLI route's successful responses carry a freshly re-read
+  // `UnityEditorStatus` (`UnityPipelineClient` re-reads status before
+  // returning, so a caller never has to separately poll), and this is where
+  // that lands. Reset per project so switching projects never shows a stale
+  // reading from a different one — presence-backed engines don't need this
+  // because `connectedProjectEditor` itself is re-derived per project
+  // already; this echo's own per-project reset stays load-bearing precisely
+  // because it's now only a fallback, not the sole source.
+  const [unityPlayState, setUnityPlayState] = useState<EditorPresencePlayState | null>(null);
+  useEffect(() => {
+    setUnityPlayState(null);
+  }, [activeProjectRef]);
+  // #92 increment 2 / #106 fix: the probe-driven replacement for "always
+  // show the control cluster enabled, discover it doesn't work by clicking
+  // Play." `unitySetupProbeAtom` (apps/web/src/unity/unitySetupProbeAtom.ts)
+  // REACTIVELY waits on the environment's prepared-connection atom becoming
+  // ready, rather than reading it as a one-shot snapshot — the root cause of
+  // #106: the OLD version of this effect called `readPreparedConnection`
+  // (a synchronous `appAtomRegistry.get(...)` read) exactly once per
+  // `[activeProjectRef, resolvedEngineType, environmentId]` tuple; if that
+  // snapshot ran before the environment's async connection-prep/auth
+  // handshake finished, the effect bailed out (`if (!prepared) return;`)
+  // having set NEITHER a result NOR an error, and nothing in that
+  // dependency array ever changed again to retry — a permanent "Checking
+  // Unity's status…" with no way out. `useEnvironmentQuery` (already used a
+  // few lines up for `activeEnvironmentShell`) is the established wrapper
+  // for exactly this shape of atom: `data`/`error`/`refresh` map onto the
+  // classified `UnitySetupProbeResult`, a stated failure reason (a rejected
+  // fetch OR the atom's own bounded wait for the connection timing out —
+  // never a silent, indefinite bail), and the toolbar's retry affordance.
+  // `null` when `resolvedEngineType !== "unity"` so no probe is even
+  // mounted for a non-Unity project.
+  const unitySetupQuery = useEnvironmentQuery(
+    resolvedEngineType === "unity" && activeProjectRef
+      ? unitySetupProbeAtom(activeProjectRef)
+      : null,
+  );
+  // Stale-while-revalidate (see `resolveUnitySetupForView`'s own doc
+  // comment): keep the last classified result rendered through background
+  // re-checks so the header never flicks through the no-data shape on
+  // window refocus. Keyed by the scoped project so project A's last-good
+  // can never dress project B's header.
+  const unitySetupLastGoodRef = useRef<{
+    readonly key: string | null;
+    readonly value: NonNullable<typeof unitySetupQuery.data> | null;
+  }>({ key: null, value: null });
+  const unitySetupScopeKey = activeProjectRef ? scopedProjectKey(activeProjectRef) : null;
+  if (unitySetupLastGoodRef.current.key !== unitySetupScopeKey) {
+    unitySetupLastGoodRef.current = { key: unitySetupScopeKey, value: null };
+  }
+  const unitySetupResolution = resolveUnitySetupForView({
+    data: unitySetupQuery.data,
+    error: unitySetupQuery.error,
+    isPending: unitySetupQuery.isPending,
+    lastGood: unitySetupLastGoodRef.current.value,
+  });
+  unitySetupLastGoodRef.current = {
+    key: unitySetupScopeKey,
+    value: unitySetupResolution.nextLastGood,
+  };
+  const unitySetup = unitySetupResolution.setup;
+  const unitySetupError = unitySetupQuery.error;
+  const engineToolbarView = resolveEngineToolbarView({
+    engineType: resolvedEngineType,
+    connectedEditor: connectedProjectEditor,
+    unityPlayState,
+    unitySetup,
+    unitySetupError,
+    // F13 (merge-gate review, low): this was computed by `useEnvironmentQuery`
+    // all along and simply never threaded anywhere — the toolbar had no way
+    // to distinguish "still checking" from "confirmed not ready" during the
+    // ~35s the connection-wait + HTTP fetch can take. See
+    // `EngineToolbarView.unitySetupPending`'s own doc comment.
+    unitySetupPending: unitySetupQuery.isPending,
+  });
+  const primarySessionState = usePrimarySessionState();
+  // Gates ONLY the editor-presence backend (Godot today) — see
+  // EngineToolbar.logic.ts's EngineDispatchBackend doc comment for why
+  // Unity's and three.js's backends must never be gated on this scope.
+  const hasPresenceCommandScope =
+    primarySessionState.data?.scopes?.includes(AuthPresenceCommandScope) ?? false;
+  const threeJsPlayScript = resolveThreeJsPlayScript(activeProject?.scripts);
+  // `null` means the button is enabled; a non-null string is BOTH the
+  // disabled reason shown in its tooltip AND (via the ternary at the call
+  // site) what decides whether `onPlayThreeJs` is passed at all — the
+  // component disables itself exactly when its `onPlay` prop is absent, so
+  // these two must never disagree.
+  const threeJsUnavailableReason = !isPreviewSupportedInRuntime()
+    ? "Preview only runs in the DevGame desktop app, not a browser tab."
+    : !threeJsPlayScript
+      ? 'No script has "Open preview automatically" configured for this project.'
+      : null;
+  const handleOpenConnectionsSettings = useCallback(() => {
+    void navigate({ to: "/settings/connections" });
+  }, [navigate]);
+  const handleEngineAction = useCallback(
+    (action: EngineToolbarAction) => {
+      // three.js never reaches this handler at all (its Play button calls
+      // `handlePlayThreeJs` directly — see the toolbar mount below).
+      if (engineToolbarView.backend === "editor-presence") {
+        if (!connectedProjectEditor) return;
+        const prepared = readPreparedConnection(environmentId);
+        if (!prepared) return;
+        void dispatchEditorPresenceCommand({
+          httpBaseUrl: prepared.httpBaseUrl,
+          httpAuthorization: prepared.httpAuthorization,
+          sessionId: connectedProjectEditor.session.id,
+          action,
+        }).catch((cause) => {
+          // Transport failure only (couldn't reach the server) — a
+          // well-formed `{ok:false, error}` the server actually sent back is
+          // not an exception here, and isn't surfaced as one: the toolbar's
+          // own presence-driven state is the source of truth for whether the
+          // command "worked," not this call's return value, per
+          // spec-unity-play-stop.md's "acceptance is an edge, play state is
+          // a level" ruling.
+          console.error(`Failed to send engine command "${action}":`, cause);
+        });
+        return;
+      }
+
+      if (engineToolbarView.backend === "unity-cli") {
+        // Unity has no capability for "step" — `EngineToolbarView.availableActions`
+        // never includes it for this backend (see EngineToolbar.logic.ts's
+        // `UNITY_CLI_ACTIONS`), so `onAction` can never actually be called
+        // with it; this narrows the type rather than silently miscasting.
+        if (action === "step") return;
+        if (!activeProject) return;
+        const prepared = readPreparedConnection(environmentId);
+        if (!prepared) return;
+        void dispatchUnityCommand({
+          httpBaseUrl: prepared.httpBaseUrl,
+          httpAuthorization: prepared.httpAuthorization,
+          workspaceRoot: activeProject.workspaceRoot,
+          action,
+        })
+          .then((outcome) => {
+            // `notReady` and `cliUnavailable` are DIFFERENT problems with
+            // different fixes ("open the project in Unity" vs. "install the
+            // unity CLI") — per UnityCommandResult's own non-negotiable
+            // contract, they must reach the user as the different things
+            // they are, not a generic failure.
+            if (outcome._tag === "ok") {
+              setUnityPlayState(outcome.value.playMode);
+              return;
+            }
+            if (outcome._tag === "notReady") {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "warning",
+                  title: "Unity isn't open for this project",
+                  description:
+                    "Open the project in the Unity Editor, then try again — or wait a moment if it just entered/exited play mode.",
+                }),
+              );
+              return;
+            }
+            if (outcome._tag === "cliUnavailable") {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: "Unity CLI isn't installed",
+                  description: "The `unity` command-line tool isn't available on this machine.",
+                }),
+              );
+              return;
+            }
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: `Unity command "${action}" failed`,
+                description: outcome.message,
+              }),
+            );
+          })
+          .catch((cause) => {
+            // Transport failure only — see the editor-presence branch's
+            // identical comment above for why this stays separate from a
+            // well-formed `{_tag:"error"}` the server sent back.
+            console.error(`Failed to send Unity command "${action}":`, cause);
+          });
+        return;
+      }
+
+      console.warn(
+        `Engine command "${action}" has no dispatch route wired yet for backend "${engineToolbarView.backend}".`,
+      );
+    },
+    [activeProject, connectedProjectEditor, engineToolbarView.backend, environmentId],
   );
 
+  // Task #61: this used to reconcile rightPanelStore's own "files"/"file"
+  // surfaces; both moved to fileExplorerStore.ts along with the rest of
+  // "which file is open" (see that store's own doc comment). Kept HERE
+  // rather than moved into FilesDockPanel.tsx — activeEnvironmentBootstrapComplete
+  // is a ChatView-local query the dock panel has no cheap way to re-derive,
+  // while every other input this effect needs is already sitting right here.
   useEffect(() => {
     if (!activeThreadRef || !activeEnvironmentBootstrapComplete) return;
-    useRightPanelStore.getState().reconcileFileSurfaces(activeThreadRef, activeProject !== null);
+    useFileExplorerStore.getState().reconcileFiles(activeThreadRef, activeProject !== null);
   }, [activeEnvironmentBootstrapComplete, activeProject, activeThreadRef]);
 
   // Compute the list of environments this logical project spans, used to
   // drive the environment picker in BranchToolbar.
   const allProjects = useProjects();
   const primaryEnvironmentId = primaryEnvironment?.environmentId ?? null;
+  useEffect(() => {
+    if (!clientSettingsHydrated || !activeThreadRef || !activeProject) return;
+    // Reuse the sidebar's grouping so history follows the project rows the user
+    // sees. Deriving the key from the active project alone would miss the
+    // identity a duplicate row borrows from its siblings.
+    const logicalKeyByPhysicalKey = buildPhysicalToLogicalProjectKeyMap({
+      projects: allProjects,
+      settings: projectGroupingSettings,
+      primaryEnvironmentId,
+    });
+    useBrowserHistoryStore
+      .getState()
+      .registerThreadProject(
+        activeThreadRef,
+        logicalKeyByPhysicalKey.get(derivePhysicalProjectKey(activeProject)) ??
+          deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings),
+      );
+  }, [
+    activeProject,
+    activeThreadRef,
+    allProjects,
+    clientSettingsHydrated,
+    primaryEnvironmentId,
+    projectGroupingSettings,
+  ]);
   const activeEnvironment =
     activeThread == null ? null : (environmentById.get(activeThread.environmentId) ?? null);
   const activeEnvironmentConnectionPhase = activeEnvironment?.connection.phase ?? "available";
   const activeEnvironmentUnavailable =
     activeEnvironment !== null && activeEnvironmentConnectionPhase !== "connected";
+  const activeReconnectingEnvironmentId =
+    activeEnvironmentConnectionPhase === "connecting" ||
+    activeEnvironmentConnectionPhase === "reconnecting"
+      ? (activeEnvironment?.environmentId ?? null)
+      : null;
+  const [reconnectWarningGraceElapsedEnvironmentId, setReconnectWarningGraceElapsedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const reconnectWarningGraceElapsed = hasEnvironmentReconnectWarningGraceElapsed(
+    activeReconnectingEnvironmentId,
+    reconnectWarningGraceElapsedEnvironmentId,
+  );
+  useEffect(() => {
+    setReconnectWarningGraceElapsedEnvironmentId(null);
+    if (activeReconnectingEnvironmentId === null) return;
+    return scheduleEnvironmentReconnectWarning(() =>
+      setReconnectWarningGraceElapsedEnvironmentId(activeReconnectingEnvironmentId),
+    );
+  }, [activeReconnectingEnvironmentId]);
   const activeEnvironmentUnavailableLabel = activeEnvironment?.label ?? null;
   const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
     if (!activeEnvironmentUnavailable || !activeEnvironmentUnavailableLabel || !activeEnvironment) {
@@ -1704,7 +1881,6 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [retryEnvironment],
   );
-  const projectGroupingSettings = selectProjectGroupingSettings(settings);
   const logicalProjectEnvironments = useMemo(() => {
     if (!activeProject) return [];
     const logicalKey = deriveLogicalProjectKeyFromSettings(activeProject, projectGroupingSettings);
@@ -1738,6 +1914,14 @@ function ChatViewContent(props: ChatViewProps) {
     return envs;
   }, [activeProject, allProjects, projectGroupingSettings, primaryEnvironmentId, environmentById]);
   const hasMultipleEnvironments = logicalProjectEnvironments.length > 1;
+  const activeEnvironmentOption =
+    logicalProjectEnvironments.find(
+      (environment) => environment.environmentId === activeThread?.environmentId,
+    ) ?? null;
+  const showComposerEnvironmentIndicator = shouldShowEnvironmentIndicator({
+    activeEnvironment: activeEnvironmentOption,
+    canPickEnvironment: hasMultipleEnvironments,
+  });
 
   const openPullRequestDialog = useCallback(
     (reference?: string) => {
@@ -1844,25 +2028,6 @@ function ChatViewContent(props: ChatViewProps) {
     [openOrReuseProjectDraftThread],
   );
 
-  useEffect(() => {
-    if (!serverThread?.id) return;
-    const threadUpdatedAt = Date.parse(serverThread.updatedAt);
-    if (Number.isNaN(threadUpdatedAt)) return;
-    const lastVisitedAt = activeThreadLastVisitedAt ? Date.parse(activeThreadLastVisitedAt) : NaN;
-    if (!Number.isNaN(lastVisitedAt) && lastVisitedAt >= threadUpdatedAt) return;
-
-    markThreadVisited(
-      scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id)),
-      serverThread.updatedAt,
-    );
-  }, [
-    activeThreadLastVisitedAt,
-    markThreadVisited,
-    serverThread?.environmentId,
-    serverThread?.id,
-    serverThread?.updatedAt,
-  ]);
-
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider =
     activeThread?.modelSelection.instanceId ??
@@ -1920,12 +2085,16 @@ function ChatViewContent(props: ChatViewProps) {
     // While an update runs, transient connect blips are expected (the server
     // restarts) and the update banner already shows progress. Hard failure
     // phases still surface so the Reconnect action stays reachable.
-    const suppressUnavailableBanner = updateRunning && environmentReconnecting;
+    const suppressUnavailableBanner =
+      environmentReconnecting &&
+      (updateRunning || (!reconnectingThroughVersionSkew && !reconnectWarningGraceElapsed));
     if (activeEnvironmentUnavailableState && unavailableConnection && !suppressUnavailableBanner) {
       if (reconnectingThroughVersionSkew) {
         items.push({
           id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
           variant: "default",
+          // Live connection status: calm styling, but it must front the stack.
+          urgent: true,
           icon: (
             <span
               className="size-1.5 animate-status-pulse rounded-full bg-foreground"
@@ -1979,31 +2148,44 @@ function ChatViewContent(props: ChatViewProps) {
       const updateFailed = serverUpdateState.status === "failed";
       items.push({
         id: `server-version:${serverUpdateEnvironmentId}`,
-        variant: updateFailed ? "error" : updateInProgress ? "default" : "warning",
-        icon: updateInProgress ? (
-          <span
-            className="size-1.5 animate-status-pulse rounded-full bg-foreground"
-            aria-hidden="true"
-          />
-        ) : (
-          <TriangleAlertIcon />
-        ),
+        variant: updateFailed ? "error" : "default",
+        // A running update is live progress the user is waiting on; only the
+        // idle "update available" offer is calm enough to stack behind.
+        urgent: updateInProgress,
+        // In-flight and failed states carry their own status dot inside
+        // ServerUpdateProgress; only the idle offer needs an icon.
+        icon:
+          updateInProgress || updateFailed ? null : (
+            <span
+              className="size-1.5 rounded-full border border-muted-foreground/40"
+              aria-hidden="true"
+            />
+          ),
         title:
-          updateInProgress || updateFailed
-            ? `${updateFailed ? "Could not update" : "Updating"} ${versionMismatchServerLabel}`
-            : "Client and server versions differ",
+          updateInProgress || updateFailed ? (
+            `${updateFailed ? "Could not update" : "Updating"} ${versionMismatchServerLabel}`
+          ) : versionMismatch ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button type="button" className="cursor-help rounded-sm text-left">
+                    Server update available
+                  </button>
+                }
+              />
+              <TooltipPopup side="top">
+                {versionMismatchServerLabel} {versionMismatch.serverVersion}{" "}
+                <span aria-hidden="true">→</span> {versionMismatch.clientVersion}
+              </TooltipPopup>
+            </Tooltip>
+          ) : (
+            "Server update available"
+          ),
         description:
           updateInProgress || updateFailed ? (
-            <ServerUpdateProgress
-              fromVersion={serverUpdateState.fromVersion}
-              state={serverUpdateState}
-            />
-          ) : versionMismatch ? (
-            <>
-              Client {versionMismatch.clientVersion} is connected to {versionMismatchServerLabel}{" "}
-              {versionMismatch.serverVersion}.{" "}
-              {serverUpdateGuidance(versionMismatchSelfUpdate, versionMismatchServerLabel)}
-            </>
+            <ServerUpdateProgress state={serverUpdateState} />
+          ) : versionMismatchSelfUpdate === "desktop-managed" ? (
+            serverUpdateGuidance(versionMismatchSelfUpdate, versionMismatchServerLabel)
           ) : null,
         // The desktop-managed guidance is already the description; the action
         // slot would only repeat it.
@@ -2016,13 +2198,13 @@ function ChatViewContent(props: ChatViewProps) {
               serverLabel={versionMismatchServerLabel}
               selfUpdate={versionMismatchSelfUpdate}
               targetVersion={versionMismatch.clientVersion}
-              {...(updateFailed ? { label: "Retry update" } : {})}
+              label={updateFailed ? "Retry" : "Update"}
             />
           ),
         ...(updateInProgress || updateFailed || !versionMismatchDismissKey
           ? {}
           : {
-              dismissLabel: "Dismiss version mismatch warning",
+              dismissLabel: "Dismiss update notice",
               onDismiss: () => {
                 dismissVersionMismatch(versionMismatchDismissKey);
                 setDismissedVersionMismatchKey(versionMismatchDismissKey);
@@ -2033,6 +2215,7 @@ function ChatViewContent(props: ChatViewProps) {
     return items;
   }, [
     activeEnvironmentUnavailableState,
+    reconnectWarningGraceElapsed,
     handleReconnectActiveEnvironment,
     navigate,
     setDismissedVersionMismatchKey,
@@ -2053,6 +2236,19 @@ function ChatViewContent(props: ChatViewProps) {
   const phase = derivePhase(activeThread?.session ?? null);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
   const workLogEntries = useMemo(() => deriveWorkLogEntries(threadActivities), [threadActivities]);
+  const turnPlans = useMemo(() => deriveTurnPlans(threadActivities), [threadActivities]);
+  // Native subagent fold: memoized by activity-list identity, shared by the
+  // Agents surface, live strip, and workflow cards. v2Projection is null
+  // until orchestration-v2 lands (source precedence lives in the derive).
+  // sessionLive derives interruption for agents orphaned by session death.
+  const agentSessionLive = phase !== "disconnected";
+  const agentPanelModel = useMemo(
+    () =>
+      deriveAgentPanelModel({
+        agents: foldSubagentActivities(threadActivities, { sessionLive: agentSessionLive }),
+      }),
+    [agentSessionLive, threadActivities],
+  );
   const pendingApprovals = useMemo(
     () => derivePendingApprovals(threadActivities),
     [threadActivities],
@@ -2103,21 +2299,25 @@ function ChatViewContent(props: ChatViewProps) {
       activeLatestTurn?.turnId ?? null,
     );
   }, [activeLatestTurn?.turnId, activeThread?.proposedPlans, latestTurnSettled]);
-  const sidebarProposedPlan = useMemo(
-    () =>
-      findSidebarProposedPlan({
-        threads: threadPlanCatalog,
-        latestTurn: activeLatestTurn,
-        latestTurnSettled,
-        threadId: activeThread?.id ?? null,
-      }),
-    [activeLatestTurn, activeThread?.id, latestTurnSettled, threadPlanCatalog],
-  );
   const activePlan = useMemo(
     () => deriveActivePlanState(threadActivities, activeLatestTurn?.turnId ?? undefined),
     [activeLatestTurn?.turnId, threadActivities],
   );
-  const planSidebarLabel = sidebarProposedPlan || interactionMode === "plan" ? "Plan" : "Tasks";
+  // Current step for the in-chat working row: only for the running turn's own
+  // plan (deriveActivePlanState falls back to older turns' plans, which must
+  // not label fresh work). Falls back to the first pending step so an
+  // all-pending freshly written plan labels the row, matching the chip and
+  // the server's planProgress.
+  const workingStepLabel = useMemo(() => {
+    if (!activePlan || activePlan.turnId !== (activeLatestTurn?.turnId ?? null)) {
+      return null;
+    }
+    return (
+      activePlan.steps.find((step) => step.status === "inProgress")?.step ??
+      activePlan.steps.find((step) => step.status === "pending")?.step ??
+      null
+    );
+  }, [activeLatestTurn?.turnId, activePlan]);
   const showPlanFollowUpPrompt =
     pendingUserInputs.length === 0 &&
     interactionMode === "plan" &&
@@ -2386,8 +2586,13 @@ function ChatViewContent(props: ChatViewProps) {
   }, [attachmentPreviewHandoffByMessageId, displayServerMessages, optimisticUserMessages]);
   const timelineEntries = useMemo(
     () =>
-      deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
-    [activeThread?.proposedPlans, timelineMessages, workLogEntries],
+      deriveTimelineEntries(
+        timelineMessages,
+        activeThread?.proposedPlans ?? [],
+        workLogEntries,
+        turnPlans,
+      ),
+    [activeThread?.proposedPlans, timelineMessages, turnPlans, workLogEntries],
   );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
   const draftHeroDockRequested =
@@ -2504,7 +2709,14 @@ function ChatViewContent(props: ChatViewProps) {
     terminalUiLaunchContext?.threadId === activeThreadId ? terminalUiLaunchContext : null;
   // Default true while loading to avoid toolbar flicker.
   const isGitRepo = gitStatusQuery.data?.isRepo ?? true;
-  const showComposerContextStrip = isGitRepo && activeProject !== null;
+  const showComposerContextStrip = shouldShowComposerContextStrip({
+    hasActiveProject: activeProject !== null,
+    isGitRepo,
+    showEnvironmentIndicator: showComposerEnvironmentIndicator,
+  });
+  // Upstream's initialDiffPanelGitScope/diffPanelGitStatusResolutionKey are
+  // deliberately NOT taken: the fork's DiffDockPanel computes its own scope
+  // from the same gitStatusQuery (#56).
   const terminalShortcutLabelOptions = useMemo(
     () => ({
       context: {
@@ -2976,6 +3188,17 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
+  // Task #52: the engine toolbar's three.js Play button. three.js has no
+  // engine to command — running the configured preview script (found by
+  // `resolveThreeJsPlayScript`) through the SAME path a manually-triggered
+  // script already uses is the entire mechanism; `runProjectScript` already
+  // owns the auto-open-preview watch internally (see its own P1-E comment
+  // above), so there is nothing further to wire here.
+  const handlePlayThreeJs = useCallback(() => {
+    if (!threeJsPlayScript) return;
+    void runProjectScript(threeJsPlayScript);
+  }, [runProjectScript, threeJsPlayScript]);
+
   const persistProjectScripts = useCallback(
     async (input: {
       projectId: ProjectId;
@@ -3157,79 +3380,73 @@ function ChatViewContent(props: ChatViewProps) {
   const toggleInteractionMode = useCallback(() => {
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
-  const dismissPlanSidebarForCurrentTurn = useCallback(() => {
-    planSidebarDismissedForTurnRef.current =
-      activePlan?.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
-  }, [activePlan?.turnId, sidebarProposedPlan?.turnId]);
-  const togglePlanSidebar = useCallback(() => {
-    if (!activeThreadRef) return;
-    if (planSidebarOpen) {
-      dismissPlanSidebarForCurrentTurn();
-    } else {
-      planSidebarDismissedForTurnRef.current = null;
-    }
-    useRightPanelStore.getState().toggle(activeThreadRef, "plan");
-  }, [activeThreadRef, dismissPlanSidebarForCurrentTurn, planSidebarOpen]);
-  const closePlanSidebar = useCallback(() => {
-    if (!activeThreadRef) return;
-    setMaximizedRightPanelThreadKey(null);
-    useRightPanelStore.getState().close(activeThreadRef);
-    dismissPlanSidebarForCurrentTurn();
-  }, [activeThreadRef, dismissPlanSidebarForCurrentTurn]);
   const createBrowserSurface = useCallback(() => {
     if (!activeThreadRef) return;
     void addBrowserSurface({ threadRef: activeThreadRef, openPreview });
   }, [activeThreadRef, openPreview]);
   const addDiffSurface = useCallback(() => {
     if (!activeThreadRef || !isServerThread || !isGitRepo) return;
-    if (planSidebarOpen) {
-      dismissPlanSidebarForCurrentTurn();
-    }
+    // Upstream #5558 removed the plan sidebar (plans fold into chat), so the
+    // pre-merge `planSidebarOpen` dismissal here went with it. The fork's
+    // dock stays the diff surface (task #56) — upstream's rightPanelStore
+    // open is the non-fork shape of the same intent.
     openChatDockPanel(DIFF_PANEL_ID);
     onDiffPanelOpen?.();
-  }, [
-    activeThreadRef,
-    dismissPlanSidebarForCurrentTurn,
-    isGitRepo,
-    isServerThread,
-    onDiffPanelOpen,
-    planSidebarOpen,
-  ]);
+  }, [activeThreadRef, isGitRepo, isServerThread, onDiffPanelOpen]);
+  // Task #61: Files moved to a dock panel — same open-only redirect #56 gave
+  // addDiffSurface. openFileSurface (the old onOpenFile passthrough into the
+  // now-removed inline FilePreviewPanel) is gone entirely: FilesDockPanel.tsx
+  // calls fileExplorerStore's own openFile directly, with no ChatView in the
+  // loop at all.
   const addFilesSurface = useCallback(() => {
     if (!activeThreadRef || !activeProject) return;
-    useRightPanelStore.getState().open(activeThreadRef, "files");
+    openChatDockPanel(FILES_PANEL_ID);
   }, [activeProject, activeThreadRef]);
-  const openFileSurface = useCallback(
-    (relativePath: string) => {
-      if (!activeThreadRef || !activeProject) return;
-      useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
-    },
-    [activeProject, activeThreadRef],
-  );
+  // Task #53: used to branch on `previewPanelOpen` and manually decide
+  // between reusing `activePreviewState.activeTabId` or creating a new tab
+  // — all of that decision now lives inside `BrowserDockPanel.tsx` itself
+  // (its own empty-state-vs-active-tab branch, reading the exact same
+  // `previewStateStore` state). `toggleChatDockPanel` is the correct
+  // primitive here, same as `onToggleDiff`'s precedent: it opens the panel
+  // (which shows whichever tab is already active, or the empty state if
+  // none) when closed, and closes it via dockview's own `api.close()` when
+  // already open — a genuine toggle, not open-only.
+  const addAgentsSurface = useCallback(() => {
+    if (!activeThreadRef) return;
+    useRightPanelStore.getState().open(activeThreadRef, "agents");
+  }, [activeThreadRef]);
   const togglePreviewPanel = useCallback(() => {
     if (!activeThreadRef || !isPreviewSupportedInRuntime()) return;
-    if (previewPanelOpen) {
-      useRightPanelStore.getState().close(activeThreadRef);
-      return;
-    }
-    const activeTabId = activePreviewState.activeTabId;
-    if (activeTabId) {
-      useRightPanelStore.getState().openBrowser(activeThreadRef, activeTabId);
-    } else {
-      createBrowserSurface();
-    }
-  }, [activePreviewState.activeTabId, activeThreadRef, createBrowserSurface, previewPanelOpen]);
-  const closePreviewPanel = useCallback(() => {
-    if (activeThreadRef) {
-      setMaximizedRightPanelThreadKey(null);
-      useRightPanelStore.getState().close(activeThreadRef);
-    }
+    toggleChatDockPanel(BROWSER_PANEL_ID);
   }, [activeThreadRef]);
+  // Task #53: `addTerminalSurface` is now the open-only redirect
+  // `addDiffSurface`/`addFilesSurface` already established for their own
+  // panels — same name (RightPanelTabs' add-menu and the `terminal.new`
+  // keyboard shortcut both still call it), simplified body. Launching an
+  // actual terminal now happens entirely inside `TerminalDockPanel.tsx`
+  // (its own `onNewTerminal`) for mouse-driven opens; this function only
+  // still does real work for the KEYBOARD-shortcut case below, where focus
+  // is already inside the panel and there is no click to delegate to.
   const addTerminalSurface = useCallback(() => {
+    if (!activeThreadRef || !activeProject) return;
+    openChatDockPanel(TERMINAL_PANEL_ID);
+  }, [activeProject, activeThreadRef]);
+  // The four callbacks below exist ONLY for the global `terminal.new`/
+  // `terminal.split`/`terminal.splitVertical`/`terminal.close` keyboard
+  // shortcuts (keybindings.ts) when `getTerminalFocusOwner()` reports focus
+  // is inside the panel (`data-terminal-owner="right-panel"`, set by
+  // `ThreadTerminalDrawer` itself regardless of which component mounts it —
+  // see terminalFocus.ts). `TerminalDockPanel.tsx` is a SIBLING subtree,
+  // not reachable via ref/context the way `activeRightPanelSurface` used to
+  // be threaded down to it — so these read/write `terminalDockStore`
+  // directly, the same reachable state `TerminalDockPanel.tsx` itself
+  // reads, rather than duplicating panel-only UI (the panel's own tab
+  // strip/buttons still do the mouse-driven equivalent independently).
+  const newPanelTerminal = useCallback(() => {
     if (!activeThreadRef || !activeThreadId || !activeProject) return;
     const cwd = gitCwd ?? activeProject.workspaceRoot;
     const terminalId = nextTerminalId(allocatableActiveTerminalIds);
-    useRightPanelStore.getState().openTerminal(activeThreadRef, terminalId);
+    useTerminalDockStore.getState().openTerminal(activeThreadRef, terminalId);
     setTerminalFocusRequestId((value) => value + 1);
     void openTerminal({
       environmentId: activeThreadRef.environmentId,
@@ -3259,16 +3476,16 @@ function ChatViewContent(props: ChatViewProps) {
         !activeThreadRef ||
         !activeThreadId ||
         !activeProject ||
-        activeRightPanelSurface?.kind !== "terminal" ||
-        activeRightPanelSurface.terminalIds.length >= MAX_TERMINALS_PER_GROUP
+        !activeTerminalDockGroup ||
+        activeTerminalDockGroup.terminalIds.length >= MAX_TERMINALS_PER_GROUP
       ) {
         return;
       }
       const terminalId = nextTerminalId(allocatableActiveTerminalIds);
       const cwd = gitCwd ?? activeProject.workspaceRoot;
-      useRightPanelStore
+      useTerminalDockStore
         .getState()
-        .splitTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId, direction);
+        .splitTerminal(activeThreadRef, activeTerminalDockGroup.id, terminalId, direction);
       setTerminalFocusRequestId((value) => value + 1);
       void openTerminal({
         environmentId: activeThreadRef.environmentId,
@@ -3286,7 +3503,7 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [
       activeProject,
-      activeRightPanelSurface,
+      activeTerminalDockGroup,
       activeThreadId,
       activeThreadRef,
       activeThreadWorktreePath,
@@ -3298,126 +3515,94 @@ function ChatViewContent(props: ChatViewProps) {
   const splitPanelTerminalVertical = useCallback(() => {
     splitPanelTerminal("vertical");
   }, [splitPanelTerminal]);
-  const activatePanelTerminal = useCallback(
-    (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
-      useRightPanelStore
-        .getState()
-        .activateTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
-      setTerminalFocusRequestId((value) => value + 1);
-    },
-    [activeRightPanelSurface, activeThreadRef],
-  );
   const closePanelTerminal = useCallback(
     (terminalId: string) => {
-      if (!activeThreadRef || activeRightPanelSurface?.kind !== "terminal") return;
+      if (!activeThreadRef || !activeTerminalDockGroup) return;
       void closeTerminalMutation({
         environmentId: activeThreadRef.environmentId,
         input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
       });
+      // Suppresses `terminalId` from `terminalUiStateStore`'s own
+      // reconciliation too — same cross-store call the old right-panel
+      // `closePanelTerminal` made, so a just-closed panel terminal can
+      // never transiently flash into the DRAWER before the server reports
+      // it gone.
       storeCloseTerminal(activeThreadRef, terminalId);
-      useRightPanelStore
+      useTerminalDockStore
         .getState()
-        .closeTerminal(activeThreadRef, activeRightPanelSurface.id, terminalId);
+        .closeTerminal(activeThreadRef, activeTerminalDockGroup.id, terminalId);
       setTerminalFocusRequestId((value) => value + 1);
     },
-    [activeRightPanelSurface, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
+    [activeTerminalDockGroup, activeThreadRef, closeTerminalMutation, storeCloseTerminal],
   );
   const activateRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
-      if (surface.kind === "plan") {
-        planSidebarDismissedForTurnRef.current = null;
-      } else if (planSidebarOpen) {
-        dismissPlanSidebarForCurrentTurn();
-      }
       useRightPanelStore.getState().activateSurface(activeThreadRef, surface.id);
-      if (surface.kind === "preview" && surface.resourceId) {
-        setActivePreviewTab(activeThreadRef, surface.resourceId);
-      }
-      if (surface.kind === "terminal") {
-        setTerminalFocusRequestId((value) => value + 1);
-      }
       // Review fix (#56): dropped the `surface.kind === "diff"` branch that
-      // used to live here. It's now unreachable by construction — "diff" is
-      // no longer a member of RightPanelSurface (rightPanelStore.ts), so a
-      // surface passed here can never have that kind; the compiler catching
-      // this comparison is exactly the point of that removal.
+      // used to live here; task #53 drops `surface.kind === "terminal"` the
+      // same way, and its own fourth slice drops `surface.kind ===
+      // "preview"` (which used to call `setActivePreviewTab` here) too. All
+      // three are now unreachable by construction — none is a member of
+      // RightPanelSurface (rightPanelStore.ts) any more, so a surface
+      // passed here can never have that kind; the compiler catching this
+      // comparison is exactly the point of that removal. The 2026-08-06
+      // upstream merge retired "plan" the same way (#5558), so "agents"
+      // (upstream's subagent observability panel) is the only kind this
+      // function can ever actually receive.
     },
-    [activeThreadRef, dismissPlanSidebarForCurrentTurn, planSidebarOpen],
+    // Deps follow the merged body: upstream #5558 deleted the plan sidebar
+    // (our old planSidebar deps), and the fork's #56/#53 deleted the
+    // diff/preview branches (upstream's diffOpen deps). Only the thread ref
+    // survives on either path.
+    [activeThreadRef],
   );
   const toggleRightPanel = useCallback(() => {
     if (!activeThreadRef) return;
-    if (rightPanelOpen) {
-      if (planSidebarOpen) {
-        closePlanSidebar();
-      } else {
-        closePreviewPanel();
-      }
-      return;
-    }
+    // Both open-state special-cases died in this merge: the fork deleted
+    // closePreviewPanel (#53 — preview lives in the dock) and upstream
+    // #5558 deleted closePlanSidebar with the plan sidebar itself. The
+    // store's own visibility toggle is all that's left to do in either
+    // direction.
     useRightPanelStore.getState().toggleVisibility(activeThreadRef);
-  }, [activeThreadRef, closePlanSidebar, closePreviewPanel, planSidebarOpen, rightPanelOpen]);
+  }, [activeThreadRef]);
   const toggleRightPanelMaximized = useCallback(() => {
     if (!canMaximizeRightPanel) return;
     setMaximizedRightPanelThreadKey((threadKey) =>
       threadKey === routeThreadKey ? null : routeThreadKey,
     );
   }, [canMaximizeRightPanel, routeThreadKey]);
-  const cleanupRightPanelSurfaces = useCallback(
-    (surfaces: readonly RightPanelSurface[]) => {
-      if (!activeThreadRef) return;
-      if (surfaces.some((surface) => surface.kind === "plan")) {
-        dismissPlanSidebarForCurrentTurn();
-      }
-
-      for (const surface of surfaces) {
-        if (surface.kind === "preview" && surface.resourceId) {
-          void closePreviewSession({
-            closePreview,
-            snapshot: activePreviewState.sessions[surface.resourceId] ?? null,
-            tabId: surface.resourceId,
-            threadRef: activeThreadRef,
-          });
-        }
-        if (surface.kind === "terminal") {
-          for (const terminalId of surface.terminalIds) {
-            storeCloseTerminal(activeThreadRef, terminalId);
-            void closeTerminalMutation({
-              environmentId: activeThreadRef.environmentId,
-              input: { threadId: activeThreadRef.threadId, terminalId, deleteHistory: true },
-            });
-          }
-        }
-      }
-    },
-    [
-      activeThreadRef,
-      activePreviewState.sessions,
-      closePreview,
-      closeTerminalMutation,
-      dismissPlanSidebarForCurrentTurn,
-      storeCloseTerminal,
-    ],
-  );
-  const syncActivePreviewSurface = useCallback(() => {
-    if (!activeThreadRef) return;
-    const nextActiveSurface = selectActiveRightPanelSurface(
-      useRightPanelStore.getState().byThreadKey,
-      activeThreadRef,
-    );
-    if (nextActiveSurface?.kind === "preview" && nextActiveSurface.resourceId) {
-      setActivePreviewTab(activeThreadRef, nextActiveSurface.resourceId);
-    }
-  }, [activeThreadRef]);
+  // Task #53: `cleanupRightPanelSurfaces` used to also walk `surfaces` for
+  // any "preview" (closing that browser tab's server session) or
+  // "terminal" (destroying its PTY) entries — both dropped, same reasoning
+  // as `activateRightPanelSurface` above: neither kind can appear in a
+  // `RightPanelSurface[]` any more, so the loop body was unreachable dead
+  // code. What's left is genuinely just the plan-sidebar-dismissal side
+  // effect; kept as its own function for call-site continuity rather than
+  // inlining it at all four callers below.
+  const cleanupRightPanelSurfaces = useCallback((surfaces: readonly RightPanelSurface[]) => {
+    // After this merge the only RightPanelSurface kind is "agents"
+    // (upstream #5558 removed "plan"; the fork's #53/#56 already removed
+    // "preview"/"terminal"/"diff" in favor of the dock). An agents
+    // surface is a pure view — no PTY, no preview session, nothing to
+    // release — so both parents' cleanup bodies are unreachable here;
+    // kept as a no-op for call-site continuity.
+    void surfaces;
+  }, []);
+  // `syncActivePreviewSurface`, which used to live here and get called
+  // from all four close-surface callbacks below, is DELETED — its entire
+  // body (`nextActiveSurface?.kind === "preview" && ...resourceId` calling
+  // `setActivePreviewTab`) is unreachable now that "preview" is no longer
+  // a member of RightPanelSurface, same as everything else this task
+  // touched. There is no browser-tab activation left for closing a "plan"
+  // surface to trigger.
   const closeRightPanelSurface = useCallback(
     (surface: RightPanelSurface) => {
       if (!activeThreadRef) return;
       cleanupRightPanelSurfaces([surface]);
       useRightPanelStore.getState().closeSurface(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [activeThreadRef, cleanupRightPanelSurfaces, syncActivePreviewSurface],
+    [activeThreadRef, cleanupRightPanelSurfaces],
   );
   const closeOtherRightPanelSurfaces = useCallback(
     (surface: RightPanelSurface) => {
@@ -3425,14 +3610,8 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaces = rightPanelState.surfaces.filter((entry) => entry.id !== surface.id);
       cleanupRightPanelSurfaces(surfaces);
       useRightPanelStore.getState().closeOtherSurfaces(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeRightPanelSurfacesToRight = useCallback(
     (surface: RightPanelSurface) => {
@@ -3442,51 +3621,14 @@ function ChatViewContent(props: ChatViewProps) {
       const surfaces = rightPanelState.surfaces.slice(surfaceIndex + 1);
       cleanupRightPanelSurfaces(surfaces);
       useRightPanelStore.getState().closeSurfacesToRight(activeThreadRef, surface.id);
-      syncActivePreviewSurface();
     },
-    [
-      activeThreadRef,
-      cleanupRightPanelSurfaces,
-      rightPanelState.surfaces,
-      syncActivePreviewSurface,
-    ],
+    [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces],
   );
   const closeAllRightPanelSurfaces = useCallback(() => {
     if (!activeThreadRef) return;
     cleanupRightPanelSurfaces(rightPanelState.surfaces);
     useRightPanelStore.getState().closeAllSurfaces(activeThreadRef);
   }, [activeThreadRef, cleanupRightPanelSurfaces, rightPanelState.surfaces]);
-  const copyRightPanelFilePath = useCallback((relativePath: string) => {
-    if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Failed to copy path",
-          description: "Clipboard API unavailable.",
-        }),
-      );
-      return;
-    }
-
-    void navigator.clipboard.writeText(relativePath).then(
-      () => {
-        toastManager.add({
-          type: "success",
-          title: "Path copied",
-          description: relativePath,
-        });
-      },
-      (error) => {
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Failed to copy path",
-            description: error instanceof Error ? error.message : "An error occurred.",
-          }),
-        );
-      },
-    );
-  }, []);
   useEffect(
     () =>
       subscribePreviewAction((action) => {
@@ -3578,31 +3720,27 @@ function ChatViewContent(props: ChatViewProps) {
     new Debouncer(() => setShowScrollToBottom(true), { wait: 150 }),
   );
   const timelineScrollModeRef = useRef<TimelineScrollMode>("following-end");
+  // State mirror of the follow mode refs. LegendList's maintainScrollAtEnd
+  // re-pins on its own (independent of the refs), so the timeline needs a
+  // render-visible flag to switch it off once the user scrolls away.
+  const [timelineLiveFollowEnabled, setTimelineLiveFollowEnabled] = useState(true);
   const pendingTimelineAnchorRef = useRef<MessageId | null>(null);
   const positionedTimelineAnchorRef = useRef<MessageId | null>(null);
   const settledTimelineAnchorRef = useRef<MessageId | null>(null);
   const activeTimelineAnchorIndexRef = useRef<number | null>(null);
   const anchorUserScrollGenerationRef = useRef(0);
   const liveFollowUserScrollGenerationRef = useRef<number | null>(0);
-  const pendingAnchorScrollRestoreRef = useRef<{
-    readonly messageId: MessageId;
-    readonly offset: number;
-    readonly userScrollGeneration: number;
-  } | null>(null);
-  const anchorScrollRestoreFrameRef = useRef<number | null>(null);
+  // Manual navigation stops live-follow without removing anchored end space.
+  // Collapsing that space during a gesture clamps the viewport back to the end.
   const cancelTimelineLiveFollowForUserNavigation = useCallback(() => {
     anchorUserScrollGenerationRef.current += 1;
     timelineScrollModeRef.current = "free-scrolling";
     liveFollowUserScrollGenerationRef.current = null;
+    setTimelineLiveFollowEnabled(false);
     pendingTimelineAnchorRef.current = null;
     positionedTimelineAnchorRef.current = null;
     settledTimelineAnchorRef.current = null;
     activeTimelineAnchorIndexRef.current = null;
-    pendingAnchorScrollRestoreRef.current = null;
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      cancelAnimationFrame(anchorScrollRestoreFrameRef.current);
-      anchorScrollRestoreFrameRef.current = null;
-    }
   }, []);
   const cancelTimelineLiveFollowForUserNavigationRef = useRef(
     cancelTimelineLiveFollowForUserNavigation,
@@ -3658,52 +3796,140 @@ function ChatViewContent(props: ChatViewProps) {
     },
     [composerOverlayHeight],
   );
-
   // Live-follow stays active after send/thread-open until an actual list scroll
   // gesture opts out.
   const scrollToEnd = useCallback((animated = false) => {
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+    setTimelineLiveFollowEnabled(true);
     pendingTimelineAnchorRef.current = null;
     activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    void legendListRef.current?.scrollToEnd?.({ animated });
+    setTimelineAnchor((current) =>
+      current.messageId === null ? current : { ...current, messageId: null },
+    );
+    requestAnimationFrame(() => {
+      void legendListRef.current?.scrollToEnd?.({ animated });
+    });
   }, []);
   useEffect(() => {
     let removeListeners: (() => void) | null = null;
-    const frame = requestAnimationFrame(() => {
-      const scrollNode = legendListRef.current?.getScrollableNode();
-      if (!scrollNode) {
-        return;
-      }
-      const handleManualNavigation = () => {
-        cancelTimelineLiveFollowForUserNavigationRef.current();
-      };
-      scrollNode.addEventListener("wheel", handleManualNavigation, {
-        passive: true,
+    let frame: number | null = null;
+    const attach = (remainingAttempts: number) => {
+      frame = requestAnimationFrame(() => {
+        frame = null;
+        const scrollNode = legendListRef.current?.getScrollableNode();
+        if (!scrollNode) {
+          // The list may not have mounted on the first frame after a thread
+          // switch — without a retry the opt-out listeners never attach and
+          // live-follow becomes impossible to escape for the whole thread.
+          if (remainingAttempts > 0) {
+            attach(remainingAttempts - 1);
+          }
+          return;
+        }
+        const handleManualNavigation = () => {
+          cancelTimelineLiveFollowForUserNavigationRef.current();
+        };
+        // The gestures below must only break follow when they can actually
+        // move the viewport away from the live edge. Follow now gates
+        // LegendList's maintainScrollAtEnd, so a spurious break while pinned
+        // at the end produces no scroll event, never re-arms, and streaming
+        // silently stops following. Underflowing content can't scroll at all,
+        // so nothing there should break follow.
+        const contentScrollsUp = () => timelineRealContentOverflowsViewport();
+        // The follow re-arm band, not the strict flag: streaming growth makes
+        // isAtEnd flicker false for a frame before the follow scroll catches
+        // up, and a gesture landing in that window while still pinned would
+        // otherwise break follow with no scroll event left to re-arm it.
+        const viewportIsAwayFromEnd = () =>
+          resolveTimelineIsAtEnd(legendListRef.current?.getState(), composerOverlayHeight) ===
+          false;
+        // Only an upward wheel is a navigation intent; wheeling down while
+        // following either does nothing (at the end) or moves toward it.
+        const handleWheel = (event: WheelEvent) => {
+          if (event.deltaY < 0 && contentScrollsUp()) {
+            handleManualNavigation();
+          }
+        };
+        // Touch direction isn't observable here (touchmove fires on any
+        // finger motion, scrolling or not), so break only once the drag has
+        // actually carried the viewport out of the end band — an upward flick
+        // gets there within its first few events and later touchmoves break.
+        const handleTouchMove = () => {
+          if (viewportIsAwayFromEnd()) {
+            handleManualNavigation();
+          }
+        };
+        // Scrollbar drags produce no wheel/touch events; they are the only
+        // pointerdowns whose target is the scroll node itself rather than a
+        // message row. Content clicks break follow only away from the end
+        // (reading or selecting up there must hold position); clicking near
+        // the live edge keeps following.
+        const handlePointerDown = (event: PointerEvent) => {
+          if (event.target === scrollNode) {
+            if (contentScrollsUp()) {
+              handleManualNavigation();
+            }
+            return;
+          }
+          if (viewportIsAwayFromEnd()) {
+            handleManualNavigation();
+          }
+        };
+        // Keyboard scrolling (PageUp/Home/ArrowUp) bypasses wheel and
+        // pointer events entirely; without this the timeline yanks back to
+        // the end on the next stream chunk.
+        const handleKeyDown = (event: KeyboardEvent) => {
+          switch (event.key) {
+            case "PageUp":
+            case "Home":
+            case "ArrowUp":
+              if (contentScrollsUp()) {
+                handleManualNavigation();
+              }
+              break;
+            default:
+              break;
+          }
+        };
+        scrollNode.addEventListener("wheel", handleWheel, {
+          passive: true,
+        });
+        scrollNode.addEventListener("touchmove", handleTouchMove, {
+          passive: true,
+        });
+        scrollNode.addEventListener("pointerdown", handlePointerDown, {
+          passive: true,
+        });
+        scrollNode.addEventListener("keydown", handleKeyDown);
+        removeListeners = () => {
+          scrollNode.removeEventListener("wheel", handleWheel);
+          scrollNode.removeEventListener("touchmove", handleTouchMove);
+          scrollNode.removeEventListener("pointerdown", handlePointerDown);
+          scrollNode.removeEventListener("keydown", handleKeyDown);
+        };
       });
-      scrollNode.addEventListener("touchmove", handleManualNavigation, {
-        passive: true,
-      });
-      scrollNode.addEventListener("pointerdown", handleManualNavigation, {
-        passive: true,
-      });
-      removeListeners = () => {
-        scrollNode.removeEventListener("wheel", handleManualNavigation);
-        scrollNode.removeEventListener("touchmove", handleManualNavigation);
-        scrollNode.removeEventListener("pointerdown", handleManualNavigation);
-      };
-    });
+    };
+    attach(12);
 
     return () => {
-      cancelAnimationFrame(frame);
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
       removeListeners?.();
     };
-  }, [activeThread?.id]);
+  }, [activeThread?.id, composerOverlayHeight, timelineRealContentOverflowsViewport]);
 
   const onTimelineAnchorReady = useCallback((messageId: MessageId, anchorIndex: number) => {
+    // Anchored-end space can be remeasured when the turn completes. Once the
+    // user has scrolled away (or returned to ordinary end-following), that
+    // remeasurement must not restart the send-time anchor positioning.
+    if (timelineScrollModeRef.current !== "anchoring-new-turn") {
+      return;
+    }
     if (pendingTimelineAnchorRef.current === messageId) {
       pendingTimelineAnchorRef.current = null;
     }
@@ -3725,74 +3951,22 @@ function ChatViewContent(props: ChatViewProps) {
           }
           return;
         }
-        const scrollNode = list.getScrollableNode();
-        let finished = false;
-        const finishAnimatedPositioning = () => {
-          if (finished) {
-            return;
-          }
-          finished = true;
-          window.clearTimeout(fallbackTimer);
-          scrollNode.removeEventListener("scrollend", finishAnimatedPositioning);
-          if (positionedTimelineAnchorRef.current !== messageId) {
-            return;
-          }
-          const scrollOffset = list.getState().scroll;
-          void list.scrollToOffset({ offset: scrollOffset, animated: false });
-          settledTimelineAnchorRef.current = messageId;
-        };
-        const fallbackTimer = window.setTimeout(finishAnimatedPositioning, 750);
-        scrollNode.addEventListener("scrollend", finishAnimatedPositioning, { once: true });
-        void list.scrollToIndex({
-          index: anchorIndex,
-          animated: true,
-          viewPosition: 0,
-          viewOffset: CHAT_LIST_ANCHOR_OFFSET,
-        });
+        void list
+          .scrollToIndex({
+            index: anchorIndex,
+            animated: true,
+            viewPosition: 0,
+            viewOffset: CHAT_LIST_ANCHOR_OFFSET,
+          })
+          .then(() => {
+            if (positionedTimelineAnchorRef.current !== messageId) {
+              return;
+            }
+            settledTimelineAnchorRef.current = messageId;
+          });
       });
     };
     requestAnimationFrame(() => positionAnchor(12));
-  }, []);
-  const onTimelineAnchorSizeChanged = useCallback((messageId: MessageId) => {
-    if (settledTimelineAnchorRef.current !== messageId) {
-      return;
-    }
-    if (liveFollowUserScrollGenerationRef.current === anchorUserScrollGenerationRef.current) {
-      return;
-    }
-    const scrollOffset = legendListRef.current?.getState().scroll;
-    if (scrollOffset === undefined) {
-      return;
-    }
-    if (pendingAnchorScrollRestoreRef.current === null) {
-      pendingAnchorScrollRestoreRef.current = {
-        messageId,
-        offset: scrollOffset,
-        userScrollGeneration: anchorUserScrollGenerationRef.current,
-      };
-    }
-    if (anchorScrollRestoreFrameRef.current !== null) {
-      return;
-    }
-    anchorScrollRestoreFrameRef.current = requestAnimationFrame(() => {
-      anchorScrollRestoreFrameRef.current = null;
-      const pending = pendingAnchorScrollRestoreRef.current;
-      pendingAnchorScrollRestoreRef.current = null;
-      if (
-        pending &&
-        settledTimelineAnchorRef.current === pending.messageId &&
-        pending.userScrollGeneration === anchorUserScrollGenerationRef.current
-      ) {
-        const list = legendListRef.current;
-        const currentScrollOffset = list?.getState().scroll;
-        if (
-          typeof currentScrollOffset === "number" &&
-          Math.abs(currentScrollOffset - pending.offset) <= 2
-        ) {
-          void list?.scrollToOffset({ offset: pending.offset, animated: false });
-        }
-      }
-    });
   }, []);
 
   const onIsAtEndChange = useCallback((isAtEnd: boolean) => {
@@ -3809,6 +3983,7 @@ function ChatViewContent(props: ChatViewProps) {
     if (isAtEnd) {
       timelineScrollModeRef.current = "following-end";
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+      setTimelineLiveFollowEnabled(true);
       showScrollDebouncer.current.cancel();
       setShowScrollToBottom(false);
     } else {
@@ -3818,11 +3993,17 @@ function ChatViewContent(props: ChatViewProps) {
     }
   }, []);
 
+  // Anchored end space intentionally disables LegendList's normal end-follow so
+  // the sent message can stay near the top. T3 only owns streaming adjustments
+  // during that mode; LegendList owns ordinary end-follow everywhere else.
   useEffect(() => {
     if (!activeThread?.id) {
       return;
     }
     if (liveFollowUserScrollGenerationRef.current !== anchorUserScrollGenerationRef.current) {
+      return;
+    }
+    if (timelineScrollModeRef.current !== "anchoring-new-turn") {
       return;
     }
 
@@ -3846,28 +4027,13 @@ function ChatViewContent(props: ChatViewProps) {
           return;
         }
 
-        if (timelineScrollModeRef.current === "anchoring-new-turn") {
-          const metrics = getActiveTimelineTurnMetrics(list);
-          if (!metrics) {
-            return;
-          }
-          if (metrics.scrollDeltaToRevealEnd <= 1) {
-            return;
-          }
-
-          const nextOffset = list.getState().scroll + metrics.scrollDeltaToRevealEnd;
-          void list.scrollToOffset({ offset: nextOffset, animated: false });
+        const metrics = getActiveTimelineTurnMetrics(list);
+        if (!metrics || metrics.scrollDeltaToRevealEnd <= 1) {
           return;
         }
 
-        if (timelineScrollModeRef.current !== "following-end") {
-          return;
-        }
-        if (!timelineRealContentOverflowsViewport(list)) {
-          return;
-        }
-
-        void list.scrollToEnd?.({ animated: false });
+        const nextOffset = list.getState().scroll + metrics.scrollDeltaToRevealEnd;
+        void list.scrollToOffset({ offset: nextOffset, animated: false });
       });
     });
 
@@ -3877,55 +4043,22 @@ function ChatViewContent(props: ChatViewProps) {
         cancelAnimationFrame(secondFrame);
       }
     };
-  }, [
-    activeThread?.id,
-    timelineEntries,
-    getActiveTimelineTurnMetrics,
-    timelineRealContentOverflowsViewport,
-  ]);
+  }, [activeThread?.id, timelineEntries, getActiveTimelineTurnMetrics]);
 
   useEffect(() => {
     setPullRequestDialogState(null);
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "following-end";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+    setTimelineLiveFollowEnabled(true);
     pendingTimelineAnchorRef.current = null;
     positionedTimelineAnchorRef.current = null;
     settledTimelineAnchorRef.current = null;
     activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
     setShowScrollToBottom(false);
-    if (planSidebarOpenOnNextThreadRef.current) {
-      planSidebarOpenOnNextThreadRef.current = false;
-      if (activeThreadRef) {
-        useRightPanelStore.getState().open(activeThreadRef, "plan");
-      }
-    }
-    planSidebarDismissedForTurnRef.current = null;
     // activeThreadRef resets transitively with the active thread.
   }, [activeThread?.id]);
-
-  // Auto-open the plan sidebar when plan/todo steps arrive for the current turn.
-  // Don't auto-open for plans carried over from a previous turn (the user can open manually).
-  useEffect(() => {
-    if (!autoOpenPlanSidebar) return;
-    if (!activePlan) return;
-    if (planSidebarOpen) return;
-    const latestTurnId = activeLatestTurn?.turnId ?? null;
-    if (latestTurnId && activePlan.turnId !== latestTurnId) return;
-    const turnKey = activePlan.turnId ?? sidebarProposedPlan?.turnId ?? "__dismissed__";
-    if (planSidebarDismissedForTurnRef.current === turnKey) return;
-    if (activeThreadRef) {
-      useRightPanelStore.getState().open(activeThreadRef, "plan");
-    }
-  }, [
-    activePlan,
-    activeLatestTurn?.turnId,
-    activeThreadRef,
-    autoOpenPlanSidebar,
-    planSidebarOpen,
-    sidebarProposedPlan?.turnId,
-  ]);
 
   useEffect(() => {
     setIsRevertingCheckpoint(false);
@@ -4038,13 +4171,18 @@ function ChatViewContent(props: ChatViewProps) {
   const supportsSettlement = serverConfig?.environment.capabilities.threadSettlement === true;
   const supportsSnooze = serverConfig?.environment.capabilities.threadSnooze === true;
   const nowMinute = useNowMinute();
+  const snoozeNow = new Date().toISOString();
   const activeThreadSnoozed =
     activeThreadShell !== null &&
     supportsSnooze &&
-    effectiveSnoozed(activeThreadShell, { now: new Date().toISOString() });
+    effectiveSnoozed(activeThreadShell, { now: snoozeNow });
   const [snoozeWakeTick, bumpSnoozeWakeTick] = useState(0);
+  void snoozeWakeTick;
+  const activeThreadWokeAt =
+    activeThreadShell !== null && supportsSnooze
+      ? threadWokeAt(activeThreadShell, { now: snoozeNow })
+      : null;
   useEffect(() => {
-    void snoozeWakeTick;
     if (!activeThreadSnoozed) return;
     const wakeAtMs = Date.parse(activeThreadShell?.snoozedUntil ?? "");
     if (!Number.isFinite(wakeAtMs)) return;
@@ -4054,6 +4192,41 @@ function ChatViewContent(props: ChatViewProps) {
     );
     return () => window.clearTimeout(id);
   }, [activeThreadShell?.snoozedUntil, activeThreadSnoozed, snoozeWakeTick]);
+  const acknowledgeActiveThreadWoke = useCallback(() => {
+    if (activeThreadRef === null || activeThreadWokeAt === null) return;
+    markThreadVisited(scopedThreadKey(activeThreadRef), activeThreadWokeAt);
+  }, [activeThreadRef, activeThreadWokeAt, markThreadVisited]);
+  // Mirror of the sidebar's Woke pill for the open thread: same visit
+  // comparison, same merged/closed-PR suppression (finished work needs no
+  // wake-up call). Drives the dismissible composer banner below.
+  const activeThreadLastVisitedAt = useUiStateStore((store) =>
+    activeThreadKey === null ? undefined : store.threadLastVisitedAtById[activeThreadKey],
+  );
+  const activeThreadWokeVisible = useMemo(() => {
+    if (activeThreadWokeAt === null) return false;
+    if (activeThreadPr?.state === "merged" || activeThreadPr?.state === "closed") return false;
+    const wokeAtMs = Date.parse(activeThreadWokeAt);
+    if (Number.isNaN(wokeAtMs)) return false;
+    // Having the thread open counts as a visit at completedAt (the effect
+    // above stamps it); folding that floor in here keeps a completion-
+    // triggered wake from flashing a banner for one frame before the stamp
+    // lands. An unparseable stored visit counts as never-visited: corrupt
+    // local data must not eat the wake signal.
+    const storedVisitMs = activeThreadLastVisitedAt ? Date.parse(activeThreadLastVisitedAt) : NaN;
+    const completedAtMs = activeLatestTurn?.completedAt
+      ? Date.parse(activeLatestTurn.completedAt)
+      : NaN;
+    const lastVisitedMs = Math.max(
+      Number.isNaN(storedVisitMs) ? -Infinity : storedVisitMs,
+      Number.isNaN(completedAtMs) ? -Infinity : completedAtMs,
+    );
+    return lastVisitedMs < wokeAtMs;
+  }, [
+    activeLatestTurn?.completedAt,
+    activeThreadLastVisitedAt,
+    activeThreadPr?.state,
+    activeThreadWokeAt,
+  ]);
   const activeThreadSettled = useMemo(() => {
     if (activeThreadShell === null || !supportsSettlement) return false;
     return effectiveSettled(activeThreadShell, {
@@ -4234,9 +4407,109 @@ function ChatViewContent(props: ChatViewProps) {
     switchGitRef,
     updateThreadMetadata,
   ]);
+  // Background work (subagent fleets, workflow runs, watch loops) can outlive
+  // the turn; once it settles, the composer stop button is gone, so this
+  // banner is the only visible stop affordance. Stop routes through the
+  // stop-everything interrupt: it kills every live background task before
+  // interrupting, and works by session, so no active turn is needed.
+  const activeBackgroundLiveness =
+    !isWorking && activeThread ? (activeThreadShell?.backgroundLiveness ?? null) : null;
+  const [isStoppingBackgroundWork, setIsStoppingBackgroundWork] = useState(false);
+  useEffect(() => {
+    // "Stopping..." holds until the liveness clears; the interrupt command
+    // returning only means the request was accepted.
+    if (activeBackgroundLiveness === null) {
+      setIsStoppingBackgroundWork(false);
+    }
+  }, [activeBackgroundLiveness]);
+  useEffect(() => {
+    // Per-thread state: switching threads while A's stop is pending must not
+    // disable B's Stop button (review finding).
+    setIsStoppingBackgroundWork(false);
+  }, [activeThreadId]);
+  const handleStopBackgroundWork = useCallback(async () => {
+    if (!activeThread) return;
+    setIsStoppingBackgroundWork(true);
+    const result = await interruptThreadTurn({
+      environmentId,
+      input: buildThreadTurnInterruptInput(activeThread),
+    });
+    if (result._tag === "Failure") {
+      // Every failure clears the pending state — an interrupted command
+      // never reached the server, so liveness would hold "Stopping..."
+      // forever. Only real failures toast.
+      setIsStoppingBackgroundWork(false);
+      if (!isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to stop background work.",
+        );
+      }
+    }
+  }, [activeThread, environmentId, interruptThreadTurn, setThreadError]);
+  const backgroundLivenessBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (activeBackgroundLiveness === null || !activeThread) {
+      return null;
+    }
+    const working = activeBackgroundLiveness === "working";
+    const liveCount = agentPanelModel.liveCount;
+    return {
+      id: `background-liveness:${activeThread.id}`,
+      variant: "default",
+      icon: (
+        <span
+          className={cn("size-1.5 rounded-full bg-foreground", working && "animate-status-pulse")}
+          aria-hidden="true"
+        />
+      ),
+      title: working
+        ? liveCount > 0
+          ? `${liveCount} ${liveCount === 1 ? "agent" : "agents"} working in the background`
+          : "Background work running"
+        : "Monitoring in the background",
+      actions: (
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={isStoppingBackgroundWork}
+          onClick={() => void handleStopBackgroundWork()}
+        >
+          {isStoppingBackgroundWork ? "Stopping..." : "Stop"}
+        </Button>
+      ),
+    };
+  }, [
+    activeBackgroundLiveness,
+    activeThread,
+    agentPanelModel.liveCount,
+    handleStopBackgroundWork,
+    isStoppingBackgroundWork,
+  ]);
+  // A woken thread announces itself in the open view, not just the sidebar
+  // pill. Dismissing marks the wake as seen (same acknowledgment as the
+  // pill); sending a message clears it as a side effect of the send path.
+  const wokeThreadBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
+    if (!activeThreadWokeVisible) {
+      return null;
+    }
+    return {
+      id: `thread-woke:${activeThread?.id ?? "unknown"}`,
+      variant: "info",
+      icon: <AlarmClockIcon />,
+      title: "This thread woke from snooze",
+      description: "Dismiss to clear the Woke indicator, or send a message to keep going.",
+      dismissLabel: "Dismiss Woke notification",
+      onDismiss: acknowledgeActiveThreadWoke,
+    };
+  }, [acknowledgeActiveThreadWoke, activeThread?.id, activeThreadWokeVisible]);
   // The stack renders items[0] front-most and tucks the rest behind hover, so
-  // ordering is priority: system banners, then the branch-mismatch notice,
-  // and the informational parked-thread banner last — it must never cover another.
+  // ordering is priority: urgent system banners (error/warning variants plus
+  // calm-styled live states flagged `urgent`, like update progress), then
+  // background liveness — its Stop button is the only stop affordance for
+  // settled turns, so a passive "update available" notice must not cover it —
+  // then calm system banners, the woke and branch-mismatch notices, and the
+  // informational parked-thread banner last — it must never cover another.
   const parkedThreadBannerItem = useMemo<ComposerBannerStackItem | null>(() => {
     if (!activeThreadSnoozed && !activeThreadSettled) {
       return null;
@@ -4286,12 +4559,28 @@ function ChatViewContent(props: ChatViewProps) {
     void handleSwitchCheckoutToThread();
   }, [gitStatusQuery.data?.hasWorkingTreeChanges, handleSwitchCheckoutToThread]);
   const composerBannerItems = useMemo<ComposerBannerStackItem[]>(() => {
+    const isUrgentSystemItem = (item: ComposerBannerStackItem) =>
+      item.urgent === true || item.variant === "error" || item.variant === "warning";
+    const urgentSystemItems = systemComposerBannerItems.filter(isUrgentSystemItem);
+    const calmSystemItems = systemComposerBannerItems.filter((item) => !isUrgentSystemItem(item));
+    const backgroundLivenessItems =
+      backgroundLivenessBannerItem === null ? [] : [backgroundLivenessBannerItem];
+    const wokeThreadItems = wokeThreadBannerItem === null ? [] : [wokeThreadBannerItem];
     const parkedThreadItems = parkedThreadBannerItem === null ? [] : [parkedThreadBannerItem];
     if (!localCheckoutBranchMismatch || !showBranchMismatchBanner || !activeBranchMismatchKey) {
-      return [...systemComposerBannerItems, ...parkedThreadItems];
+      return [
+        ...urgentSystemItems,
+        ...backgroundLivenessItems,
+        ...calmSystemItems,
+        ...wokeThreadItems,
+        ...parkedThreadItems,
+      ];
     }
     return [
-      ...systemComposerBannerItems,
+      ...urgentSystemItems,
+      ...backgroundLivenessItems,
+      ...calmSystemItems,
+      ...wokeThreadItems,
       {
         id: `branch-mismatch:${activeBranchMismatchKey}`,
         variant: "info",
@@ -4335,12 +4624,14 @@ function ChatViewContent(props: ChatViewProps) {
     ];
   }, [
     activeBranchMismatchKey,
+    backgroundLivenessBannerItem,
     handleRestoreThreadBranch,
     isRestoringThreadBranch,
     localCheckoutBranchMismatch,
     parkedThreadBannerItem,
     showBranchMismatchBanner,
     systemComposerBannerItems,
+    wokeThreadBannerItem,
   ]);
 
   useEffect(() => {
@@ -4423,6 +4714,10 @@ function ChatViewContent(props: ChatViewProps) {
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (preventRepeatedTerminalCloseShortcut(event, keybindings)) {
+        event.stopPropagation();
+        return;
+      }
       if (!activeThreadId || isCommandPaletteOpen()) {
         return;
       }
@@ -4498,8 +4793,8 @@ function ChatViewContent(props: ChatViewProps) {
       if (command === "terminal.close") {
         event.preventDefault();
         event.stopPropagation();
-        if (terminalFocusOwner === "right-panel" && activeRightPanelSurface?.kind === "terminal") {
-          closePanelTerminal(activeRightPanelSurface.activeTerminalId);
+        if (terminalFocusOwner === "right-panel" && activeTerminalDockGroup) {
+          closePanelTerminal(activeTerminalDockGroup.activeTerminalId);
           return;
         }
         if (!terminalUiState.terminalOpen) return;
@@ -4511,7 +4806,7 @@ function ChatViewContent(props: ChatViewProps) {
         event.preventDefault();
         event.stopPropagation();
         if (terminalFocusOwner === "right-panel") {
-          addTerminalSurface();
+          newPanelTerminal();
           return;
         }
         if (!terminalUiState.terminalOpen) {
@@ -4625,28 +4920,62 @@ function ChatViewContent(props: ChatViewProps) {
     ],
   );
 
-  const onSend = async (e?: { preventDefault: () => void }) => {
+  const onSend = async (
+    e?: { preventDefault: () => void },
+    directAnnotation?: {
+      annotation: PreviewAnnotationPayload;
+      image: ComposerImageAttachment | null;
+    },
+  ) => {
     e?.preventDefault();
+    const notifyDirectAnnotationAttached = () => {
+      if (!directAnnotation) return;
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: "Annotation attached to draft",
+          description: "Sending is unavailable right now. Finish the current action, then send.",
+        }),
+      );
+    };
     if (
       !activeThread ||
       isSendBusy ||
       isConnecting ||
       threadDetailLoading ||
-      activeEnvironmentUnavailable ||
       sendInFlightRef.current
-    )
+    ) {
+      notifyDirectAnnotationAttached();
       return;
+    }
+    if (activeEnvironmentUnavailable) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Not connected: message not sent",
+          description: "Reconnecting to the environment. Try again once it is connected.",
+        }),
+      );
+      return;
+    }
     if (activePendingProgress) {
+      if (directAnnotation) {
+        notifyDirectAnnotationAttached();
+        return;
+      }
       onAdvanceActivePendingUserInput();
       return;
     }
     const sendCtx = composerRef.current?.getSendContext();
-    if (!sendCtx?.providerAvailable) return;
+    if (!sendCtx?.providerAvailable) {
+      notifyDirectAnnotationAttached();
+      return;
+    }
     const {
-      images: composerImages,
+      images: sendContextImages,
       terminalContexts: composerTerminalContexts,
       elementContexts: composerElementContexts,
-      previewAnnotations: composerPreviewAnnotations,
+      previewAnnotations: sendContextPreviewAnnotations,
       reviewComments: composerReviewComments,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
@@ -4654,6 +4983,26 @@ function ChatViewContent(props: ChatViewProps) {
       selectedPromptEffort: ctxSelectedPromptEffort,
       selectedModelSelection: ctxSelectedModelSelection,
     } = sendCtx;
+    const composerImages =
+      directAnnotation?.image &&
+      !sendContextImages.some((image) => image.id === directAnnotation.image?.id)
+        ? [...sendContextImages, directAnnotation.image]
+        : sendContextImages;
+    const composerPreviewAnnotations =
+      directAnnotation &&
+      !sendContextPreviewAnnotations.some(
+        (annotation) => annotation.id === directAnnotation.annotation.id,
+      )
+        ? [
+            ...sendContextPreviewAnnotations,
+            {
+              ...directAnnotation.annotation,
+              screenshot: directAnnotation.annotation.screenshot
+                ? { ...directAnnotation.annotation.screenshot, dataUrl: "" }
+                : null,
+            },
+          ]
+        : sendContextPreviewAnnotations;
     const promptForSend = promptRef.current;
     const {
       trimmedPrompt: trimmed,
@@ -4669,7 +5018,7 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
-    if (showPlanFollowUpPrompt && activeProposedPlan) {
+    if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -4683,7 +5032,10 @@ function ChatViewContent(props: ChatViewProps) {
       });
       return;
     }
+    // Legacy plan mode: /plan and /default only act when the beta flag is on;
+    // otherwise they send as plain text like any other message.
     const standaloneSlashCommand =
+      settings.planModeEnabled &&
       composerImages.length === 0 &&
       sendableComposerTerminalContexts.length === 0 &&
       composerElementContexts.length === 0 &&
@@ -4782,7 +5134,23 @@ function ChatViewContent(props: ChatViewProps) {
         messageTextWithPreviewAnnotations,
         composerReviewCommentsSnapshot,
       ),
-      getCurrentEditorPresenceChips(),
+      // Task #71: scoped to THIS thread's project. The chip row deliberately
+      // shows every connected editor in the environment (owner ruling —
+      // presence is a property of the connected editor, not of a
+      // conversation), but a thread must only ever ship its OWN project's
+      // objects to its model. Without this filter a thread rooted at project
+      // A silently attached project B's selected objects.
+      selectEditorPresenceChipsForProject(getCurrentEditorPresenceChips(), activeProject),
+    );
+    // Appended after the selection block, making it the new outermost trailing
+    // block — MessagesTimeline.tsx strips it first, before the existing
+    // editor-selection/terminal/element/preview-annotation chain runs. One
+    // ambient line so every provider can see an engine is present and live;
+    // it carries counts and levels only, never contents (see engineHeadline.ts).
+    const messageTextWithEngine = appendEngineHeadlineToPrompt(
+      messageTextForSend,
+      getCurrentEditorPresenceEditors(),
+      activeProject,
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
@@ -4791,7 +5159,7 @@ function ChatViewContent(props: ChatViewProps) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      text: messageTextWithEngine || IMAGE_ONLY_BOOTSTRAP_PROMPT,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
@@ -4816,6 +5184,7 @@ function ChatViewContent(props: ChatViewProps) {
     isAtEndRef.current = true;
     timelineScrollModeRef.current = "anchoring-new-turn";
     liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+    setTimelineLiveFollowEnabled(true);
     pendingTimelineAnchorRef.current = messageIdForSend;
     activeTimelineAnchorIndexRef.current = null;
     showScrollDebouncer.current.cancel();
@@ -4972,6 +5341,7 @@ function ChatViewContent(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        acknowledgeActiveThreadWoke();
       }
     }
 
@@ -5259,6 +5629,7 @@ function ChatViewContent(props: ChatViewProps) {
       isAtEndRef.current = true;
       timelineScrollModeRef.current = "anchoring-new-turn";
       liveFollowUserScrollGenerationRef.current = anchorUserScrollGenerationRef.current;
+      setTimelineLiveFollowEnabled(true);
       pendingTimelineAnchorRef.current = messageIdForSend;
       activeTimelineAnchorIndexRef.current = null;
       showScrollDebouncer.current.cancel();
@@ -5331,15 +5702,7 @@ function ChatViewContent(props: ChatViewProps) {
       }
 
       if (failure === null) {
-        // Optimistically open the plan sidebar when implementing (not refining).
-        // "default" mode here means the agent is executing the plan, which produces
-        // step-tracking activities that the sidebar will display.
-        if (nextInteractionMode === "default" && autoOpenPlanSidebar) {
-          planSidebarDismissedForTurnRef.current = null;
-          if (activeThreadRef) {
-            useRightPanelStore.getState().open(activeThreadRef, "plan");
-          }
-        }
+        acknowledgeActiveThreadWoke();
         sendInFlightRef.current = false;
         return;
       }
@@ -5360,6 +5723,7 @@ function ChatViewContent(props: ChatViewProps) {
     [
       activeThread,
       activeProposedPlan,
+      acknowledgeActiveThreadWoke,
       beginLocalDispatch,
       isConnecting,
       isSendBusy,
@@ -5371,11 +5735,197 @@ function ChatViewContent(props: ChatViewProps) {
       setComposerDraftInteractionMode,
       setThreadError,
       startThreadTurn,
-      autoOpenPlanSidebar,
       environmentId,
       composerRef,
     ],
   );
+
+  // The `Setup Unity Integrations` CTA (EngineToolbar.tsx's not-ready Unity
+  // state). REVISED mid-build: originally seeded a chat turn asking the
+  // agent to diagnose and fix setup; owner ruling changed this to perform
+  // the install DIRECTLY instead — "just an install button, works even if
+  // Unity isn't running" (the Bezi reference), and this codebase already
+  // has exactly that (`postUnityPipelineInstall`, live-proven at 1d28ec11a
+  // via `ConnectionsSettings.tsx`'s own `UnityPipelineInstallButton`). No
+  // agent turn, no confirmation dialog — the click IS the consent (ruled
+  // twice) — but the dialog's OWN explanation of what changes
+  // (manifest.json now, packages-lock.json/Assets churn later, once Unity
+  // resolves it) doesn't just disappear: `describeUnityPipelineInstallOutcome`
+  // (unity/unityPipelineInstallReport.ts) carries that same information into
+  // a REPORT shown after the fact, not a question asked before it.
+  //
+  // `EngineToolbarView.unityInstallOffered` (EngineToolbar.logic.ts) is what
+  // gates whether this CTA even renders — when either package is missing,
+  // or when a live Editor proves its installed selection publisher is
+  // genuinely unpaired. Missing-package installs remain independent of
+  // whether Unity is open; only pairing recovery requires liveness because
+  // a closed Editor is otherwise indistinguishable from a paired one (see
+  // `shouldOfferUnityPipelineInstall`'s own doc comment).
+  const handleSetupUnityIntegrations = useCallback(() => {
+    if (!activeProjectRef) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't find this project",
+          description: "The active project is no longer available. Select it again and retry.",
+        }),
+      );
+      return;
+    }
+    // Merge-gate F3 (project-scoped routes review): source environmentId
+    // from activeProjectRef, the SAME object the probe atom key and
+    // handleRetryUnitySetup use — not the ChatView prop. The two are equal
+    // today by construction (activeThread.environmentId is always built
+    // from the prop), but a divergence would make THIS handler invalidate
+    // one cache key while the atom reads another — the exact
+    // stale-"still missing" defect class the invalidation exists to stop.
+    // One source, no drift.
+    const prepared = readPreparedConnection(activeProjectRef.environmentId);
+    if (!prepared) {
+      // Merge-gate review finding F2 on `e26534e1b`: this used to be a
+      // silent `if (!prepared) return;` — the exact bail #106 already
+      // proved is a defect (`readPreparedConnection` is the synchronous
+      // one-shot snapshot #106's root cause; see `unitySetupProbeAtom.ts`'s
+      // own doc comment), now caught here on a CLICKED PRIMARY CTA instead
+      // of a background probe. This handler's own governing rule is "the
+      // click IS the consent" — a click that produces literally nothing
+      // (no install, no toast, no console line) breaks that promise worse
+      // than a silent no-op anywhere else in this file, since every OTHER
+      // outcome below already produces a toast. `handleEngineAction`'s two
+      // branches have the identical bail for the SAME reason (a dropped/
+      // re-preparing connection between probe-resolve and click) but stay
+      // silent by design there — Play/Pause/Stop are driven by presence,
+      // which self-corrects on the next state update; this CTA has no such
+      // self-correction, so leaving the user with zero feedback here is a
+      // materially worse dead end.
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't reach this project's connection",
+          description: "The connection isn't ready yet — wait a moment and try again.",
+        }),
+      );
+      return;
+    }
+    if (!tryBeginUnitySetupInstall(unitySetupInstallInFlightRef)) return;
+    void postUnityPipelineInstall({
+      projectId: activeProjectRef.projectId,
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((result) => {
+        const report = describeUnityPipelineInstallOutcome(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: report.type,
+            title: report.title,
+            description: report.description,
+          }),
+        );
+        if (report.type === "success") {
+          // `unitySetupQuery.refresh()` alone is NOT enough:
+          // `unitySetupProbeAtom` fetches through `fetchUnitySetupProbeCached`
+          // (setupProbeCache.ts), a 5s-TTL cache keyed by environment+project —
+          // a refresh inside that window would just re-read the STALE
+          // pre-install entry. `invalidateUnitySetupProbeCache` first is the
+          // same fix `UnitySetupClassifier.ts`'s S13 doc comment (193abfb89)
+          // already describes for the identical defect class (a just-installed
+          // package reported as still missing) and the exact precedent
+          // `ConnectionsSettings.tsx`'s own `onInstalled` handler follows.
+          invalidateUnitySetupProbeCache(
+            activeProjectRef.environmentId,
+            activeProjectRef.projectId,
+          );
+          void unitySetupQuery.refresh();
+        }
+      })
+      .catch((error) => {
+        // Transport failure only — same "well-formed failure vs. genuinely
+        // broke" distinction `handleEngineAction`'s own Unity branch already
+        // draws for the identical reason.
+        console.error("Failed to install Unity's Pipeline package:", error);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not install Pipeline package",
+            description: error instanceof Error ? error.message : "A network error occurred.",
+          }),
+        );
+      })
+      .finally(() => {
+        unitySetupInstallInFlightRef.current = false;
+      });
+    // F10 (merge-gate review, non-blocking): depend on `unitySetupQuery.refresh`,
+    // NOT the whole `unitySetupQuery` object — `useEnvironmentQuery`
+    // (state/query.ts) returns a fresh object literal `{data, error,
+    // isPending, refresh}` on every render, so depending on the object
+    // itself changes this callback's identity every render and silently
+    // defeats `ChatHeader`'s `memo` (the callback threads down as a prop).
+    // `refresh` alone (from `useAtomRefresh`) is the referentially stable
+    // part — the exact same fix `ConnectionsSettings.tsx`'s
+    // `retryUnitySetupProbe` already applies to the identical shape
+    // (`[primaryEnvironmentId, unitySetupQuery.refresh]`).
+  }, [activeProjectRef, unitySetupQuery.refresh]);
+
+  const handleBringUnityToFront = useCallback(() => {
+    if (!activeProjectRef) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't find this project",
+          description: "The active project is no longer available. Select it again and retry.",
+        }),
+      );
+      return;
+    }
+    const prepared = readPreparedConnection(activeProjectRef.environmentId);
+    if (!prepared) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: "Couldn't reach this project's connection",
+          description: "The connection isn't ready yet — wait a moment and try again.",
+        }),
+      );
+      return;
+    }
+    if (!tryBeginUnityRaise(unityRaiseInFlightRef)) return;
+    void postUnityRaise({
+      projectId: activeProjectRef.projectId,
+      httpBaseUrl: prepared.httpBaseUrl,
+      httpAuthorization: prepared.httpAuthorization,
+    })
+      .then((result) => {
+        const report = describeUnityRaiseFailure(result);
+        if (report === null) return;
+        toastManager.add(
+          stackedThreadToast({
+            type: report.type,
+            title: report.title,
+            description: report.description,
+          }),
+        );
+      })
+      .catch((error) => {
+        console.error("Failed to bring Unity to the front:", error);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not bring Unity to the front",
+            description: error instanceof Error ? error.message : "A network error occurred.",
+          }),
+        );
+      })
+      .finally(() => {
+        unityRaiseInFlightRef.current = false;
+      });
+  }, [activeProjectRef]);
+
+  const handleRetryUnitySetup = useCallback(() => {
+    if (!activeProjectRef) return;
+    invalidateUnitySetupProbeCache(activeProjectRef.environmentId, activeProjectRef.projectId);
+    void unitySetupQuery.refresh();
+  }, [activeProjectRef, unitySetupQuery.refresh]);
 
   const onImplementPlanInNewThread = useCallback(async () => {
     if (
@@ -5474,8 +6024,6 @@ function ChatViewContent(props: ChatViewProps) {
     }
 
     if (failure === null) {
-      // Signal that the plan sidebar should open on the new thread when enabled.
-      planSidebarOpenOnNextThreadRef.current = autoOpenPlanSidebar;
       const navigateResult = await settlePromise(() =>
         navigate({
           to: "/$environmentId/$threadId",
@@ -5532,7 +6080,6 @@ function ChatViewContent(props: ChatViewProps) {
     resetLocalDispatch,
     runtimeMode,
     startThreadTurn,
-    autoOpenPlanSidebar,
     environmentId,
     composerRef,
   ]);
@@ -5721,8 +6268,15 @@ function ChatViewContent(props: ChatViewProps) {
     />
   );
   const panelLayoutControls = (
-    <div className="workspace-titlebar-controls z-50 gap-1 [-webkit-app-region:no-drag]">
-      {rightPanelOpen && !shouldUsePlanSidebarSheet ? (
+    <div
+      className={cn(
+        // One inset in both states: the controls move between containers when
+        // the right panel opens, and a different right offset made them jump
+        // sideways on every toggle.
+        "workspace-titlebar-controls z-50 mr-px gap-1 [-webkit-app-region:no-drag]",
+      )}
+    >
+      {rightPanelOpen && !shouldUseRightPanelSheet ? (
         <RightPanelMaximizeControl
           maximized={rightPanelMaximized}
           onToggle={toggleRightPanelMaximized}
@@ -5731,75 +6285,26 @@ function ChatViewContent(props: ChatViewProps) {
       {panelToggleControls}
     </div>
   );
+  // Task #53 dropped the "preview" branch here (Browser lives in
+  // `dock/BrowserDockPanel.tsx`), and this merge dropped "plan" with it —
+  // upstream #5558 folded plans into the chat itself. "agents" (upstream's
+  // subagent observability panel, #5219) is the only kind
+  // `rightPanelContent` can ever need to render now; upstream's
+  // preview/terminal/diff branches are the non-fork shapes of panels the
+  // dock already owns.
   const rightPanelContent = activeThreadRef ? (
-    activeRightPanelSurface?.kind === "preview" ? (
-      <Suspense fallback={null}>
-        <PreviewPanel
-          mode="embedded"
-          threadRef={activeThreadRef}
-          tabId={activeRightPanelSurface.resourceId}
-          configuredUrls={configuredPreviewUrls}
-          visible
-        />
-      </Suspense>
-    ) : activeRightPanelSurface?.kind === "terminal" ? (
-      <PersistentThreadTerminalPanel
-        threadRef={activeThreadRef}
-        surface={activeRightPanelSurface}
-        launchContext={activeTerminalLaunchContext ?? null}
-        focusRequestId={terminalFocusRequestId}
-        keybindings={keybindings}
-        onAddTerminalContext={addTerminalContextToDraft}
-        onSplitTerminal={splitPanelTerminal}
-        onSplitTerminalVertical={splitPanelTerminalVertical}
-        onNewTerminal={addTerminalSurface}
-        onActiveTerminalChange={activatePanelTerminal}
-        onCloseTerminal={closePanelTerminal}
-        splitShortcutLabel={splitTerminalShortcutLabel ?? undefined}
-        splitVerticalShortcutLabel={splitTerminalVerticalShortcutLabel ?? undefined}
-        newShortcutLabel={newTerminalShortcutLabel ?? undefined}
-        closeShortcutLabel={closeTerminalShortcutLabel ?? undefined}
+    activeRightPanelSurface?.kind === "agents" ? (
+      <AgentsPanel
+        model={agentPanelModel}
+        environmentId={activeThreadRef?.environmentId ?? null}
+        threadId={activeThreadRef?.threadId ?? null}
       />
-    ) : activeRightPanelSurface?.kind === "plan" ? (
-      <PlanSidebar
-        activePlan={activePlan}
-        activeProposedPlan={sidebarProposedPlan}
-        label={planSidebarLabel}
-        environmentId={environmentId}
-        threadRef={activeThreadRef}
-        markdownCwd={gitCwd ?? undefined}
-        workspaceRoot={activeWorkspaceRoot}
-        timestampFormat={timestampFormat}
-        mode="embedded"
-      />
-    ) : (activeRightPanelSurface?.kind === "files" || activeRightPanelSurface?.kind === "file") &&
-      activeProject &&
-      activeWorkspaceRoot ? (
-      <Suspense fallback={null}>
-        <FilePreviewPanel
-          key={`${activeProject.environmentId}:${activeWorkspaceRoot}`}
-          environmentId={activeProject.environmentId}
-          cwd={activeWorkspaceRoot}
-          projectName={activeProject.title}
-          threadRef={activeThreadRef}
-          composerDraftTarget={composerDraftTarget}
-          keybindings={keybindings}
-          availableEditors={availableEditors}
-          relativePath={
-            activeRightPanelSurface.kind === "file" ? activeRightPanelSurface.relativePath : null
-          }
-          revealLine={activeFileSurface?.revealLine ?? null}
-          revealRequestId={activeFileSurface?.revealRequestId ?? 0}
-          onOpenFile={openFileSurface}
-          onPendingChange={handleFilePendingChange}
-        />
-      </Suspense>
     ) : null
   ) : null;
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-      {rightPanelOpen && !shouldUsePlanSidebarSheet ? panelLayoutControls : null}
+      {rightPanelOpen && !shouldUseRightPanelSheet ? panelLayoutControls : null}
       <div
         className={cn(
           "flex min-h-0 min-w-0 flex-col overflow-x-hidden",
@@ -5808,13 +6313,23 @@ function ChatViewContent(props: ChatViewProps) {
         data-chat-column-maximized-away={rightPanelMaximized ? "true" : "false"}
       >
         {/* Top bar */}
+        {/*
+          dock-chrome-strip.md, Section D (critique M7): `drag-region` is
+          dropped from this panel topbar — with `_chat.tsx`'s hoisted chrome
+          strip now covering the window's real top edge, this inner header's
+          own drag claim is redundant. Height and content are unchanged; the
+          resulting visible chrome stack (strip 52px + dock tab strip 36px +
+          this panel topbar) is ACCEPTED for now as the cost of the dock
+          being a first-class feature — stated here so the owner adjudicates
+          it seeing the actual build, not silently absorbed as "fine."
+        */}
         <header
           data-chat-header
           className={cn(
             "bg-background transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none",
             isElectron
               ? cn(
-                  "workspace-topbar drag-region relative px-3 sm:px-5",
+                  "workspace-topbar relative px-3 sm:px-5",
                   reserveTitleBarControlInset &&
                     !inlineRightPanelOwnsTitleBar &&
                     "wco:pr-[var(--workspace-native-controls-inset)]",
@@ -5829,6 +6344,8 @@ function ChatViewContent(props: ChatViewProps) {
             activeThreadId={activeThread.id}
             {...(routeKind === "draft" && draftId ? { draftId } : {})}
             activeThreadTitle={activeThread.title}
+            isServerThread={isServerThread}
+            changeRequestState={activeThreadPr?.state ?? null}
             activeProjectName={activeProject?.title}
             activeProjectCwd={activeProject?.workspaceRoot ?? null}
             openInCwd={gitCwd}
@@ -5845,6 +6362,16 @@ function ChatViewContent(props: ChatViewProps) {
             onAddProjectScript={saveProjectScript}
             onUpdateProjectScript={updateProjectScript}
             onDeleteProjectScript={deleteProjectScript}
+            engineToolbarView={engineToolbarView}
+            onEngineAction={handleEngineAction}
+            {...(threeJsUnavailableReason
+              ? { threeJsUnavailableReason }
+              : { onPlayThreeJs: handlePlayThreeJs })}
+            hasPresenceCommandScope={hasPresenceCommandScope}
+            onOpenConnectionsSettings={handleOpenConnectionsSettings}
+            onRetryUnitySetup={handleRetryUnitySetup}
+            onSetupUnityIntegrations={handleSetupUnityIntegrations}
+            onBringUnityToFront={handleBringUnityToFront}
           />
         </header>
 
@@ -5852,7 +6379,7 @@ function ChatViewContent(props: ChatViewProps) {
           error={threadError}
           onDismiss={() => setThreadError(activeThread.id, null)}
         />
-        {/* Main content area with optional plan sidebar */}
+        {/* Main content area with the optional right panel (agents) */}
         <div className="flex min-h-0 min-w-0 flex-1">
           {/* Chat column */}
           <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
@@ -5867,8 +6394,11 @@ function ChatViewContent(props: ChatViewProps) {
             <div className="relative flex min-h-0 flex-1 flex-col">
               {/* Messages — LegendList handles virtualization and scrolling internally */}
               <MessagesTimeline
+                agentPanelModel={agentPanelModel}
+                onOpenAgents={addAgentsSurface}
                 key={activeThread.id}
                 isWorking={isWorking}
+                workingStepLabel={workingStepLabel}
                 activeTurnInProgress={isWorking || !latestTurnSettled}
                 activeTurnStartedAt={activeWorkStartedAt}
                 listRef={legendListRef}
@@ -5894,12 +6424,13 @@ function ChatViewContent(props: ChatViewProps) {
                 skills={activeProviderStatus?.skills ?? EMPTY_PROVIDER_SKILLS}
                 anchorMessageId={timelineAnchorMessageId}
                 onAnchorReady={onTimelineAnchorReady}
-                onAnchorSizeChanged={onTimelineAnchorSizeChanged}
                 contentInsetEndAdjustment={composerOverlayHeight}
+                liveFollowEnabled={timelineLiveFollowEnabled}
                 onIsAtEndChange={onIsAtEndChange}
                 onManualNavigation={cancelTimelineLiveFollowForUserNavigation}
                 hideEmptyPlaceholder={isDraftHeroState || threadDetailLoading}
                 topFadeEnabled={!hasTimelineTopBanner}
+                loadEarlier={loadEarlierTurns}
               />
 
               {/* scroll to end pill — shown when user has scrolled away from the live edge */}
@@ -5985,6 +6516,8 @@ function ChatViewContent(props: ChatViewProps) {
                             routeKind={routeKind}
                             routeThreadRef={routeThreadRef}
                             draftId={draftId}
+                            engineChipState={engineChipState}
+                            presenceWorkspaceRoot={presenceWorkspaceRoot}
                             activeThreadId={activeThreadId}
                             activeThreadEnvironmentId={activeThread?.environmentId}
                             activeThread={activeThread}
@@ -6009,10 +6542,6 @@ function ChatViewContent(props: ChatViewProps) {
                             respondingRequestIds={respondingRequestIds}
                             showPlanFollowUpPrompt={showPlanFollowUpPrompt}
                             activeProposedPlan={activeProposedPlan}
-                            activePlan={activePlan as { turnId?: TurnId } | null}
-                            sidebarProposedPlan={sidebarProposedPlan as { turnId?: TurnId } | null}
-                            planSidebarLabel={planSidebarLabel}
-                            planSidebarOpen={planSidebarOpen}
                             runtimeMode={runtimeMode}
                             interactionMode={interactionMode}
                             lockedProvider={lockedProvider}
@@ -6050,7 +6579,6 @@ function ChatViewContent(props: ChatViewProps) {
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
                             handleInteractionModeChange={handleInteractionModeChange}
-                            togglePlanSidebar={togglePlanSidebar}
                             focusComposer={focusComposer}
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}
@@ -6068,6 +6596,7 @@ function ChatViewContent(props: ChatViewProps) {
                               <BranchToolbar
                                 environmentId={activeThread.environmentId}
                                 threadId={activeThread.id}
+                                showGitControls={isGitRepo}
                                 {...(routeKind === "draft" && draftId ? { draftId } : {})}
                                 onEnvModeChange={onEnvModeChange}
                                 startFromOrigin={startFromOrigin}
@@ -6184,25 +6713,23 @@ function ChatViewContent(props: ChatViewProps) {
         ))}
       </div>
 
-      {!shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef ? (
+      {!shouldUseRightPanelSheet && rightPanelOpen && activeThreadRef ? (
         <RightPanelTabs
           mode="inline"
           maximized={rightPanelMaximized}
           surfaces={rightPanelState.surfaces}
           activeSurfaceId={activeRightPanelSurface?.id ?? null}
-          pendingSurfaceIds={pendingFileSurfaceIds}
-          previewSessions={activePreviewState.sessions}
-          terminalLabelsById={activeTerminalLabelsById}
+          pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
           onActivate={activateRightPanelSurface}
           onCloseSurface={closeRightPanelSurface}
           onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
           onCloseSurfacesToRight={closeRightPanelSurfacesToRight}
           onCloseAllSurfaces={closeAllRightPanelSurfaces}
-          onCopyFilePath={copyRightPanelFilePath}
           onAddBrowser={createBrowserSurface}
           onAddTerminal={addTerminalSurface}
           onAddDiff={addDiffSurface}
           onAddFiles={addFilesSurface}
+          onAddAgents={addAgentsSurface}
           browserAvailable={isPreviewSupportedInRuntime()}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
@@ -6210,26 +6737,28 @@ function ChatViewContent(props: ChatViewProps) {
           {rightPanelContent}
         </RightPanelTabs>
       ) : null}
-      {shouldUsePlanSidebarSheet && rightPanelOpen && activeThreadRef ? (
-        <RightPanelSheet open onClose={planSidebarOpen ? closePlanSidebar : closePreviewPanel}>
+      {shouldUseRightPanelSheet && rightPanelOpen && activeThreadRef ? (
+        // Neither parent's onClose survives this merge (the fork's #53
+        // deleted closePreviewPanel; upstream #5558 deleted
+        // closePlanSidebar) — toggleRightPanel is the same store-level
+        // hide both were reaching for.
+        <RightPanelSheet open onClose={toggleRightPanel}>
           <RightPanelTabs
             mode="sheet"
             layoutControls={panelToggleControls}
             surfaces={rightPanelState.surfaces}
             activeSurfaceId={activeRightPanelSurface?.id ?? null}
-            pendingSurfaceIds={pendingFileSurfaceIds}
-            previewSessions={activePreviewState.sessions}
-            terminalLabelsById={activeTerminalLabelsById}
+            pendingSurfaceIds={EMPTY_PENDING_FILE_SURFACE_IDS}
             onActivate={activateRightPanelSurface}
             onCloseSurface={closeRightPanelSurface}
             onCloseOtherSurfaces={closeOtherRightPanelSurfaces}
             onCloseSurfacesToRight={closeRightPanelSurfacesToRight}
             onCloseAllSurfaces={closeAllRightPanelSurfaces}
-            onCopyFilePath={copyRightPanelFilePath}
             onAddBrowser={createBrowserSurface}
             onAddTerminal={addTerminalSurface}
             onAddDiff={addDiffSurface}
             onAddFiles={addFilesSurface}
+            onAddAgents={addAgentsSurface}
             browserAvailable={isPreviewSupportedInRuntime()}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}

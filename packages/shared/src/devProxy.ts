@@ -15,6 +15,15 @@ export const DEV_PROXIED_PATH_PREFIXES = [
   "/ws",
   "/editor-presence",
   "/space-events",
+  // Covers all three Unity routes at once (UNITY_COMMAND_PATH,
+  // UNITY_SETUP_PROBE_PATH, UNITY_PIPELINE_INSTALL_PATH all live under this
+  // one prefix) — found live (2026-08-05, #115) via `unitySetupProbeAtom`'s
+  // request 404ing in single-origin `pnpm dev:web`: this prefix was simply
+  // never added, so Vite answered `/unity/*` directly instead of forwarding
+  // to the backend. Invisible until #106 fixed the client to reliably issue
+  // the request in the first place — an older gap the newer fix exposed,
+  // same shape as #87's proxy race hiding behind a fabricated 500.
+  "/unity",
 ] as const;
 
 /**

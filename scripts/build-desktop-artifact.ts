@@ -67,7 +67,7 @@ type StageWorkspaceConfig = typeof StageWorkspaceConfig.Type;
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
 );
-const encodeJsonString = Schema.encodeEffect(Schema.UnknownFromJsonString);
+const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeWorkspaceConfig = Schema.decodeEffect(fromYaml(WorkspaceConfig));
 const decodeNodePtyManifest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ version: Schema.String })),
@@ -645,7 +645,22 @@ export const DESKTOP_EXTRA_RESOURCES = [
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
   },
+  {
+    from: "apps/desktop/prod-resources/unity-packages/com.devgame.editor-presence",
+    to: "unity-packages/com.devgame.editor-presence",
+  },
 ] as const;
+
+export const stageUnitySelectionPackage = Effect.fn("stageUnitySelectionPackage")(
+  function* (input: { readonly repoRoot: string; readonly stageResourcesDir: string }) {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    yield* fs.copy(
+      path.join(input.repoRoot, "unity/com.devgame.editor-presence"),
+      path.join(input.stageResourcesDir, "unity-packages/com.devgame.editor-presence"),
+    );
+  },
+);
 
 export interface MacPasskeySigningConfiguration {
   readonly appId: string;
@@ -1844,6 +1859,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     arch: options.arch,
     verbose: options.verbose,
   });
+  yield* stageUnitySelectionPackage({ repoRoot, stageResourcesDir });
 
   yield* assertPlatformBuildResources(
     options.platform,

@@ -65,13 +65,14 @@ function buildTurnDiffResult(
     readonly fromTurnCount: number;
     readonly toTurnCount: number;
   },
-  diff: string,
+  diffResult: { readonly diff: string; readonly truncated: boolean },
 ): OrchestrationGetTurnDiffResultType {
   return {
     threadId: input.threadId,
     fromTurnCount: input.fromTurnCount,
     toTurnCount: input.toTurnCount,
-    diff,
+    diff: diffResult.diff,
+    truncated: diffResult.truncated,
   };
 }
 
@@ -96,6 +97,7 @@ export const make = Effect.gen(function* () {
           fromTurnCount: input.fromTurnCount,
           toTurnCount: input.toTurnCount,
           diff: "",
+          truncated: false,
         };
         if (!isTurnDiffResult(emptyDiff)) {
           return yield* new CheckpointDiffResultInvalidError({
@@ -164,7 +166,7 @@ export const make = Effect.gen(function* () {
         });
       }
 
-      const diff = yield* checkpointStore
+      const diffResult = yield* checkpointStore
         .diffCheckpoints({
           cwd: workspaceCwd,
           fromCheckpointRef,
@@ -174,7 +176,7 @@ export const make = Effect.gen(function* () {
         })
         .pipe(Effect.withSpan("checkpoint.turnDiff.diffCheckpoints"));
 
-      const turnDiff = buildTurnDiffResult(input, diff);
+      const turnDiff = buildTurnDiffResult(input, diffResult);
       if (!isTurnDiffResult(turnDiff)) {
         return yield* new CheckpointDiffResultInvalidError({
           operation,
@@ -206,7 +208,7 @@ export const make = Effect.gen(function* () {
           fromTurnCount: 0,
           toTurnCount: 0,
         },
-        "",
+        { diff: "", truncated: false },
       );
       if (!isTurnDiffResult(emptyDiff)) {
         return yield* new CheckpointDiffResultInvalidError({
@@ -254,7 +256,7 @@ export const make = Effect.gen(function* () {
       });
     }
 
-    const diff = yield* checkpointStore
+    const diffResult = yield* checkpointStore
       .diffCheckpoints({
         cwd: workspaceCwd,
         fromCheckpointRef: checkpointRefForThreadTurn(input.threadId, 0),
@@ -270,7 +272,7 @@ export const make = Effect.gen(function* () {
         fromTurnCount: 0,
         toTurnCount: input.toTurnCount,
       },
-      diff,
+      diffResult,
     );
     if (!isTurnDiffResult(turnDiff)) {
       return yield* new CheckpointDiffResultInvalidError({

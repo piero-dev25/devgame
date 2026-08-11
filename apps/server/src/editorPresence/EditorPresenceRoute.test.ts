@@ -17,6 +17,7 @@ import {
   AuthOrchestrationReadScope,
   AuthPresenceCommandScope,
   AuthSessionId,
+  EDITOR_PRESENCE_DISPATCH_COMMAND_PATH,
   type AuthEnvironmentScope,
 } from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
@@ -26,7 +27,13 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { HttpRouter, HttpServer } from "effect/unstable/http";
+import {
+  FetchHttpClient,
+  HttpClient,
+  HttpClientRequest,
+  HttpRouter,
+  HttpServer,
+} from "effect/unstable/http";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import * as ServerConfig from "../config.ts";
@@ -36,13 +43,18 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 import {
   dispatchEditorCommand,
+  editorPresenceCommandRouteLayer,
   editorPresenceRouteLayer,
   runPublisherConnection,
 } from "./EditorPresenceRoute.ts";
 import * as EditorPresenceRegistry from "./EditorPresenceRegistry.ts";
-import { buildPongFrame, DEFAULT_EDITOR_PRESENCE_CAPABILITIES } from "./protocol.ts";
+import {
+  buildPongFrame,
+  DEFAULT_EDITOR_PRESENCE_CAPABILITIES,
+  EDITOR_PRESENCE_CLOSE_CODE,
+} from "./protocol.ts";
 
-const decodeUnknownJson = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const makeEnvironmentAuthLayer = () =>
   EnvironmentAuth.layer.pipe(
@@ -65,6 +77,40 @@ const getSubscriberWsUrl = () =>
     const server = yield* HttpServer.HttpServer;
     const address = server.address as HttpServer.TcpAddress;
     return `ws://127.0.0.1:${address.port}/editor-presence?role=subscriber`;
+  });
+
+/** Posts a real HTTP request to `editorPresenceCommandRouteLayer` — the
+ * browser -> server leg task #52 added. Every other test in this file
+ * drives `dispatchEditorCommand` in-process; this is the one that proves
+ * the wire path itself. */
+const postDispatchCommand = (input: {
+  readonly bearerToken: string;
+  readonly sessionId: string;
+  readonly action: string;
+  readonly params?: Record<string, unknown>;
+}) =>
+  Effect.gen(function* () {
+    // A RELATIVE path, not `http://127.0.0.1:${port}${path}` — matching
+    // server.test.ts's own proven `fetchEffect`/`testRequestUrl` pattern.
+    // `NodeHttpServer.layerTest`'s `HttpClient` is an in-process test
+    // client wired directly to the router, not a real TCP listener; an
+    // absolute host:port URL routes over a REAL socket instead, which this
+    // test server never actually accepts connections on — every response
+    // came back a fast, empty 404 because the request never reached the
+    // router at all. Found by comparing against `server.test.ts`'s working
+    // helper after every other theory (layer structure, merge order,
+    // route path) was ruled out by testing this route served completely
+    // alone and still getting the identical 404.
+    const request = HttpClientRequest.post(EDITOR_PRESENCE_DISPATCH_COMMAND_PATH).pipe(
+      HttpClientRequest.setHeader("authorization", `Bearer ${input.bearerToken}`),
+      HttpClientRequest.bodyJsonUnsafe({
+        sessionId: input.sessionId,
+        action: input.action,
+        ...(input.params ? { params: input.params } : {}),
+      }),
+    );
+    const response = yield* HttpClient.execute(request);
+    return yield* response.json;
   });
 
 interface PresenceFrame {
@@ -522,13 +568,17 @@ it.layer(NodeServices.layer)("EditorPresenceRoute per-role scope enforcement", (
     ),
   );
 
-  // The credential check runs strictly BEFORE the upgrade and the scope
-  // check runs strictly AFTER it — this proves the credential path is
-  // untouched by the scope check directly, rather than just by code
-  // inspection: a missing credential still never reaches the upgrade at
-  // all, and still surfaces as a plain pre-upgrade 401, not the scope
-  // check's post-upgrade 4401 close.
-  it.effect("still returns a pre-upgrade 401 for a missing-credential subscriber, unchanged", () =>
+  // Task #57 INVERTED this test. It previously asserted a pre-upgrade HTTP
+  // 401, on the premise that a browser could see it. It cannot: measured in
+  // a real Chrome against this real route, a 401-refused upgrade and a dead
+  // port BOTH arrive as code 1006 / reason "" / wasClean false, while an
+  // accepted-then-closed rejection arrives as 4400 with its reason intact.
+  // So the credential check now runs POST-upgrade for subscribers, exactly
+  // as it already did for publishers.
+  //
+  // Asserting the EFFECT a client can act on — the upgrade completed and a
+  // credential-class close code arrived — not the internal ordering.
+  it.effect("accepts the upgrade then closes 4400 for a missing-credential subscriber", () =>
     Effect.gen(function* () {
       yield* HttpRouter.serve(editorPresenceRouteLayer, {
         disableListenLog: true,
@@ -536,10 +586,34 @@ it.layer(NodeServices.layer)("EditorPresenceRoute per-role scope enforcement", (
       }).pipe(Layer.build);
 
       const url = yield* getSubscriberWsUrl();
-      const outcome = yield* probeSubscriberUpgrade(url, {});
+      const outcome = yield* probePublisherUpgrade(url, {});
 
-      assert.isFalse(outcome.opened);
-      assert.strictEqual(outcome.httpStatus, 401);
+      assert.isTrue(outcome.opened);
+      assert.isNull(outcome.httpStatus);
+      assert.strictEqual(outcome.closeCode, EDITOR_PRESENCE_CLOSE_CODE.missingCredential);
+      assert.isTrue((outcome.closeReason ?? "").length > 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest))),
+    ),
+  );
+
+  it.effect("accepts the upgrade then closes 4401 for an invalid-credential subscriber", () =>
+    Effect.gen(function* () {
+      yield* HttpRouter.serve(editorPresenceRouteLayer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.build);
+
+      const url = yield* getSubscriberWsUrl();
+      const outcome = yield* probePublisherUpgrade(url, {
+        authorization: "Bearer not-a-real-token",
+      });
+
+      assert.isTrue(outcome.opened);
+      assert.isNull(outcome.httpStatus);
+      assert.strictEqual(outcome.closeCode, EDITOR_PRESENCE_CLOSE_CODE.invalidCredential);
+      assert.isTrue((outcome.closeReason ?? "").length > 0);
     }).pipe(
       Effect.scoped,
       Effect.provide(makeEnvironmentAuthLayer().pipe(Layer.provideMerge(NodeHttpServer.layerTest))),
@@ -633,11 +707,20 @@ function makePublisherRegistrySpy(): {
       return Effect.void;
     },
     updatePublisherSelection: () => Effect.void,
+    updatePublisherPlayState: () => Effect.void,
     removePublisher: () => Effect.void,
     addSubscriber: () => Effect.succeed("{}"),
     removeSubscriber: () => Effect.void,
     sendCommand: () => Effect.succeed({ ok: false, error: "not_implemented_in_spy" }),
     resolveCommand: () => Effect.void,
+    // Never exercised by this file's tests (this spy is about whether
+    // `registerPublisher` gets called, not workspace queries) — present
+    // only because the object literal is checked against the full service
+    // interface. A latent gap from #92 increment 1 adding
+    // `hasPublisherForWorkspace` to the interface, surfaced by running
+    // plain `tsc --noEmit` rather than only the lint-inclusive `vp run
+    // ... typecheck`.
+    hasPublisherForWorkspace: () => Effect.succeed(false),
   };
   return { registry, registerPublisherCallCount: () => calls };
 }
@@ -1119,5 +1202,399 @@ it.layer(NodeServices.layer)("EditorPresenceRoute commands", (it) => {
           ),
         ),
       ),
+  );
+
+  it.effect(
+    "POST /editor-presence/command reaches a real connected engine over the wire, sharing the same registry the WS route registered it into",
+    () =>
+      Effect.gen(function* () {
+        // Both route layers served together, exactly like server.ts's own
+        // `Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer, ...)`
+        // — this is what actually proves `editorPresenceCommandRouteLayer`'s
+        // `Layer.provide(EditorPresenceRegistry.layer)` shares ONE registry
+        // instance with the WS route's own `provideMerge` of the SAME layer
+        // reference, rather than building a second, disconnected, always-empty
+        // one that would make every dispatch fail `editor_not_connected`
+        // regardless of what a real publisher registered.
+        yield* HttpRouter.serve(
+          Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const publisherIssued = yield* serverAuth.issueSession();
+        const dispatcherIssued = yield* serverAuth.issueSession({
+          scopes: [AuthPresenceCommandScope],
+        });
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const receivedCommandFrames: Array<string> = [];
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          publisherIssued.token,
+          "http-command-repro",
+          undefined,
+          (raw) => {
+            receivedCommandFrames.push(raw);
+            const command = decodeUnknownJson(raw) as { readonly id: string };
+            socket.send(JSON.stringify({ v: 1, type: "commandResult", id: command.id, ok: true }));
+          },
+        );
+        // A finalizer, not a bare call at the end of the happy path — see
+        // the session-id-takeover test's own comment above for why: a
+        // thrown assertion below must still close the socket, or
+        // `NodeHttpServer.layerTest`'s scope teardown waits on it and a
+        // fast, real failure shows up as an uninformative 60s hang instead
+        // (this is exactly what happened the first time this test was
+        // written, before this fix).
+        yield* Effect.addFinalizer(() => Effect.sync(() => socket.close()));
+
+        const outcome = yield* postDispatchCommand({
+          bearerToken: dispatcherIssued.token,
+          sessionId: "http-command-repro",
+          action: "play",
+          params: { sceneIndex: 2 },
+        });
+
+        assert.deepStrictEqual(outcome, { ok: true });
+        assert.strictEqual(receivedCommandFrames.length, 1);
+        const receivedCommand = decodeUnknownJson(receivedCommandFrames[0]!) as {
+          readonly v: 1;
+          readonly type: "command";
+          readonly action: string;
+          readonly params: unknown;
+        };
+        assert.strictEqual(receivedCommand.v, 1);
+        assert.strictEqual(receivedCommand.type, "command");
+        assert.strictEqual(receivedCommand.action, "play");
+        assert.deepStrictEqual(receivedCommand.params, { sceneIndex: 2 });
+      }).pipe(
+        Effect.scoped,
+        // `EditorPresenceRegistry.layer` provided here too, alongside
+        // `editorPresenceRouteLayer`'s own internal use of the exact same
+        // layer reference — see the sibling in-process scope-gate test
+        // above for why (Effect memoizes a layer by identity within one
+        // resolution). Needed explicitly here at the type level even
+        // though `editorPresenceCommandRouteLayer` is bare (no
+        // self-provide): `Layer.mergeAll`'s TYPE signature is the union of
+        // each layer's OWN remaining requirement, not a cross-satisfied
+        // one, so TypeScript can't see that `editorPresenceRouteLayer`'s
+        // sibling presence already supplies it at runtime.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(FetchHttpClient.layer),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect(
+    "POST /editor-presence/command answers insufficient_scope for a session without presence:command, without reaching the engine",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(
+          Layer.mergeAll(editorPresenceRouteLayer, editorPresenceCommandRouteLayer),
+          { disableListenLog: true, disableLogger: true },
+        ).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const publisherIssued = yield* serverAuth.issueSession();
+        // Operate-only, deliberately missing the dedicated command scope —
+        // the same review finding the in-process scope-gate test above
+        // covers, exercised here over the ACTUAL route instead of by
+        // calling `dispatchEditorCommand` directly.
+        const dispatcherIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+        });
+        const publisherUrl = yield* getPublisherWsUrl();
+
+        const messagesAfterReady: Array<string> = [];
+        const socket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          publisherIssued.token,
+          "http-scope-gate-repro",
+          undefined,
+          (raw) => messagesAfterReady.push(raw),
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => socket.close()));
+
+        const outcome = yield* postDispatchCommand({
+          bearerToken: dispatcherIssued.token,
+          sessionId: "http-scope-gate-repro",
+          action: "play",
+        });
+
+        assert.deepStrictEqual(outcome, { ok: false, error: "insufficient_scope" });
+        assert.deepStrictEqual(messagesAfterReady, []);
+      }).pipe(
+        Effect.scoped,
+        // `EditorPresenceRegistry.layer` provided here too, alongside
+        // `editorPresenceRouteLayer`'s own internal use of the exact same
+        // layer reference — see the sibling in-process scope-gate test
+        // above for why (Effect memoizes a layer by identity within one
+        // resolution). Needed explicitly here at the type level even
+        // though `editorPresenceCommandRouteLayer` is bare (no
+        // self-provide): `Layer.mergeAll`'s TYPE signature is the union of
+        // each layer's OWN remaining requirement, not a cross-satisfied
+        // one, so TypeScript can't see that `editorPresenceRouteLayer`'s
+        // sibling presence already supplies it at runtime.
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(FetchHttpClient.layer),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+  );
+
+  /** Auto-replies to any `command` frame with `commandResult{ok:true}`,
+   * exactly like the wire-roundtrip test above's fake engine — needed on
+   * the victim socket in the takeover test below: `dispatchEditorCommand`
+   * awaits a real `commandResult` with a 10s bound that never elapses
+   * under `it.effect`'s virtual clock, so if the command routes to the
+   * victim (the correct, fixed behavior) and nothing replies, the test
+   * hangs instead of passing.
+   *
+   * The impostor side originally needed this too, back when a refused
+   * takeover left the impostor's connection open but silently ignored —
+   * it no longer does: the fix now closes the impostor's connection
+   * outright (see the `publishFrameAndObserveClose` call below), so
+   * there's no longer a second socket here to attach a replier to.
+   *
+   * Attached DIRECTLY to the raw `ws` socket's own "message" event
+   * (`connectPublisherAndConfirmRegistered`'s own `onMessage` callback is
+   * a no-op here, since this needs its own listener on top) — a raw `ws`
+   * "message" event hands the listener `RawData` (Buffer/ArrayBuffer/
+   * Buffer[]), never a string, so this converts via `rawDataToString`
+   * exactly like every other listener in this file does. The first
+   * version of this helper skipped that and fed a raw Buffer straight
+   * into `decodeUnknownJson`, which throws on anything but a string — a
+   * harness bug, not a product bug, caught by running the test and
+   * reading the actual error rather than assuming either way. */
+  const makeCommandAutoReplier =
+    (socket: { send: (data: string) => void }, collected: Array<string>) =>
+    (data: NodeSocket.NodeWS.RawData) => {
+      const raw = rawDataToString(data);
+      collected.push(raw);
+      const parsed = decodeUnknownJson(raw) as { readonly type?: string; readonly id?: string };
+      if (parsed.type !== "command" || typeof parsed.id !== "string") return;
+      socket.send(JSON.stringify({ v: 1, type: "commandResult", id: parsed.id, ok: true }));
+    };
+
+  it.effect(
+    "a session-id takeover by a DIFFERENT authenticated identity must not let the impostor intercept a command meant for the original publisher (task #60)",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        // Both hold the SAME scope any ordinary, non-malicious client
+        // already has (orchestration:operate) — this is not a scope
+        // bypass. It's two DIFFERENT authenticated identities: an
+        // attacker who read a victim's session.id off the (already
+        // scope-authorized) presence feed and opens a SECOND publisher
+        // connection claiming that same id for itself.
+        //
+        // SAME `subject` for both, DELIBERATELY (task #60 fix-round 2):
+        // this is the exact shape an independent security review
+        // reproduced the takeover with against fix-round 1's subject-based
+        // guard — every REAL provisioning path in this codebase (`t3
+        // pair`, the RPC pairing route) hardcodes `subject:
+        // "one-time-token"`, so a real victim and a real attacker,
+        // independently paired through the actual documented flow, end up
+        // with an IDENTICAL subject. `issueSession` still mints a fresh,
+        // unique `sessionId` for each call regardless of subject — this
+        // is what the guard actually keys on now — so reusing one subject
+        // here isn't a simplification, it's the whole point: proving the
+        // fix doesn't quietly depend on subjects differing.
+        const sharedSubject = "one-time-token";
+        const victimIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+          subject: sharedSubject,
+        });
+        const attackerIssued = yield* serverAuth.issueSession({
+          scopes: [AuthOrchestrationOperateScope],
+          subject: sharedSubject,
+        });
+        const dispatcherSession = makeFakeAuthenticatedSession([AuthPresenceCommandScope]);
+        const publisherUrl = yield* getPublisherWsUrl();
+        const sharedSessionId = "takeover-target-repro";
+
+        const victimMessages: Array<string> = [];
+        const victimSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          victimIssued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        victimSocket.on("message", makeCommandAutoReplier(victimSocket, victimMessages));
+        // Registered as a SCOPED finalizer, not a bare call at the end of
+        // the happy path — a thrown assertion below must still close both
+        // sockets. Skipping this was the second bug this test's own
+        // authoring surfaced: a failed assertion left both raw `ws`
+        // clients open, `NodeHttpServer.layerTest`'s own scope teardown
+        // then waited on them, and a real, fast assertion failure showed
+        // up as an uninformative 60-120s timeout instead — a finding
+        // this test was never trying to make, and one that would have
+        // made a genuine RED result look like a hang.
+        yield* Effect.addFinalizer(() => Effect.sync(() => victimSocket.close()));
+
+        // The impostor's own connection is expected to be CLOSED by the
+        // takeover guard, not left open-but-ignored — so this can't use
+        // `connectPublisherAndConfirmRegistered` (it waits for a `pong`
+        // that will now never arrive: the server closes the connection
+        // instead of finishing the hello/ping/pong sequence). It uses
+        // `publishFrameAndObserveClose` instead, which sends one frame and
+        // waits for exactly the close the server sends back.
+        const attackerOutcome = yield* publishFrameAndObserveClose(
+          publisherUrl,
+          attackerIssued.token,
+          helloFrameText(sharedSessionId),
+        );
+        // THE property this test exists for: the refused connection must
+        // be closed, not silently ignored and not left believing it
+        // registered — not "some check rejected the takeover", the actual
+        // bytes on the actual wire. Assert the EFFECT, not a precondition.
+        //
+        // 4402 (sessionSuperseded), NOT 4401 (invalidCredential) — a
+        // fix-round-1 mistake, corrected by the SAME independent review:
+        // this registration-time guard is first-claim-wins, so the party
+        // refused here could be a genuine impostor OR a legitimate editor
+        // that lost a race to squat an unclaimed id (see
+        // EditorPresenceRegistry.ts's SESSION TAKEOVER doc, "WHAT THIS
+        // DOES NOT CLOSE") — the server cannot tell which from here. 4401
+        // is credential-class (permanent, human-must-click-retry per
+        // epp_client.gd); sending it to whichever party is refused would
+        // PERMANENTLY strand a legitimate editor in the squat case. 4402
+        // is not credential-class, so a refused party keeps retrying with
+        // normal backoff — self-healing once the current holder
+        // eventually disconnects, in either scenario.
+        assert.strictEqual(attackerOutcome.closeCode, 4402);
+        assert.isTrue(attackerOutcome.closeReason.length > 0);
+
+        const outcome = yield* dispatchEditorCommand(dispatcherSession, sharedSessionId, "play");
+
+        // The command must still reach the LEGITIMATE, original
+        // publisher — proving this isn't "nobody gets it" (which would
+        // trivially satisfy the assertion above without the takeover
+        // actually being refused).
+        const victimCommandFrames = victimMessages.filter((raw) => {
+          const parsed = decodeUnknownJson(raw) as { readonly type?: string };
+          return parsed.type === "command";
+        });
+        assert.strictEqual(victimCommandFrames.length, 1);
+        const received = decodeUnknownJson(victimCommandFrames[0]!) as {
+          readonly type: string;
+          readonly action: string;
+        };
+        assert.strictEqual(received.type, "command");
+        assert.strictEqual(received.action, "play");
+        assert.deepStrictEqual(outcome, { ok: true });
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+    // A short explicit timeout, not the 60s default: if the takeover guard
+    // ever regresses to silently ALLOW the impostor's claim (instead of
+    // closing it), `publishFrameAndObserveClose` above waits for a close
+    // that will simply never come — a regression here is hang-shaped, not
+    // failure-shaped, and a hang is strictly worse than a fast failure (it
+    // was measured directly: mutating the guard away during this fix's own
+    // development turned a would-be assertion failure into a 60s timeout).
+    8_000,
+  );
+
+  it.effect(
+    "a session-id reconnect with the SAME token (same auth sessionId) still succeeds and supersedes cleanly — the takeover guard must not over-tighten (task #60 regression guard)",
+    () =>
+      Effect.gen(function* () {
+        yield* HttpRouter.serve(editorPresenceRouteLayer, {
+          disableListenLog: true,
+          disableLogger: true,
+        }).pipe(Layer.build);
+
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        // The case the takeover guard above must NOT break: a real
+        // editor's WebSocket dropping and reconnecting with the SAME
+        // persisted, still-valid bearer token (e.g. Godot's addon, which
+        // stores its token in EditorSettings and reuses it across
+        // reconnects and restarts — see EditorPresenceRegistry.ts's
+        // `claimantSessionId` doc for why this is verified, not assumed).
+        // `sessions.verify` resolves the SAME token to the SAME persisted
+        // session record every time, so this ONE issued token, presented
+        // twice, authenticates to the SAME `sessionId` both times — the
+        // guard's actual anchor now, not `subject`. `issueSession` with no
+        // `scopes` gets the broad default (used elsewhere in this file for
+        // both roles off one token) — this test isn't exercising scopes,
+        // only identity, so there's no reason to narrow them here.
+        const issued = yield* serverAuth.issueSession({ subject: "reconnect-owner" });
+        const publisherUrl = yield* getPublisherWsUrl();
+        const subscriberUrl = yield* getSubscriberWsUrl();
+        const sharedSessionId = "reconnect-same-subject-repro";
+
+        const firstSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => firstSocket.close()));
+
+        // THE assertion this test exists for: reconnecting with the SAME
+        // token (hence the SAME auth sessionId) must complete
+        // hello -> ping -> pong normally — i.e. NOT be refused and closed
+        // the way the sibling test above's different-identity takeover is.
+        // If the guard were ever over-tightened to treat ANY known
+        // claimant as a mismatch (same-identity included), this would
+        // hang instead of resolving, since the server would close the
+        // connection instead of ever replying to `ping` — which is
+        // exactly why this test also carries the short explicit timeout
+        // below, not the 60s default.
+        const secondSocket = yield* connectPublisherAndConfirmRegistered(
+          publisherUrl,
+          issued.token,
+          sharedSessionId,
+          undefined,
+          () => {},
+        );
+        yield* Effect.addFinalizer(() => Effect.sync(() => secondSocket.close()));
+
+        // "Supersedes cleanly," not just "wasn't refused": a fresh
+        // subscriber connecting now must see exactly ONE entry for this
+        // session id, not two — the same ghost-entry regression this
+        // file's very first takeover-adjacent test (`capabilities-default`
+        // above) was written to catch via `connectSubscriberAndReadFirstFrame`,
+        // re-proven here specifically through the NEW identity-aware code
+        // path so a duplicate-entry regression in THAT path doesn't slip
+        // through unnoticed.
+        const frame = yield* connectSubscriberAndReadFirstFrame(subscriberUrl, issued.token);
+        const matching = frame.editors.filter((entry) => entry.session.id === sharedSessionId);
+        assert.strictEqual(matching.length, 1);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          makeEnvironmentAuthLayer().pipe(
+            Layer.provideMerge(NodeHttpServer.layerTest),
+            Layer.provideMerge(EditorPresenceRegistry.layer),
+          ),
+        ),
+      ),
+    // Same reasoning as the sibling takeover test's explicit timeout above
+    // — a regression in THIS direction (over-tightening) is also
+    // hang-shaped, not failure-shaped, via the second `connectPublisherAndConfirmRegistered` call.
+    8_000,
   );
 });

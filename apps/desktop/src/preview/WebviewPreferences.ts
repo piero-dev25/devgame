@@ -32,11 +32,17 @@
  *   `contextIsolation="no"` is truthy → contextIsolation stays ENABLED →
  *   react-grab can't see the React DevTools hook.
  *
- * Defense in depth: `apps/desktop/src/main.ts` also runs a
- * `will-attach-webview` handler that force-sets `sandbox: true` and
- * `nodeIntegration*: false` on the actual webPreferences object, gated on
- * the preview partition, so even if this string is ever wrong, the
- * security-critical flags can't regress on preview tabs.
+ * Defense in depth: `apps/desktop/src/window/DesktopWindow.ts` also runs a
+ * `will-attach-webview` handler that force-sets `sandbox`/
+ * `nodeIntegration*`/`webSecurity`/`allowRunningInsecureContent` on the
+ * actual webPreferences object, gated on the preview partition, so even if
+ * this string is ever wrong, the security-critical flags can't regress.
+ *
+ * FIGMA/NOTION DELETED (owner ruling, 2026-08-04): this file used to export
+ * a second constant, `THIRD_PARTY_BROWSER_WEBVIEW_PREFERENCES`, for the
+ * third-party browser panel's `<webview>` — deleted with the feature it
+ * served. See git history at commit 630eeb5e9 for its full text and the
+ * independent security review (F1/F2/F3/F5/G1) that hardened it.
  */
 export const PREVIEW_WEBVIEW_PREFERENCES =
   "contextIsolation=false,sandbox=true,nodeIntegration=false";

@@ -26,7 +26,7 @@ interface AcpEventStamp {
 
 type AcpCanonicalRequestType = Extract<
   CanonicalRequestType,
-  "exec_command_approval" | "file_read_approval" | "file_change_approval" | "unknown"
+  "exec_command_approval" | "file_read_approval" | "file_change_approval" | "dynamic_tool_call"
 >;
 
 function canonicalRequestTypeFromAcpKind(kind: string | "unknown"): AcpCanonicalRequestType {
@@ -40,7 +40,7 @@ function canonicalRequestTypeFromAcpKind(kind: string | "unknown"): AcpCanonical
     case "move":
       return "file_change_approval";
     default:
-      return "unknown";
+      return "dynamic_tool_call";
   }
 }
 
@@ -232,6 +232,44 @@ export function makeAcpContentDeltaEvent(input: {
     payload: {
       streamKind: "assistant_text",
       delta: input.text,
+    },
+    raw: {
+      source: "acp.jsonrpc",
+      method: "session/update",
+      payload: input.rawPayload,
+    },
+  };
+}
+
+/**
+ * Task #67: `makeAcpContentDeltaEvent`'s sibling for AcpRuntimeModel.ts's
+ * "ImageDelta" parsed event — an image ACP's ContentBlock union carries
+ * inline in the assistant's own content stream. `delta` stays "" — see
+ * `ContentDeltaPayload`'s own doc comment in providerRuntime.ts for why
+ * the base64 payload lives in `attachmentData` instead of repurposing it.
+ */
+export function makeAcpImageDeltaEvent(input: {
+  readonly stamp: AcpEventStamp;
+  readonly provider: ProviderDriverKind;
+  readonly threadId: ThreadId;
+  readonly turnId: TurnId | undefined;
+  readonly itemId?: string;
+  readonly data: string;
+  readonly mimeType: string;
+  readonly rawPayload: unknown;
+}): ProviderRuntimeEvent {
+  return {
+    type: "content.delta",
+    ...input.stamp,
+    provider: input.provider,
+    threadId: input.threadId,
+    turnId: input.turnId,
+    ...(input.itemId ? { itemId: RuntimeItemId.make(input.itemId) } : {}),
+    payload: {
+      streamKind: "assistant_image",
+      delta: "",
+      attachmentData: input.data,
+      attachmentMimeType: input.mimeType,
     },
     raw: {
       source: "acp.jsonrpc",

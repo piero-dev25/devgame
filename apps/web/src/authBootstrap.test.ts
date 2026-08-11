@@ -363,6 +363,10 @@ describe("resolveInitialServerAuthGateState", () => {
   });
 
   it("derives primary request messages from structural request context", async () => {
+    // #87 (2026-08-05): an unclassifiable cause (no real HTTP status)
+    // no longer fabricates "HTTP 500" — see auth.test.ts for the full
+    // proof. `status` is null, and the message says so honestly instead
+    // of claiming a server response that never happened.
     const cause = new Error("private transport detail");
     const { PrimaryEnvironmentRequestError } = await import("./environments/primary");
     const error = PrimaryEnvironmentRequestError.fromCause({
@@ -370,10 +374,10 @@ describe("resolveInitialServerAuthGateState", () => {
       cause,
     });
 
-    expect(error.status).toBe(500);
+    expect(error.status).toBe(null);
     expect(error.cause).toBe(cause);
     expect(error.message).toBe(
-      "Primary environment request failed during list-pairing-links (HTTP 500).",
+      "Primary environment request failed during list-pairing-links (no response received).",
     );
     expect(error.message).not.toContain(cause.message);
   });

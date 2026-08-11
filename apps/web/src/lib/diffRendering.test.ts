@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
-import { buildPatchCacheKey, getDiffLineStat, getRenderablePatch } from "./diffRendering";
+import {
+  buildFileDiffRenderKey,
+  buildPatchCacheKey,
+  getDiffLineStat,
+  getRenderablePatch,
+  isPatchTruncated,
+} from "./diffRendering";
 
 describe("buildPatchCacheKey", () => {
   it("returns a stable cache key for identical content", () => {
@@ -80,6 +86,100 @@ describe("getRenderablePatch", () => {
     expect(parsed?.kind).toBe("files");
     if (parsed?.kind !== "files") return;
     expect(parsed.files[0]?.hunks[0]?.unifiedLineStart).toBe(47);
+  });
+});
+
+describe("isPatchTruncated", () => {
+  it("is true for a turn diff whose result reports truncated", () => {
+    expect(
+      isPatchTruncated({
+        isTurnDiff: true,
+        turnDiffTruncated: true,
+        gitSourceTruncated: undefined,
+      }),
+    ).toBe(true);
+  });
+
+  it("is false for a turn diff whose result reports not truncated", () => {
+    expect(
+      isPatchTruncated({
+        isTurnDiff: true,
+        turnDiffTruncated: false,
+        gitSourceTruncated: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  it("is false for a turn diff that hasn't loaded yet", () => {
+    expect(
+      isPatchTruncated({
+        isTurnDiff: true,
+        turnDiffTruncated: undefined,
+        gitSourceTruncated: undefined,
+      }),
+    ).toBe(false);
+  });
+
+  it("reads the git-source flag, not the turn flag, for a working-tree/branch diff", () => {
+    expect(
+      isPatchTruncated({
+        isTurnDiff: false,
+        turnDiffTruncated: undefined,
+        gitSourceTruncated: true,
+      }),
+    ).toBe(true);
+    expect(
+      isPatchTruncated({
+        isTurnDiff: false,
+        turnDiffTruncated: true,
+        gitSourceTruncated: false,
+      }),
+    ).toBe(false);
+  });
+
+  it("regression: disagrees with the old '!selectedTurn && source?.truncated' condition on a truncated turn diff", () => {
+    // This is the exact bug (task #66): DiffPanel.tsx used to compute
+    // `!selectedTurn && selectedGitSource?.truncated === true` directly,
+    // which is FALSE for every turn diff no matter what the server
+    // returned, because `!selectedTurn` alone already forces it to false.
+    // A turn diff genuinely truncated at CHECKPOINT_DIFF_MAX_OUTPUT_BYTES
+    // showed no banner and no way to tell. Reproduce that exact
+    // expression here so this test only passes if the new function
+    // actually disagrees with it for this case.
+    const isTurnDiff = true;
+    const turnDiffTruncated = true;
+    const gitSourceTruncated: boolean | undefined = undefined;
+
+    const oldBuggyResult = !isTurnDiff && gitSourceTruncated === true;
+    const fixedResult = isPatchTruncated({ isTurnDiff, turnDiffTruncated, gitSourceTruncated });
+
+    expect(oldBuggyResult).toBe(false);
+    expect(fixedResult).toBe(true);
+    expect(fixedResult).not.toBe(oldBuggyResult);
+  });
+});
+
+describe("buildFileDiffRenderKey", () => {
+  it("keeps file identity stable when Pierre hydrates a partial diff", () => {
+    const patch = [
+      "diff --git a/example.ts b/example.ts",
+      "--- a/example.ts",
+      "+++ b/example.ts",
+      "@@ -1 +1 @@",
+      "-before",
+      "+after",
+    ].join("\n");
+    const parsed = getRenderablePatch(patch, "hydrated-key");
+    expect(parsed?.kind).toBe("files");
+    if (parsed?.kind !== "files") return;
+
+    const file = parsed.files[0];
+    expect(file).toBeDefined();
+    if (!file) return;
+    const key = buildFileDiffRenderKey(file);
+    file.cacheKey = `${file.cacheKey}:hydrated`;
+
+    expect(buildFileDiffRenderKey(file)).toBe(key);
   });
 });
 

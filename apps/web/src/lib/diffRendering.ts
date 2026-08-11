@@ -41,6 +41,29 @@ export function buildPatchCacheKey(patch: string, scope = "diff-panel"): string 
   return `${scope}:${normalizedPatch.length}:${primary}:${secondary}`;
 }
 
+/**
+ * Whether the currently-selected patch was cut off by the server's output
+ * cap rather than genuinely ending there. A turn diff and a git-source
+ * (working-tree/branch) diff carry their `truncated` flag on different
+ * result shapes (`OrchestrationGetTurnDiffResult` vs
+ * `ReviewDiffPreviewSource`), so DiffPanel picks the right one by which
+ * selection is active rather than reading a single shared field.
+ *
+ * This used to be inlined as `!selectedTurn && selectedGitSource?.truncated
+ * === true` directly in DiffPanel.tsx — which is exactly the bug: it
+ * EXCLUDED turn diffs by construction, so a turn diff truncated at
+ * CHECKPOINT_DIFF_MAX_OUTPUT_BYTES never showed the truncation banner no
+ * matter what the server returned. See diffRendering.test.ts for a test
+ * shaped to fail against that old condition.
+ */
+export function isPatchTruncated(params: {
+  readonly isTurnDiff: boolean;
+  readonly turnDiffTruncated: boolean | undefined;
+  readonly gitSourceTruncated: boolean | undefined;
+}): boolean {
+  return params.isTurnDiff ? params.turnDiffTruncated === true : params.gitSourceTruncated === true;
+}
+
 export type RenderablePatch =
   | {
       kind: "files";
@@ -152,7 +175,10 @@ export function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
 }
 
 export function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
-  return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
+  const cacheKey = fileDiff.cacheKey;
+  if (!cacheKey) return `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
+
+  return cacheKey.endsWith(":hydrated") ? cacheKey.slice(0, -":hydrated".length) : cacheKey;
 }
 
 export function getDiffCollapseIconClassName(fileDiff: FileDiffMetadata): string {
@@ -169,3 +195,74 @@ export function getDiffCollapseIconClassName(fileDiff: FileDiffMetadata): string
       return "text-muted-foreground/80";
   }
 }
+
+/**
+ * Maps every diff/file surface the @pierre/diffs renderer paints onto the
+ * app's code tokens, so themed palettes reach the code body, gutter, and
+ * row tints instead of the renderer's bundled colors. Shared by the diff
+ * panel and the file preview.
+ */
+export const DIFF_SURFACE_THEME_UNSAFE_CSS = `
+[data-diffs-header],
+[data-diff],
+[data-file],
+[data-error-wrapper],
+[data-virtualizer-buffer] {
+  --diffs-header-font-family: var(--font-sans) !important;
+  --diffs-font-family: var(--font-mono) !important;
+  --diffs-bg: var(--code-background) !important;
+  --diffs-light-bg: var(--code-background) !important;
+  --diffs-dark-bg: var(--code-background) !important;
+  --diffs-token-light-bg: transparent;
+  --diffs-token-dark-bg: transparent;
+
+  /* Gutter, context, and row tints all derive from the code surface the diff
+     body sits on — mixing from the canvas leaves the gutter looking unthemed
+     when a palette separates the two. */
+  --diffs-bg-context-override: color-mix(in srgb, var(--code-background) 97%, var(--code-foreground));
+  --diffs-bg-hover-override: color-mix(in srgb, var(--code-background) 94%, var(--code-foreground));
+  --diffs-bg-separator-override: color-mix(
+    in srgb,
+    var(--code-background) 95%,
+    var(--code-foreground)
+  );
+  --diffs-bg-buffer-override: color-mix(in srgb, var(--code-background) 90%, var(--code-foreground));
+
+  --diffs-bg-addition-override: light-dark(
+    color-mix(in srgb, var(--code-background) 50%, var(--success)),
+    color-mix(in srgb, var(--code-background) 70%, var(--success))
+  );
+  --diffs-bg-addition-number-override: light-dark(
+    color-mix(in srgb, var(--code-background) 35%, var(--success)),
+    color-mix(in srgb, var(--code-background) 60%, var(--success))
+  );
+  --diffs-bg-addition-hover-override: color-mix(in srgb, var(--code-background) 85%, var(--success));
+  --diffs-bg-addition-emphasis-override: color-mix(
+    in srgb,
+    var(--code-background) 80%,
+    var(--success)
+  );
+
+  --diffs-bg-deletion-override: light-dark(
+    color-mix(in srgb, var(--code-background) 50%, var(--destructive)),
+    color-mix(in srgb, var(--code-background) 70%, var(--destructive))
+  );
+  --diffs-bg-deletion-number-override: light-dark(
+    color-mix(in srgb, var(--code-background) 35%, var(--destructive)),
+    color-mix(in srgb, var(--code-background) 60%, var(--destructive))
+  );
+  --diffs-bg-deletion-hover-override: color-mix(
+    in srgb,
+    var(--code-background) 85%,
+    var(--destructive)
+  );
+  --diffs-bg-deletion-emphasis-override: color-mix(
+    in srgb,
+    var(--code-background) 80%,
+    var(--destructive)
+  );
+
+  background-color: var(--diffs-bg) !important;
+  color: var(--code-foreground) !important;
+}
+`;

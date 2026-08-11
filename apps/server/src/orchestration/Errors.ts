@@ -79,6 +79,26 @@ export class OrchestrationListenerCallbackError extends Schema.TaggedErrorClass<
   }
 }
 
+/**
+ * Task #67: a provider stream (ACP `content.delta` / "assistant_image") sent
+ * an image ingestion could not persist. Deliberately NOT reused from
+ * Normalizer.ts's user-upload validation path — that one rejects the whole
+ * client command; this one is fed by a provider we don't control, so the
+ * caller (ProviderRuntimeIngestion.ts) catches it, logs, and drops the image
+ * rather than failing the assistant's turn over it.
+ */
+export class AssistantImageAttachmentPersistError extends Schema.TaggedErrorClass<AssistantImageAttachmentPersistError>()(
+  "AssistantImageAttachmentPersistError",
+  {
+    detail: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Failed to persist assistant image attachment: ${this.detail}`;
+  }
+}
+
 export type OrchestrationDispatchError =
   | ProjectionRepositoryError
   | OrchestrationCommandInvariantError

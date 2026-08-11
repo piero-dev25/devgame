@@ -150,10 +150,75 @@ export function buildTerminalContextPreviewTitle(
   return previews.length > 0 ? previews : null;
 }
 
-function buildTerminalContextBodyLines(selection: TerminalContextSelection): string[] {
-  return normalizeTerminalContextText(selection.text)
+/**
+ * Bounds ONE terminal selection. Task #72.
+ *
+ * This appender used to have no cap of any kind, while `buildTerminalContextBodyLines`
+ * ADDED ~6-8 characters of `"  N | "` prefix to every line — it inflated rather
+ * than bounded. A user dragging over a large scrollback region crossed
+ * `PROVIDER_SEND_TURN_MAX_INPUT_CHARS` (120,000) on its own, in one ordinary
+ * action, and the turn failed at the provider boundary.
+ *
+ * Deliberately capped HERE rather than by a composed-total budget across the
+ * six appenders. A shared budget that trimmed "the largest contributor first"
+ * would silently trim this one every single time, which is the same
+ * silent-degradation shape as the 10 MB diff truncation in #66.
+ */
+export const TERMINAL_CONTEXT_MAX_CHARS_PER_SELECTION = 8_000;
+
+/**
+ * Bounds the whole block, however many selections it holds — a per-selection
+ * cap alone still multiplies by the number of selections attached.
+ */
+export const TERMINAL_CONTEXT_MAX_TOTAL_CHARS = 24_000;
+
+/**
+ * Truncation is never silent: the omitted-line count rides INSIDE the block,
+ * indented so `parseTerminalContextEntries` keeps it with its entry (an
+ * unindented line there is dropped on the floor, so the transcript would show
+ * a shortened body with no indication it had been shortened).
+ *
+ * The TAIL is kept, not the head. Truncation only fires on a very large
+ * selection, and a very large selection is almost always "I dragged over the
+ * whole scrollback because something failed" rather than a curated excerpt —
+ * failures surface at the bottom, which is the same reason `tail` is the
+ * convention for bounded log viewing. The retained line numbers say exactly
+ * where the kept region starts, so nothing is misrepresented either way.
+ */
+function buildTerminalContextBodyLines(
+  selection: TerminalContextSelection,
+  maxChars: number,
+): string[] {
+  const numbered = normalizeTerminalContextText(selection.text)
     .split("\n")
     .map((line, index) => `  ${selection.lineStart + index} | ${line}`);
+
+  let budget = 0;
+  let keptFrom = numbered.length;
+  for (let index = numbered.length - 1; index >= 0; index -= 1) {
+    const cost = numbered[index]!.length + 1;
+    if (budget + cost > maxChars) break;
+    budget += cost;
+    keptFrom = index;
+  }
+
+  if (keptFrom === 0) return numbered;
+
+  // A single line can exceed the whole budget on its own (minified output, a
+  // base64 blob). Keeping zero lines and only a notice would be useless, so
+  // the last line is hard-truncated instead — still announced.
+  if (keptFrom === numbered.length) {
+    const last = numbered[numbered.length - 1]!;
+    const omitted = numbered.length - 1;
+    const kept = `${last.slice(0, Math.max(0, maxChars - 1))}…`;
+    return [...(omitted > 0 ? [omittedLinesNotice(omitted)] : []), kept];
+  }
+
+  return [omittedLinesNotice(keptFrom), ...numbered.slice(keptFrom)];
+}
+
+function omittedLinesNotice(count: number): string {
+  return `  (${count} earlier line${count === 1 ? "" : "s"} omitted — selection too large to attach in full)`;
 }
 
 export function buildTerminalContextBlock(
@@ -170,13 +235,37 @@ export function buildTerminalContextBlock(
     return "";
   }
   const lines: string[] = [];
+  let used = 0;
+  let attached = 0;
   for (let index = 0; index < normalizedContexts.length; index += 1) {
     const context = normalizedContexts[index]!;
-    lines.push(`- ${formatTerminalContextLabel(context)}:`);
-    lines.push(...buildTerminalContextBodyLines(context));
-    if (index < normalizedContexts.length - 1) {
-      lines.push("");
-    }
+    const header = `- ${formatTerminalContextLabel(context)}:`;
+    const body = buildTerminalContextBodyLines(
+      context,
+      Math.min(
+        TERMINAL_CONTEXT_MAX_CHARS_PER_SELECTION,
+        Math.max(0, TERMINAL_CONTEXT_MAX_TOTAL_CHARS - used),
+      ),
+    );
+    const cost = [header, ...body].reduce((sum, line) => sum + line.length + 1, 0);
+    // Always attach the first selection, however large — it is already bounded
+    // by the per-selection cap, and a block that attached nothing at all would
+    // be a silent drop of the thing the user explicitly picked.
+    if (attached > 0 && used + cost > TERMINAL_CONTEXT_MAX_TOTAL_CHARS) break;
+    if (attached > 0) lines.push("");
+    lines.push(header, ...body);
+    used += cost;
+    attached += 1;
+  }
+
+  // Same loud-truncation contract as the per-selection notice, and indented for
+  // the same reason: `parseTerminalContextEntries` silently discards an
+  // unindented line, so an unindented notice would vanish from the transcript.
+  const dropped = normalizedContexts.length - attached;
+  if (dropped > 0) {
+    lines.push(
+      `  (+${dropped} more terminal selection${dropped === 1 ? "" : "s"} not shown — attachment limit reached)`,
+    );
   }
   return ["<terminal_context>", ...lines, "</terminal_context>"].join("\n");
 }

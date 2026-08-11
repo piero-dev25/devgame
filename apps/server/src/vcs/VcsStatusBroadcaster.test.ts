@@ -818,3 +818,66 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(testLayer));
   });
 });
+
+describe("#31: an external write with no refresh trigger", () => {
+  // The user-visible effect, at the layer that determines it: the working tree
+  // changed on disk, and the value every client is served did not follow.
+  //
+  // Scoped here rather than to the UI deliberately. `getStatus` is what
+  // `vcsEnvironment.status` resolves to, and both `GitActionsControl` and
+  // `DiffDockPanel` read that one query — so the panel can never be fresher
+  // than this. Proving the served value is stale proves the panel is.
+  //
+  // `currentLocalStatus` moving from clean to dirty stands in for the write
+  // itself: a build, an asset import, or a script run in DevGame's own
+  // Terminal panel, none of which take focus away from the window.
+  it.effect("keeps serving the pre-write status until something explicitly refreshes", () => {
+    const state = {
+      currentLocalStatus: baseLocalStatus,
+      currentRemoteStatus: baseRemoteStatus,
+      localStatusCalls: 0,
+      remoteStatusCalls: 0,
+      localInvalidationCalls: 0,
+      remoteInvalidationCalls: 0,
+    };
+
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+
+      const before = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.equal(before.hasWorkingTreeChanges, false);
+
+      // The external write lands. Nothing tells the server.
+      state.currentLocalStatus = {
+        ...baseLocalStatus,
+        hasWorkingTreeChanges: true,
+        workingTree: {
+          files: [{ path: "Assets/Scenes/Level01.unity", insertions: 12, deletions: 3 }],
+          insertions: 12,
+          deletions: 3,
+        },
+      };
+
+      // Time alone does not fix it. Well past
+      // DEFAULT_VCS_STATUS_REFRESH_INTERVAL (30s) — that constant drives the
+      // REMOTE loop only, so no amount of waiting re-reads local status.
+      yield* TestClock.adjust(Duration.minutes(5));
+
+      const afterWrite = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.equal(
+        afterWrite.hasWorkingTreeChanges,
+        false,
+        "STALE: the tree is dirty on disk but the served status still says clean",
+      );
+      assert.deepStrictEqual(afterWrite.workingTree.files, []);
+
+      // Only an explicit refresh — an agent turn, an in-app git action, a
+      // window focus event, or the RPC — moves it.
+      yield* broadcaster.refreshLocalStatus("/repo");
+
+      const afterRefresh = yield* broadcaster.getStatus({ cwd: "/repo" });
+      assert.equal(afterRefresh.hasWorkingTreeChanges, true);
+      assert.equal(afterRefresh.workingTree.files.length, 1);
+    }).pipe(Effect.provide(makeTestLayer(state)));
+  });
+});

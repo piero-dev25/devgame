@@ -10,7 +10,6 @@ import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as HostPowerMonitor from "./background/HostPowerMonitor.ts";
 import * as ServerConfig from "./config.ts";
-import * as HttpResponseCompression from "./httpCompression/HttpResponseCompression.ts";
 import {
   otlpTracesProxyRouteLayer,
   assetRouteLayer,
@@ -19,9 +18,22 @@ import {
   browserApiCorsLayer,
   httpCompressionLayer,
 } from "./http.ts";
-import { editorPresenceRouteLayer } from "./editorPresence/EditorPresenceRoute.ts";
+import {
+  editorPresenceRouteLayer,
+  editorPresenceCommandRouteLayer,
+} from "./editorPresence/EditorPresenceRoute.ts";
 import { fixPath } from "./os-jank.ts";
 import { spaceEventsRouteLayer } from "./spaceEvents/SpaceEventsRoute.ts";
+import { unityCommandRouteLayer } from "./unity/UnityCommandRoute.ts";
+import * as UnityPackageLock from "./unity/UnityPackageLock.ts";
+import * as UnityPipelineClient from "./unity/UnityPipelineClient.ts";
+import { unityPipelineInstallRouteLayer } from "./unity/UnityPipelineInstallRoute.ts";
+import * as UnityPairingHandoff from "./unity/UnityPairingHandoff.ts";
+import { unitySetupProbeRouteLayer } from "./unity/UnitySetupProbeRoute.ts";
+import { unityRaiseRouteLayer } from "./unity/UnityRaiseRoute.ts";
+import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
+import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
+import { unityColdStartRouteLayer } from "./editorPresence/UnityColdStartRoute.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -87,6 +99,7 @@ import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import {
   connectHttpApiLayer,
+  pendingServiceUpdateExists,
   reconcileDesiredCloudLink,
   releaseManagedTunnelOnShutdown,
 } from "./cloud/http.ts";
@@ -185,6 +198,20 @@ const HttpServerLive = Layer.unwrap(
         port: config.port,
         hostname: config.host ?? "127.0.0.1",
         gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+        websocket: {
+          // Negotiate permessage-deflate with clients that offer it; clients
+          // that don't still get uncompressed frames on their connection. A
+          // dedicated compressor keeps a per-connection sliding window
+          // (context takeover) so the compression dictionary is shared across
+          // server-to-client frames. Decompression uses the shared
+          // decompressor: uWebSockets' dedicated decompressor path can abort
+          // connections (close 1006) on valid DEFLATE input — see
+          // https://github.com/uNetworking/uWebSockets.js/issues/633.
+          perMessageDeflate: {
+            compress: "dedicated",
+            decompress: "shared",
+          },
+        },
       });
     } else {
       const [NodeHttpServer, NodeHttp] = yield* Effect.all([
@@ -195,13 +222,17 @@ const HttpServerLive = Layer.unwrap(
         host: config.host ?? "127.0.0.1",
         port: config.port,
         gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+        // Negotiate permessage-deflate with clients that offer it; clients
+        // that don't still get uncompressed frames on their connection.
+        // Context takeover stays enabled (ws default) so the compression
+        // window is shared across frames — that also makes small frames cheap
+        // to compress, so no size threshold is set (ws only honors
+        // `threshold` when context takeover is disabled).
+        websocket: { perMessageDeflate: true },
       });
     }
   }),
 );
-
-const HttpResponseCompressionLive =
-  typeof Bun !== "undefined" ? HttpResponseCompression.layerBun : HttpResponseCompression.layerNode;
 
 const PlatformServicesLive = Layer.unwrap(
   Effect.gen(function* () {
@@ -298,6 +329,81 @@ const CheckpointingLayerLive = Layer.empty.pipe(
 
 const PortScannerLayerLive = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
 
+// Provided as a FULLY RESOLVED layer here (ProcessRunner AND FileSystem/Path
+// both discharged — `UnityPipelineClient.make` needs FileSystem/Path
+// directly, not just inside `isAvailable`'s pre-check; `PlatformServicesLive`,
+// defined above, resolves both for whichever runtime — Bun/Node — is active.
+// PortScannerLayerLive above is NOT a precedent for omitting them: PortScanner
+// never needs FileSystem/Path at all), then discharged INTO
+// `unityCommandRouteLayer` at the route registration site below via
+// `HttpRouter.provideRequest` — NOT `Layer.provide`.
+//
+// This distinction is load-bearing, not stylistic. `HttpRouter.add(...)`
+// does not expose a route's dependencies as a bare requirement — it wraps
+// them in a nominal branded marker, `Request.From<"Requires", X>`
+// (effect/unstable/http/HttpRouter.ts:496,787-806), structurally unrelated
+// to bare `X`. Ordinary `Layer.provide(SomeLayer providing X)` cancels bare
+// `X` from a layer's R; it CANNOT match `Request<"Requires", X>`, so it is a
+// silent no-op against a route's requirement — confirmed by isolating
+// `unityCommandRouteLayer.pipe(Layer.provide(UnityPipelineClientLayerLive))`
+// on its own (outside any Layer.mergeAll) and still seeing `UnityPipelineClient`
+// unresolved. The marker only turns back into a bare requirement once
+// `HttpRouter.serve(...)` runs (`Request.Without<R>` at HttpRouter.ts:1294-95)
+// — by which point it has propagated to the server bootstrap, hence the
+// 282-error cascade through bin.ts/server.test.ts. `HttpRouter.provideRequest`
+// (HttpRouter.ts:1240-1257) is the library's purpose-built combinator for
+// discharging THIS marker at the route, before `.serve()` ever unwraps it.
+// The sibling `editorPresenceCommandRouteLayer`'s `.pipe(Layer.provide(EditorPresenceRegistry.layer))`
+// has the identical bug — it looks correct and isn't, for the same
+// structural reason. Flagged to that lane; not touched here.
+const UnityPipelineClientLayerLive = UnityPipelineClient.layer.pipe(
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(PlatformServicesLive),
+);
+
+const UnityPairingHandoffLayerLive = UnityPairingHandoff.layer.pipe(
+  Layer.provide(EditorPresenceRegistry.layer),
+  Layer.provide(PlatformServicesLive),
+);
+
+const UnityPipelineInstallDependenciesLive = Layer.mergeAll(
+  UnityPipelineClientLayerLive,
+  UnityPairingHandoffLayerLive,
+  PlatformServicesLive,
+);
+
+// `EngineTypeResolverLayerLive` is defined here (moved up from its
+// original spot below `ProjectFaviconResolverLayerLive`) so
+// `UnitySetupProbeLayerLive` right after it can reference the same const
+// rather than re-declaring `EngineTypeResolver.layer.pipe(Layer.provide(
+// WorkspacePaths.layer))` a second time — both would memoize to the same
+// underlying instance either way (Effect keys memoization on the layer
+// reference, not the call site), but one definition is one thing to keep
+// in sync, not two.
+const EngineTypeResolverLayerLive = EngineTypeResolver.layer.pipe(
+  Layer.provide(WorkspacePaths.layer),
+);
+
+// `EditorPresenceRegistry.layer` here is the SAME layer reference
+// `editorPresenceRouteLayer`/`editorPresenceCommandRouteLayer` already
+// compose in elsewhere in `makeRoutesLayer`'s merge below — Effect's own
+// layer memoization shares ONE constructed instance across a merged graph
+// for the same layer reference, so `UnitySetupProbe.ts`'s
+// `hasPublisherForWorkspace` reads the identical registry those routes
+// register publishers/subscribers against, not a second, disconnected one.
+// `ServerConfig.ServerConfig` is deliberately NOT provided here — it's
+// ambient in this file already (see `makeServerLayer`'s own bare
+// `yield* ServerConfig.ServerConfig` a few hundred lines below), satisfied
+// by whoever composes `makeServerLayer` with a real config, same as every
+// other server-side service that needs it.
+const UnitySetupProbeLayerLive = UnitySetupProbe.layer.pipe(
+  Layer.provide(UnityPipelineClientLayerLive),
+  Layer.provide(UnityPackageLock.layer.pipe(Layer.provide(PlatformServicesLive))),
+  Layer.provide(EditorPresenceRegistry.layer),
+  Layer.provide(EngineTypeResolverLayerLive),
+  Layer.provide(PlatformServicesLive),
+);
+
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
@@ -324,10 +430,6 @@ const WorkspaceLayerLive = Layer.mergeAll(
 const ProjectFaviconResolverLayerLive = ProjectFaviconResolver.layer.pipe(
   Layer.provide(WorkspacePaths.layer),
   Layer.provide(T3ProjectFileLoader.layer),
-);
-
-const EngineTypeResolverLayerLive = EngineTypeResolver.layer.pipe(
-  Layer.provide(WorkspacePaths.layer),
 );
 
 const AuthLayerLive = EnvironmentAuth.layer.pipe(
@@ -468,6 +570,14 @@ export const makeRoutesLayer = Layer.mergeAll(
     staticAndDevRouteLayer,
     websocketRpcRouteLayer,
     editorPresenceRouteLayer,
+    editorPresenceCommandRouteLayer,
+    unityCommandRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityPipelineInstallRouteLayer.pipe(
+      HttpRouter.provideRequest(UnityPipelineInstallDependenciesLive),
+    ),
+    unityColdStartRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unityRaiseRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
+    unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
   ),
   McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
@@ -591,32 +701,45 @@ export const makeServerLayer = Layer.unwrap(
           yield* Deferred.succeed(cloudLinkParked, undefined).pipe(Effect.orDie);
           return;
         }
+        const releaseManagedTunnel = releaseManagedTunnelOnShutdown().pipe(
+          Effect.timeout("10 seconds"),
+          Effect.tap((released) =>
+            released ? Effect.logInfo("Released the managed tunnel on shutdown") : Effect.void,
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning(
+              "Failed to release the managed tunnel on shutdown; the next link reuses it",
+              { cause },
+            ),
+          ),
+          Effect.asVoid,
+        );
+        // A launcher trial can be stopped before activation. The previous
+        // server is already gone, so the trial owns cleanup immediately; the
+        // pending-state check keeps the tunnel for normal commit or rollback,
+        // while the launcher's explicit-stop marker allows it to be released.
+        // Other runtimes wait for activation so a failed standby cannot tear
+        // down the active runtime's tunnel.
+        const cleanupBeforeActivation = yield* pendingServiceUpdateExists;
+        if (cleanupBeforeActivation) {
+          yield* Effect.addFinalizer(() => releaseManagedTunnel);
+        }
         yield* forkParked(
           Effect.gen(function* () {
-            // Only an activated runtime owns the tunnel cleanup finalizer.
-            yield* Effect.addFinalizer(() =>
-              releaseManagedTunnelOnShutdown().pipe(
-                Effect.timeout("10 seconds"),
-                Effect.tap((released) =>
-                  released
-                    ? Effect.logInfo("Released the managed tunnel on shutdown")
-                    : Effect.void,
-                ),
-                Effect.catchCause((cause) =>
-                  Effect.logWarning(
-                    "Failed to release the managed tunnel on shutdown; the next link reuses it",
-                    { cause },
-                  ),
-                ),
-                Effect.asVoid,
-              ),
-            );
+            if (!cleanupBeforeActivation) {
+              yield* Effect.addFinalizer(() => releaseManagedTunnel);
+            }
             if (!(yield* CloudCliState.readCliDesiredCloudLink)) return;
             const server = yield* HttpServer.HttpServer;
             const address = server.address;
             if (typeof address === "string" || !("port" in address)) return;
-            yield* Effect.sleep("250 millis").pipe(
-              Effect.andThen(reconcileDesiredCloudLink(`http://127.0.0.1:${address.port}`)),
+            // No settling delay before the first attempt: routes are already
+            // serving by the time activation opens this gate (the startup
+            // sequence awaits routesReady), and the retry schedule below
+            // covers anything this sleep used to hedge against. Every
+            // millisecond here is dead time on the path to remote
+            // reachability after a restart.
+            yield* reconcileDesiredCloudLink(`http://127.0.0.1:${address.port}`).pipe(
               Effect.retry({
                 while: (error) =>
                   error._tag !== "EnvironmentHttpBadRequestError" &&
@@ -671,7 +794,6 @@ export const makeServerLayer = Layer.unwrap(
       Layer.provideMerge(runtimeServicesLive),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),
-      Layer.provideMerge(HttpResponseCompressionLive),
       Layer.provideMerge(HttpServerLive),
       Layer.provide(ApplicationObservabilityLive),
       Layer.provideMerge(FetchHttpClient.layer),

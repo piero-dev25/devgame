@@ -35,6 +35,11 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
+import { ProviderValidationError } from "../../provider/Errors.ts";
+import { FAILURE_DETAIL_MAX_CHARS } from "../failureDetail.ts";
+import { ProviderSendTurnInput } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -50,6 +55,8 @@ import * as WorkspacePaths from "../../workspace/WorkspacePaths.ts";
 import { OrchestrationEngineLive } from "./OrchestrationEngine.ts";
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
+import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import * as ThreadPlanProgress from "../ThreadPlanProgress.ts";
 import {
   providerErrorLabel,
   providerErrorLabelFromInstanceHint,
@@ -347,6 +354,8 @@ describe("ProviderCommandReactor", () => {
 
     const orchestrationLayer = OrchestrationEngineLive.pipe(
       Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(ThreadPlanProgress.layer),
       Layer.provide(OrchestrationProjectionPipelineLive),
       Layer.provide(OrchestrationEventStoreLive),
       Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -355,6 +364,8 @@ describe("ProviderCommandReactor", () => {
       Layer.provide(SqlitePersistenceMemory),
     );
     const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provide(ThreadBackgroundLiveness.layer),
+      Layer.provide(ThreadPlanProgress.layer),
       Layer.provide(RepositoryIdentityResolver.layer),
       Layer.provide(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
       Layer.provide(SqlitePersistenceMemory),
@@ -789,6 +800,123 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.titleRegeneration).toBeNull();
   });
 
+  it("pins the first user message when regeneration context is truncated", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const firstUserMessage = `Review subagent monitoring risks. ${"Opening context. ".repeat(200)}`;
+    const recentUserMessage = `LATEST FINDING: ${"implementation detail ".repeat(320)}`;
+    harness.generateThreadTitle.mockReturnValue(
+      Effect.succeed({ title: "Review subagent monitoring risks" }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-title-existing-long"),
+        threadId: ThreadId.make("thread-1"),
+        title: "Generic PR review",
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-long-title-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-long-title-regeneration"),
+          role: "user",
+          text: firstUserMessage,
+          attachments: [
+            {
+              type: "image",
+              id: "opening-context-image",
+              name: "image.png",
+              mimeType: "image/png",
+              sizeBytes: 5,
+            },
+          ],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-middle-turn-before-long-title-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("middle-message-before-long-title-regeneration"),
+          role: "user",
+          text: "Temporary handoff details.",
+          attachments: [
+            {
+              type: "image",
+              id: "middle-context-image",
+              name: "image.png",
+              mimeType: "image/png",
+              sizeBytes: 5,
+            },
+          ],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-recent-turn-before-long-title-regeneration"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("recent-message-before-long-title-regeneration"),
+          role: "user",
+          text: recentUserMessage,
+          attachments: [
+            {
+              type: "image",
+              id: "recent-context-image",
+              name: "image.png",
+              mimeType: "image/png",
+              sizeBytes: 5,
+            },
+          ],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:02.000Z",
+      }),
+    );
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-thread-title-regenerate-long"),
+        threadId: ThreadId.make("thread-1"),
+        regenerateTitle: true,
+      }),
+    );
+
+    await harness.drain();
+
+    expect(harness.generateThreadTitle).toHaveBeenCalledTimes(1);
+    const input = harness.generateThreadTitle.mock.calls[0]?.[0];
+    if (!input) {
+      throw new Error("Expected a title generation input");
+    }
+    const message = input.message;
+    expect(message.startsWith("USER:\nReview subagent monitoring risks.")).toBe(true);
+    expect(message).toContain("[First user message truncated]");
+    expect(message).toContain("[Earlier content truncated]");
+    expect(message).toContain("image.png");
+    expect(message).toHaveLength(8_000);
+    expect(input.attachments?.map((attachment) => attachment.id)).toEqual([
+      "opening-context-image",
+      "recent-context-image",
+    ]);
+  });
+
   it("clears title regeneration state left pending across reactor startup", async () => {
     const harness = await createHarness({
       titleRegenerationBeforeStart: "one",
@@ -976,10 +1104,14 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.titleRegeneration).toBeNull();
   });
 
-  it("keeps the full retained context and excludes attachments outside it", async () => {
+  it("pins the first user context and attachment before the retained tail", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
-    const retainedContext = "x".repeat(8_000);
+    const firstUserContext = "USER:\nOld visual issue\n[Attachments: old-issue.png]";
+    const truncationMarker = "[Earlier content truncated]\n\n";
+    const retainedContext = "x".repeat(
+      8_000 - firstUserContext.length - "\n\n".length - truncationMarker.length,
+    );
 
     await harness.runEffect(
       harness.engine.dispatch({
@@ -1044,9 +1176,14 @@ describe("ProviderCommandReactor", () => {
     await harness.drain();
 
     expect(harness.generateThreadTitle.mock.calls[0]?.[0].message).toBe(
-      `[Earlier content truncated]\n\n${retainedContext}`,
+      `${firstUserContext}\n\n${truncationMarker}${retainedContext}`,
     );
-    expect(harness.generateThreadTitle.mock.calls[0]?.[0].attachments).toBeUndefined();
+    expect(harness.generateThreadTitle.mock.calls[0]?.[0].attachments).toEqual([
+      expect.objectContaining({
+        id: "old-title-context-image",
+        name: "old-issue.png",
+      }),
+    ]);
   });
 
   it("does not overwrite a manual rename while title regeneration is running", async () => {
@@ -2814,5 +2951,159 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  // Task #76: the provider input cap is enforced, but the REJECTION used to be
+  // unbounded -- a 130,000-char message produced a 131,752-char activity detail
+  // that was persisted, broadcast and rendered. This drives the REAL reactor,
+  // engine and persistence, with the REAL provider-boundary decode wired into
+  // the provider service, and asserts the EFFECT: the detail is bounded.
+  it("bounds and scrubs the failure detail when the provider rejects an oversized message", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const OVERSIZE_CHARS = 130_000;
+    const text = "A".repeat(OVERSIZE_CHARS);
+
+    // Mirrors ProviderService.decodeInputOrValidationError (ProviderService.ts:89-105).
+    const decodeProviderInput = Schema.decodeUnknownEffect(ProviderSendTurnInput);
+    harness.sendTurn.mockImplementation(((input: unknown) =>
+      decodeProviderInput(input).pipe(
+        Effect.map(() => ({
+          threadId: ThreadId.make("thread-1"),
+          turnId: asTurnId("turn-1"),
+        })),
+        Effect.mapError(
+          (schemaError) =>
+            new ProviderValidationError({
+              operation: "ProviderService.sendTurn",
+              issue: SchemaIssue.makeFormatterDefault()(schemaError.issue),
+            }),
+        ),
+      )) as never);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-oversized"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-oversized"),
+          role: "user",
+          text,
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      const pending = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        pending?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) => entry.kind === "provider.turn.start.failed",
+    );
+    const detail = String((activity?.payload as { detail?: string } | undefined)?.detail ?? "");
+
+    // The failure is still reported, and still says what went wrong.
+    expect(activity).toBeDefined();
+    expect(detail).toContain("at most 120000");
+
+    // THE FIX: the detail no longer scales with the rejected payload. Under
+    // Effect beta.102 the default schema formatter embedded the offending
+    // 130k value verbatim, so this detail arrived oversized and the funnel's
+    // truncation marker used to be asserted here too. beta.103's formatter
+    // stopped embedding the value (the 2026-08-06 upstream merge went red on
+    // exactly that assertion), so this path now yields a short detail with
+    // nothing to truncate. The truncation proof lives in the next test,
+    // forced through a provider error message instead of the schema
+    // formatter; the path-scrub assertions below still exercise the funnel
+    // on this one (the raw Cause stack carries absolute paths).
+    expect(detail.length).toBeLessThanOrEqual(FAILURE_DETAIL_MAX_CHARS);
+    expect(detail).not.toContain("A".repeat(2_000));
+
+    // No absolute server paths reach this client-visible, persisted activity.
+    expect(detail).not.toContain("/Users/");
+    expect(detail).not.toContain("/home/");
+
+    // The user's own message is untouched -- we bounded the ECHO, not the
+    // message, which is why truncating the echo loses nothing recoverable.
+    const userMessage = thread?.messages.find(
+      (entry) => entry.id === asMessageId("user-message-oversized"),
+    );
+    expect(String((userMessage as { text?: string } | undefined)?.text ?? "").length).toBe(
+      OVERSIZE_CHARS,
+    );
+  });
+
+  // The schema formatter no longer embeds rejected values (Effect beta.103),
+  // but the funnel at the activity boundary still guards every OTHER
+  // oversized-detail source: a provider SDK that echoes the request body into
+  // its own error message is the surviving real-world shape. This forces that
+  // shape through the real reactor and asserts the funnel truncates it.
+  // RED-proven by mutation: with ProviderCommandReactor's
+  // `sanitizeFailureDetail(input.detail)` replaced by `input.detail`, the
+  // length and marker assertions below fail.
+  it("truncates a provider failure whose own message embeds the payload", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    const echoedPayload = "B".repeat(50_000);
+
+    harness.sendTurn.mockImplementation((() =>
+      Effect.fail(
+        new ProviderValidationError({
+          operation: "ProviderService.sendTurn",
+          issue: `provider echoed the request body: ${echoedPayload}`,
+        }),
+      )) as never);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-echoing-provider"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-echoed"),
+          role: "user",
+          text: "hello",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const snapshot = await harness.readModel();
+      const pending = snapshot.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return (
+        pending?.activities.some((activity) => activity.kind === "provider.turn.start.failed") ??
+        false
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const activity = thread?.activities.find(
+      (entry) => entry.kind === "provider.turn.start.failed",
+    );
+    const detail = String((activity?.payload as { detail?: string } | undefined)?.detail ?? "");
+
+    // The head still names the failure...
+    expect(detail).toContain("provider echoed the request body");
+    // ...but the echo cannot dominate persisted thread state.
+    expect(detail.length).toBeLessThanOrEqual(FAILURE_DETAIL_MAX_CHARS);
+    expect(detail).not.toContain("B".repeat(2_000));
+    expect(detail).toContain("characters omitted");
   });
 });

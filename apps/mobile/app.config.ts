@@ -206,7 +206,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
     slug: "devgame",
     platforms: ["ios", "android"],
     scheme: variant.scheme,
-    version: "1.0.1",
+    version: "1.0.2",
     runtimeVersion: {
       // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
       // project — native deps, config plugins, AND patches/ — matches the update.

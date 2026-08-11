@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -19,6 +19,8 @@ import {
   materializeInlineTerminalContextPrompt,
   removeInlineTerminalContextPlaceholder,
   stripInlineTerminalContextPlaceholders,
+  TERMINAL_CONTEXT_MAX_CHARS_PER_SELECTION,
+  TERMINAL_CONTEXT_MAX_TOTAL_CHARS,
   type TerminalContextDraft,
 } from "./terminalContext";
 
@@ -207,5 +209,106 @@ describe("terminalContext", () => {
         [makeContext()],
       ),
     ).toBe("Investigate @terminal-1:12-13 carefully");
+  });
+});
+
+describe("the terminal block is bounded, and says so (#72)", () => {
+  // Scoped to the pure builder on purpose: per #74 `apps/web` has no jsdom, so
+  // nothing here asserts anything about how the block RENDERS. The bug lives
+  // in the string that goes on the wire, which is what these exercise.
+
+  function hugeSelection(lines: number, lineWidth = 80): TerminalContextDraft {
+    return makeContext({
+      lineStart: 1,
+      lineEnd: lines,
+      text: Array.from({ length: lines }, (_, i) => `${"x".repeat(lineWidth)}#${i}`).join("\n"),
+    });
+  }
+
+  it("bounds one oversized selection that would otherwise blow the send limit", () => {
+    // 5,000 x ~80 chars ≈ 400 KB raw, and the old builder ADDED a "  N | "
+    // prefix per line on top of that — over three times the 120,000-char
+    // provider cap from one ordinary drag-select.
+    const block = buildTerminalContextBlock([hugeSelection(5_000)]);
+
+    // Asserted against the PROVIDER's limit, deliberately not against this
+    // module's own constant: a bound stated in terms of the thing it bounds
+    // passes trivially when that constant is raised, which is exactly how a
+    // cap regression would slip through.
+    expect(block.length).toBeLessThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(block.length).toBeLessThan(30_000);
+    expect(block).toContain("<terminal_context>");
+    expect(block).toContain("</terminal_context>");
+  });
+
+  it("says how many lines it dropped rather than truncating silently", () => {
+    const block = buildTerminalContextBlock([hugeSelection(5_000)]);
+
+    expect(block).toMatch(/\(\d+ earlier lines omitted — selection too large to attach in full\)/);
+  });
+
+  it("keeps the tail, where a failure actually is", () => {
+    const block = buildTerminalContextBlock([hugeSelection(5_000)]);
+
+    expect(block).toContain("#4999");
+    expect(block).not.toContain("#0\n");
+  });
+
+  it("leaves a selection that fits completely untouched, with no notice", () => {
+    const block = buildTerminalContextBlock([makeContext()]);
+
+    expect(block).toContain("git status");
+    expect(block).toContain("On branch main");
+    expect(block).not.toContain("omitted");
+    expect(block).not.toContain("not shown");
+  });
+
+  it("bounds the whole block when many selections are attached, not just each one", () => {
+    const many = Array.from(
+      { length: 20 },
+      (_, i) => hugeSelection(2_000) as TerminalContextDraft,
+    ).map((c, i) => ({ ...c, id: `context-${i}`, terminalLabel: `Terminal ${i}` }));
+
+    const block = buildTerminalContextBlock(many);
+
+    expect(block.length).toBeLessThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(block.length).toBeLessThan(30_000);
+    expect(block).toMatch(
+      /\(\+\d+ more terminal selections not shown — attachment limit reached\)/,
+    );
+  });
+
+  it("still attaches the first selection even when it alone fills the budget", () => {
+    // Attaching nothing would be a silent drop of the thing the user picked.
+    const block = buildTerminalContextBlock([hugeSelection(5_000), hugeSelection(5_000)]);
+
+    expect(block).toContain("Terminal 1");
+    expect(block.split("\n").some((l) => l.includes(" | "))).toBe(true);
+  });
+
+  it("keeps one line rather than none when a single line exceeds the budget", () => {
+    // Minified output or a base64 blob: one line can beat the whole cap.
+    const oneHugeLine = makeContext({
+      lineStart: 1,
+      lineEnd: 1,
+      text: "y".repeat(TERMINAL_CONTEXT_MAX_CHARS_PER_SELECTION * 3),
+    });
+
+    const block = buildTerminalContextBlock([oneHugeLine]);
+
+    expect(block).toContain("yyy");
+    expect(block).toContain("…");
+    expect(block.length).toBeLessThan(PROVIDER_SEND_TURN_MAX_INPUT_CHARS);
+    expect(block.length).toBeLessThan(30_000);
+  });
+
+  it("the truncation notice survives the transcript round-trip", () => {
+    // An unindented notice is silently discarded by parseTerminalContextEntries,
+    // so the user would see a shortened body with no sign it was shortened.
+    const prompt = appendTerminalContextsToPrompt("what went wrong", [hugeSelection(5_000)]);
+    const extracted = extractTrailingTerminalContexts(prompt);
+
+    expect(extracted.contexts).toHaveLength(1);
+    expect(extracted.contexts[0]!.body).toContain("earlier lines omitted");
   });
 });

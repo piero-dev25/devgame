@@ -38,6 +38,18 @@ export interface VcsDeleteCheckpointRefsInput {
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
 }
 
+/**
+ * `truncated` mirrors `VcsProcessOutput.stdoutTruncated` from the underlying
+ * `git diff` call. A caller that drops this (as `diffCheckpoints` itself
+ * used to) has no way to tell a complete diff from one silently cut off
+ * mid-hunk at `CHECKPOINT_DIFF_MAX_OUTPUT_BYTES` — both look like a
+ * well-formed, complete-looking patch.
+ */
+export interface VcsDiffCheckpointsResult {
+  readonly diff: string;
+  readonly truncated: boolean;
+}
+
 export interface VcsCheckpointOps {
   readonly captureCheckpoint: (input: VcsCaptureCheckpointInput) => Effect.Effect<void, VcsError>;
   readonly hasCheckpointRef: (
@@ -46,7 +58,9 @@ export interface VcsCheckpointOps {
   readonly restoreCheckpoint: (
     input: VcsRestoreCheckpointInput,
   ) => Effect.Effect<boolean, VcsError>;
-  readonly diffCheckpoints: (input: VcsDiffCheckpointsInput) => Effect.Effect<string, VcsError>;
+  readonly diffCheckpoints: (
+    input: VcsDiffCheckpointsInput,
+  ) => Effect.Effect<VcsDiffCheckpointsResult, VcsError>;
   readonly deleteCheckpointRefs: (
     input: VcsDeleteCheckpointRefsInput,
   ) => Effect.Effect<void, VcsError>;

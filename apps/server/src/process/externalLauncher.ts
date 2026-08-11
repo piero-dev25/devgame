@@ -19,6 +19,7 @@ import {
 } from "@t3tools/contracts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { isCommandAvailable, resolveSpawnCommand } from "@t3tools/shared/shell";
+import * as Clock from "effect/Clock";
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -27,6 +28,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Ref from "effect/Ref";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
@@ -260,6 +262,22 @@ function buildBrowserLaunch(
   };
 }
 
+function buildApplicationLaunch(
+  applicationName: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv = {},
+): ProcessLaunch {
+  if (platform === "darwin") {
+    return {
+      command: "open",
+      args: ["-a", applicationName],
+      options: DETACHED_IGNORE_STDIO_OPTIONS,
+    };
+  }
+
+  return buildBrowserLaunch(applicationName, platform, env);
+}
+
 const buildAvailableEditors = Effect.fn("externalLauncher.buildAvailableEditors")(function* (
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
@@ -292,11 +310,41 @@ const resolveBrowserLaunch = Effect.fn("externalLauncher.resolveBrowserLaunch")(
   return buildBrowserLaunch(target, platform, env);
 });
 
+const resolveApplicationLaunch = Effect.fn("externalLauncher.resolveApplicationLaunch")(function* (
+  applicationName: string,
+) {
+  const platform = yield* HostProcessPlatform;
+  const env = yield* readBrowserLaunchEnv;
+  return buildApplicationLaunch(applicationName, platform, env);
+});
+
 const resolveAvailableEditors = Effect.fn("externalLauncher.resolveAvailableEditors")(function* () {
   const platform = yield* HostProcessPlatform;
   const env = yield* readCommandLookupEnv;
   return yield* buildAvailableEditors(platform, env);
 });
+
+// Editor discovery walks PATH for every known editor and runs for every
+// client connect (the server config embeds the available editors). Memoize
+// the discovered set for a bounded window so repeat connects skip even the
+// per-command cache lookups in @t3tools/shared/shell.
+//
+// This deliberately does not use `Effect.cachedWithTTL`: that memoizes the
+// first caller's Exit whatever it is, including an interrupt. Callers run this
+// on the connection fiber under a timeout (`resolveAvailableEditorsForConfig`),
+// so one client disconnecting mid-scan would cache the interrupt and replay it
+// to every later connect for the whole TTL, breaking `server.getConfig`
+// permanently. Storing only on success means an interrupted scan leaves the
+// cache untouched and the next connect simply rescans.
+// Expiry uses the monotonic clock (Clock.currentTimeNanos), matching the
+// command-resolution cache in @t3tools/shared/shell, so a backward wall-clock
+// adjustment cannot keep an expired entry alive.
+const EDITOR_DISCOVERY_CACHE_TTL_NANOS = 60_000_000_000n;
+
+interface EditorDiscoveryCacheEntry {
+  readonly editors: ReadonlyArray<EditorId>;
+  readonly expiresAtNanos: bigint;
+}
 
 /**
  * ExternalLauncher - Service tag for browser/editor launch operations.
@@ -307,6 +355,10 @@ export class ExternalLauncher extends Context.Service<
     readonly resolveAvailableEditors: () => Effect.Effect<ReadonlyArray<EditorId>>;
     /** Launch a URL target in the default browser. */
     readonly launchBrowser: (target: string) => Effect.Effect<void, ExternalLauncherError>;
+    /** Raise or launch an OS application by its registered application name. */
+    readonly launchApplication: (
+      applicationName: string,
+    ) => Effect.Effect<void, ExternalLauncherError>;
     /**
      * Launch a workspace path in a selected editor integration.
      *
@@ -391,6 +443,22 @@ const launchBrowser = Effect.fn("externalLauncher.launchBrowser")(function* (
   );
 });
 
+const launchApplication = Effect.fn("externalLauncher.launchApplication")(function* (
+  applicationName: string,
+): Effect.fn.Return<void, ExternalLauncherError, ChildProcessSpawner.ChildProcessSpawner> {
+  const launch = yield* resolveApplicationLaunch(applicationName);
+  return yield* launchAndUnref(
+    launch,
+    (cause) =>
+      new ExternalLauncherBrowserSpawnError({
+        target: applicationName,
+        command: launch.command,
+        args: launch.args,
+        cause,
+      }),
+  );
+});
+
 const launchEditorProcess = Effect.fn("externalLauncher.launchEditorProcess")(function* (
   launch: EditorLaunch,
 ): Effect.fn.Return<
@@ -443,10 +511,34 @@ export const make = Effect.gen(function* () {
       Effect.provideService(Path.Path, path),
     );
 
+  const editorDiscoveryCache = yield* Ref.make<Option.Option<EditorDiscoveryCacheEntry>>(
+    Option.none(),
+  );
+  const cachedAvailableEditors = Effect.gen(function* () {
+    const nowNanos = yield* Clock.currentTimeNanos;
+    const entry = yield* Ref.get(editorDiscoveryCache);
+    if (Option.isSome(entry) && entry.value.expiresAtNanos > nowNanos) {
+      return entry.value.editors;
+    }
+    const editors = yield* provideCommandResolutionServices(resolveAvailableEditors());
+    yield* Ref.set(
+      editorDiscoveryCache,
+      Option.some({
+        editors,
+        expiresAtNanos: nowNanos + EDITOR_DISCOVERY_CACHE_TTL_NANOS,
+      }),
+    );
+    return editors;
+  });
+
   return ExternalLauncher.of({
-    resolveAvailableEditors: () => provideCommandResolutionServices(resolveAvailableEditors()),
+    resolveAvailableEditors: () => cachedAvailableEditors,
     launchBrowser: (target) =>
       launchBrowser(target).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      ),
+    launchApplication: (applicationName) =>
+      launchApplication(applicationName).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       ),
     launchEditor: (input) =>

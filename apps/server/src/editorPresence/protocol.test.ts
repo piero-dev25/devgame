@@ -221,3 +221,27 @@ describe("buildCommandFrame (server -> engine, FLAT per the module doc's wire-sh
     expect(JSON.parse(raw).action).toBe("unity.frameStepBackward");
   });
 });
+
+describe("playState parsing (task #49: play state is a level, not correlated to any command)", () => {
+  it("parses each of the three closed-union values", () => {
+    for (const playState of ["stopped", "playing", "paused"]) {
+      const frame = parseEditorPresenceInboundFrame(
+        JSON.stringify({ v: 1, type: "playState", playState }),
+      );
+      expect(frame, playState).toEqual({ type: "playState", playState });
+    }
+  });
+
+  it("drops (not loudly rejects) a missing playState — same treatment as selection/ping/commandResult", () => {
+    expect(parseEditorPresenceInboundFrame(JSON.stringify({ v: 1, type: "playState" }))).toBeNull();
+  });
+
+  it("drops an unrecognised playState value — closed union, not open like action/kind", () => {
+    for (const playState of ["running", "Playing", "PAUSED", "", 1, null, true]) {
+      expect(
+        parseEditorPresenceInboundFrame(JSON.stringify({ v: 1, type: "playState", playState })),
+        JSON.stringify(playState),
+      ).toBeNull();
+    }
+  });
+});

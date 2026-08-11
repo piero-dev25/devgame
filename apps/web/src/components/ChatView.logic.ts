@@ -1,4 +1,5 @@
 import {
+  type EngineType,
   type EnvironmentId,
   isProviderDriverKind,
   ProjectId,
@@ -25,8 +26,116 @@ import type { DraftThreadEnvMode } from "../composerDraftStore";
 export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
+export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+/**
+ * The subset of a project `resolveEngineChipState` needs — structural,
+ * matching the `EditorPresenceProjectRef`-style refs already used in
+ * `editorPresence/store.ts` for the same reason: a test should not have to
+ * build an `EnvironmentProject`'s many unrelated required fields to
+ * exercise this.
+ */
+export interface EngineChipStateProjectRef {
+  // `| undefined` explicit (not just the `?` modifier) — `exactOptionalPropertyTypes`
+  // distinguishes "absent" from "present and undefined," and the Effect Schema
+  // `Schema.optional(...)` field this mirrors (`OrchestrationProject.engineType`)
+  // decodes to the latter, not the former.
+  readonly engineType?: EngineType | null | undefined;
+}
+
+/**
+ * The three-state engine signal (no-engine-ui-for-non-game-projects spec,
+ * rev 2, "core design"): `engineType` on the wire means three DIFFERENT
+ * things and every UI gate that hides/shows game-harness chrome must key
+ * off this, never off a collapsed `activeProject?.engineType ?? null` —
+ * that collapse is exactly what would unmount the composer's live presence
+ * socket on every project switch (the "unknown" window every thread-open
+ * and project-switch passes through) and blank all engine UI on an older
+ * backend that predates the field entirely (both states decode to
+ * `undefined`/absent, indistinguishable from "detection hasn't run yet"
+ * without this function).
+ *
+ * - `"unknown"` — `activeProject` is `null` (nothing loaded yet), or the
+ *   project loaded but `engineType` is `undefined` (an older server, or a
+ *   fixture predating the field — optional-for-decode per the contract's
+ *   own comment). We cannot say whether this is a game.
+ * - `"none"` — the project loaded and `engineType` decoded to `null`:
+ *   detection RAN against the workspace and matched no marker. This is
+ *   "not a game," a settled answer, not an in-flight one.
+ * - a concrete `EngineType` — a game project.
+ */
+export function resolveEngineChipState(
+  activeProject: EngineChipStateProjectRef | null,
+): "unknown" | "none" | EngineType {
+  if (activeProject === null) return "unknown";
+  if (activeProject.engineType === undefined) return "unknown";
+  if (activeProject.engineType === null) return "none";
+  return activeProject.engineType;
+}
+
+/**
+ * Stale-while-revalidate for the Unity setup probe (owner report,
+ * 2026-08-05: "a very quick 'checking for unity state' flash when I come to
+ * the window — and it's big and long"). The probe's 5s cache expires while
+ * the window is unfocused, so refocusing triggers a refetch during which
+ * `useEnvironmentQuery.data` is momentarily absent — the header then flicked
+ * through the no-data shape (big pending banner + reshuffled controls) for
+ * a few hundred ms before the fresh answer landed.
+ *
+ * Rule: PENDING never erases a previously classified state — keep rendering
+ * the last good result while re-checking (a background re-check almost
+ * always confirms it, and every action is server-validated anyway, so a
+ * click against a just-stale state fails honestly). ERROR is deliberately
+ * NOT masked: a failed check must surface the failure + Retry (#106's
+ * escape hatch), not a comfortable stale answer.
+ *
+ * Pure so it is directly testable; the caller owns the ref and MUST reset
+ * it when the project changes (a last-good from project A must never
+ * dress project B's header).
+ */
+export function resolveUnitySetupForView<T>(input: {
+  readonly data: T | undefined;
+  readonly error: unknown;
+  readonly isPending: boolean;
+  readonly lastGood: T | null;
+}): { readonly setup: T | null; readonly nextLastGood: T | null } {
+  if (input.data !== undefined) {
+    return { setup: input.data, nextLastGood: input.data };
+  }
+  if (input.error !== undefined && input.error !== null) {
+    return { setup: null, nextLastGood: input.lastGood };
+  }
+  if (input.isPending) {
+    return { setup: input.lastGood, nextLastGood: input.lastGood };
+  }
+  return { setup: null, nextLastGood: input.lastGood };
+}
+
+export function tryBeginUnitySetupInstall(inFlightRef: { current: boolean }): boolean {
+  if (inFlightRef.current) return false;
+  inFlightRef.current = true;
+  return true;
+}
+
+export function tryBeginUnityRaise(inFlightRef: { current: boolean }): boolean {
+  if (inFlightRef.current) return false;
+  inFlightRef.current = true;
+  return true;
+}
+
+export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
+  const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
+  return () => globalThis.clearTimeout(timeoutId);
+}
+
+export function hasEnvironmentReconnectWarningGraceElapsed(
+  activeEnvironmentId: EnvironmentId | null,
+  elapsedEnvironmentId: EnvironmentId | null,
+): boolean {
+  return activeEnvironmentId !== null && activeEnvironmentId === elapsedEnvironmentId;
+}
 
 export function startNewThreadForProject(
   projectRef: ScopedProjectRef | null,

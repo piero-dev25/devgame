@@ -14,12 +14,6 @@ vi.mock("~/previewStateStore", () => ({
   isPreviewSupportedInRuntime: () => true,
 }));
 
-vi.mock("~/rightPanelStore", () => ({
-  useRightPanelStore: {
-    getState: () => ({ openBrowser: vi.fn() }),
-  },
-}));
-
 const threadRef = {
   environmentId: "local" as ScopedThreadRef["environmentId"],
   threadId: "thread-1" as ScopedThreadRef["threadId"],

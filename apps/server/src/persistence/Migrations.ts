@@ -50,6 +50,15 @@ import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
 import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
 import Migration0036 from "./Migrations/036_ProjectionThreadsSpaceAndTaskRef.ts";
 import Migration0037 from "./Migrations/037_ProjectionSpaces.ts";
+import Migration0038 from "./Migrations/038_ProjectionThreadsPinned.ts";
+// The fork's 036/037 claimed ids upstream later reused, so every upstream
+// migration from upstream-036 on is shifted by +2 here. The id in
+// `migrationEntries` is authoritative — a file's numeric prefix is the
+// upstream id it was born with, not the id it runs under. Ids already applied
+// to fork databases can never be renumbered (Migrator only runs id >
+// max(applied)), so new upstream migrations are appended, never inserted.
+import Migration0039 from "./Migrations/039_ProjectionTurnsKeysetIndex.ts";
+import Migration0040 from "./Migrations/040_ProjectionThreadsPinOrderKey.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -97,8 +106,21 @@ export const migrationEntries = [
   [33, "ProjectionThreadsSettled", Migration0033],
   [34, "ProjectionThreadsSnoozed", Migration0034],
   [35, "ProjectionThreadTitleRegeneration", Migration0035],
+  // ID-SPACE RULING (2026-08-08 upstream merge): the fork and upstream both
+  // minted ids 36-38 independently. The fork's ids stay where every
+  // actually-deployed DevGame database already recorded them (36/37 spaces,
+  // and 38 was free here), and upstream's three arrivals take 38/39/40 --
+  // their FILES were renamed to match these runtime ids. KNOWN CROSSOVER
+  // HAZARD, accepted pre-release: a database produced by STOCK T3 Code
+  // v0.0.32+ (its own 36-38 applied) that later meets this manifest would
+  // silently skip the fork's space migrations. That is only reachable by
+  // pointing DevGame at a stock T3 data dir -- the storage-isolation task
+  // (#98) is the real fix and must land before any public release.
   [36, "ProjectionThreadsSpaceAndTaskRef", Migration0036],
   [37, "ProjectionSpaces", Migration0037],
+  [38, "ProjectionThreadsPinned", Migration0038],
+  [39, "ProjectionTurnsKeysetIndex", Migration0039],
+  [40, "ProjectionThreadsPinOrderKey", Migration0040],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

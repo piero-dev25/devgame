@@ -5,6 +5,7 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthPresenceCommandScope,
+  AuthPresenceReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
   AuthReviewWriteScope,
@@ -26,6 +27,7 @@ import {
 import type { AuthEnvironmentScope } from "@t3tools/contracts";
 import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
+import * as NodeUtil from "node:util";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import { identity } from "effect/Function";
@@ -40,6 +42,7 @@ import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
+import { sanitizeFailureDetail } from "../orchestration/failureDetail.ts";
 
 const CREDENTIAL_RESPONSE_HEADERS = {
   "cache-control": "no-store",
@@ -148,6 +151,24 @@ export function failEnvironmentNotFound(reason: EnvironmentResourceNotFoundReaso
   );
 }
 
+/** Bounds the RAW `util.inspect` pass over an arbitrary, untyped `error`
+ * (`Schema.Defect()` on every internal-error tag this funnel serves) before
+ * `sanitizeFailureDetail` (below) ever sees it — the first of two layers,
+ * not a substitute for the second. `depth: 8` comfortably clears the
+ * 3-level chain #113 needed serialized (auth error -> bootstrap-credential
+ * error -> the actual SQL/decode failure) while stopping well short of
+ * where many SQL drivers attach the failed statement's BOUND PARAMETERS on
+ * their own error objects — which, for `pairing_credential_issuance_failed`
+ * specifically, can BE the credential. `maxStringLength`/`maxArrayLength`
+ * cap what a single string/array value can render to, independent of
+ * depth (a flat error with one enormous `.message` or `.params` array
+ * would sail through a depth cap alone). Found live (2026-08-05, F4 merge-
+ * gate review against f26ccc527): `depth: null` — #113's own fix — undid
+ * the *incidental* containment the previous `depth: 2` default provided,
+ * with no size bound at all, on the single funnel for every one of this
+ * file's 14+ internal-error call sites. */
+const INSPECT_OPTIONS = { depth: 8, maxStringLength: 2_000, maxArrayLength: 50 } as const;
+
 export function failEnvironmentInternal(reason: EnvironmentInternalErrorReason, error?: unknown) {
   return Effect.gen(function* () {
     const traceId = yield* currentEnvironmentTraceId;
@@ -155,7 +176,25 @@ export function failEnvironmentInternal(reason: EnvironmentInternalErrorReason, 
       yield* Effect.logError("environment api operation failed", {
         reason,
         traceId,
-        cause: error,
+        // Serialized to a BOUNDED string, not passed through as the raw
+        // `error` object. `Logger.consolePretty()` (serverLogger.ts)
+        // formats structured metadata with Node's default `util.inspect`
+        // object-depth cap, which silently prints `[Object]` past two
+        // levels of nesting — exactly what a chain like `error` -> tagged
+        // auth error -> `BootstrapCredentialConsumeAvailableError` -> the
+        // actual SQL/decode failure routinely is. A STRING value is never
+        // depth-truncated by the LOGGER, only nested plain objects are —
+        // #113's own fix — but an unbounded string is its own hazard
+        // (F4, 2026-08-05): `depth: null` can walk into a SQL driver's own
+        // bound-parameter payload, and nothing capped the resulting
+        // string's total size either. `INSPECT_OPTIONS` bounds the
+        // inspection itself; `sanitizeFailureDetail` (task #76's own
+        // funnel guard, reused rather than reinvented — same reasoning
+        // that file's module doc gives) then strips this server's
+        // absolute filesystem paths and applies a final overall-length
+        // bound as defense in depth, the same two-layer treatment that
+        // funnel already gives provider-failure details.
+        cause: sanitizeFailureDetail(NodeUtil.inspect(error, INSPECT_OPTIONS)),
       });
     }
     return yield* new EnvironmentInternalError({ code: "internal_error", reason, traceId });
@@ -284,6 +323,7 @@ export const authHttpApiLayer = HttpApiBuilder.group(
                       AuthRelayReadScope,
                       AuthRelayWriteScope,
                       AuthPresenceCommandScope,
+                      AuthPresenceReadScope,
                     ]),
                   });
             if (requestedScopes === null) {

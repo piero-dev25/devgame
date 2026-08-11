@@ -1,0 +1,249 @@
+/**
+ * Which dock panel was last active, per dock "activation key" — the other
+ * half of the fix for task #108 ("dock tab selection leaks across chats").
+ *
+ * `DockviewLayout.tsx`'s own persisted layout (`ChatDock.tsx`'s
+ * `CHAT_DOCK_WORKSPACE_ID`) is deliberately ONE shared blob across every
+ * thread — see that constant's own doc comment for why the SPLIT/arrangement
+ * genuinely should be shared (nobody wants their column widths resetting on
+ * every thread switch). But that same blob also carries dockview's
+ * `activeGroup`/per-group `activeView` — which tab is front-most — and that
+ * inherited the same global scope BY ACCIDENT, not by design: layout
+ * structure should be shared, which tab you were looking at should not. This
+ * store is what gives selection its own per-key answer, so
+ * `restoreActivePanel.ts` has something real to restore on a thread switch.
+ *
+ * `DockviewLayout.tsx` itself stays deliberately thread-agnostic — see its
+ * own module doc: "a future second dock with no equivalent 'which thing is
+ * the user looking at' concept has no reason to force anything active on its
+ * own." So this store is keyed by whatever opaque `activationKey` STRING a
+ * caller already passes it (`ChatDock.tsx` builds
+ * `${environmentId}:${threadId}` today, the same identity
+ * `activateOnChangeId`'s existing effect already keys off) — not a
+ * `ScopedThreadRef`, unlike `fileExplorerStore.ts`'s `byThreadKey`. Same
+ * persisted-record-per-key shape as that store (and `terminalDockStore.ts`,
+ * `previewStateStore.ts`), different key type, so this dock's per-thread
+ * persistence layer stays one recognisable pattern rather than two.
+ */
+import { create } from "zustand";
+import { createJSONStorage, persist } from "zustand/middleware";
+
+import { resolveStorage } from "./lib/storage";
+
+/**
+ * Task #108, round 6 (live QA, diagnostic-build repro, all four windows
+ * log-confirmed): T3's thread list is itself an ordinary dock panel —
+ * `ChatDock.tsx` registers it as `id: SIDEBAR_PANEL_ID, singleton: true,
+ * closeable: false` — not a route-level nav element outside the dock. That
+ * means clicking a thread to navigate is, to dockview-core, a genuine click
+ * INSIDE that panel's content area, which dockview treats as "this panel
+ * becomes active" and fires `onDidActivePanelChange` for it SYNCHRONOUSLY,
+ * as part of native DOM click handling — strictly BEFORE React commits the
+ * new `activationKey` prop and the effect that updates
+ * `activationKeyRef.current` (`DockviewLayout.tsx`) runs. So every single
+ * thread switch recorded `panelId: SIDEBAR_PANEL_ID` under the OUTGOING
+ * (soon-to-be-stale) thread's key, silently overwriting whatever real
+ * Files/Diff selection that thread actually had — root-caused via an
+ * instrumented diagnostic build + a computer-use driver replaying a literal
+ * 12-step timestamped click sequence, confirmed at all four "return to a
+ * thread" windows (every one read back `"sidebar"`, never the panel that
+ * was actually clicked).
+ *
+ * `SIDEBAR_PANEL_ID` is defined HERE, not in `ChatDock.tsx` (where it
+ * conceptually belongs), because `ChatDock.tsx` already imports
+ * `DockviewLayout.tsx`, which imports THIS module — `ChatDock.tsx` importing
+ * this constant back out of here is the only cycle-free direction.
+ * `ChatDock.tsx`'s own local `const SIDEBAR_PANEL_ID = "sidebar"` was
+ * replaced with an import from here so there's exactly one source of truth,
+ * not two string literals that could drift.
+ *
+ * `CHROME_PANEL_IDS` is the general concept this constant is one member of:
+ * navigation/UI CHROME — panels that exist to let you get somewhere, not
+ * panels that represent "content the user is looking at for THIS thread" —
+ * must never become a per-thread remembered selection, REGARDLESS of
+ * whatever caused them to transiently activate. `recordActivePanelForKeyUnlessRestoring`
+ * below (the write side) and `restoreActivePanelForKey`
+ * (`lib/restoreActivePanel.ts`, the read side) both filter against this same
+ * set. Deliberately NOT solved with click-attribution machinery (was
+ * "which click caused this activation, and does it also change the
+ * thread") — that's genuinely general infrastructure this app doesn't need
+ * yet; the chrome-exclusion principle covers the one case that exists today.
+ * If a future panel is ALSO navigation chrome rather than thread-scoped
+ * content, its id joins this set — that is the intended extension point,
+ * not a sign the approach needs to change.
+ */
+export const SIDEBAR_PANEL_ID = "sidebar";
+export const CHROME_PANEL_IDS: ReadonlySet<string> = new Set([SIDEBAR_PANEL_ID]);
+
+/**
+ * Task #108, round 7 (live QA, diagnostic-build repro — the fourth window's
+ * "restore lands, but the SECOND return to the same thread doesn't" shape;
+ * see evidence/task-108-round7-focus-echo-diagnosis/README.md for the full
+ * trace). Root cause this closes: T3's Chat panel autofocuses shortly after
+ * each thread's content mounts (almost certainly the message composer),
+ * and dockview-core's own `dockviewGroupPanelModel.js` wires
+ * `contentContainer.onDidFocus(() => accessor.doSetGroupActive(this.groupPanel))`
+ * — a DOM focus event landing anywhere inside a group's content
+ * unconditionally activates that GROUP, which fires the top-level
+ * `onDidActivePanelChange` event with whatever panel that group's own
+ * `activePanel` is (always "chat," since Chat's group holds only Chat).
+ * This landed 9–23ms after EVERY restore completed in the measured trace
+ * (dock-diag2, 2026-08-05) — well outside `isRestoringRef`'s synchronous
+ * suppression window (round 4), since the focus event is asynchronous
+ * relative to the restore call, not part of it. Unlike round 6's sidebar
+ * (pure navigation chrome, safe to exclude by id unconditionally), Chat is
+ * genuine thread-scoped content a user CAN legitimately select by clicking
+ * its own tab — so `CHROME_PANEL_IDS`-style exclusion is wrong here; it
+ * would make Chat permanently unrestorable as a real selection.
+ *
+ * The fix is a SETTLE WINDOW anchored to the ACTIVATION-KEY CHANGE (the
+ * thread switch itself), not to the restore call — the true invariant is
+ * "for a short window after a thread switch, activation events are
+ * machinery (restore, autofocus, mount churn), not user selections,"
+ * which covers this echo regardless of exactly how long after restore it
+ * happens to land. `DockviewLayout.tsx` stamps a ref with `Date.now()` on
+ * every activation-key change and passes the elapsed time to
+ * `recordActivePanelForKeyUnlessRestoring` below.
+ *
+ * `SETTLE_MS = 250`: the measured echo landed at 9–23ms after restore in
+ * every observed case (dock-diag2, 2026-08-05) — 250ms is a 10–25x margin.
+ * A genuine human tab click can't land inside 250ms of the thread switch
+ * that made the tab visible in the first place (the switch itself involves
+ * a real user click on the sidebar), so this can't blanket-mute real
+ * selections. Do not "clean up" this number without re-measuring the echo
+ * timing first — it is not an arbitrary round number, it's a margin over a
+ * specific measured value.
+ */
+export const SETTLE_MS = 250;
+
+interface DockActiveSelectionStoreState {
+  byActivationKey: Record<string, string>;
+  /**
+   * `panelId: null` clears the remembered selection for this key (e.g. the
+   * live layout momentarily has no active panel at all) rather than writing
+   * a meaningless entry — mirrors `fileExplorerStore.ts`'s prune-to-absent
+   * shape for its own empty-state case.
+   */
+  setActivePanel: (activationKey: string, panelId: string | null) => void;
+}
+
+export const useDockActiveSelectionStore = create<DockActiveSelectionStoreState>()(
+  persist(
+    (set) => ({
+      byActivationKey: {},
+      setActivePanel: (activationKey, panelId) =>
+        set((state) => {
+          if (panelId === null) {
+            if (!(activationKey in state.byActivationKey)) return state;
+            const { [activationKey]: _removed, ...byActivationKey } = state.byActivationKey;
+            return { byActivationKey };
+          }
+          if (state.byActivationKey[activationKey] === panelId) return state;
+          return { byActivationKey: { ...state.byActivationKey, [activationKey]: panelId } };
+        }),
+    }),
+    {
+      name: "t3code:dock-active-selection-state:v1",
+      version: 1,
+      storage: createJSONStorage(() =>
+        resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
+      ),
+      partialize: (state) => ({ byActivationKey: state.byActivationKey }),
+    },
+  ),
+);
+
+export function selectActivePanelForKey(
+  byActivationKey: Record<string, string>,
+  activationKey: string | undefined,
+): string | null {
+  if (activationKey === undefined) return null;
+  return byActivationKey[activationKey] ?? null;
+}
+
+/**
+ * The WRITE-side counterpart to `selectActivePanelForKey` above — records
+ * which panel is now active under a given activation key, silently no-oping
+ * when there's no thread yet (`activationKey === undefined`), the same guard
+ * `restoreActivePanelForThread` (`lib/restoreActivePanel.ts`) already applies
+ * on the read side.
+ *
+ * Task #108, QA round 3 reopen ("per-thread tab selection leaks when two
+ * panels share ONE dock group"): `DockviewLayout.tsx`'s mount effect calls
+ * this from TWO places now, not one — the top-level `DockviewApi`'s own
+ * `onDidActivePanelChange` (unchanged since the original fix), AND, per
+ * group, that group's own `DockviewGroupPanelApi.onDidActivePanelChange`.
+ * The second one exists because dockview-core's top-level event only
+ * re-broadcasts a group's internal tab flip when that group is ALREADY
+ * dockview's own active group (`dockviewComponent.js`'s re-broadcast guard:
+ * `if (event.panel !== this.activePanel) return`, where `activePanel` is
+ * `activeGroup?.activePanel`) — so two panels sharing one group (Files+Diff)
+ * flipping which of them is THAT group's active tab, while some other group
+ * is dockview's active one, was invisible to the top-level event alone. Both
+ * routes converge here rather than duplicating the "is there a thread to
+ * record against, and under which key string" decision inline at each call
+ * site — same extraction reasoning `selectActivePanelForKey` already
+ * applies, and this function is idempotent by construction (`setActivePanel`
+ * no-ops when the value hasn't changed), so both subscriptions firing for
+ * the SAME literal tab click is harmless, not a double-write bug.
+ */
+export function recordActivePanelForKey(
+  activationKey: string | number | undefined,
+  panelId: string | null,
+): void {
+  if (activationKey === undefined) return;
+  useDockActiveSelectionStore.getState().setActivePanel(String(activationKey), panelId);
+}
+
+/**
+ * Task #108, round 4 (live QA, merge-gate finding F7): the suppression half
+ * of the fix for a transient wrong write during restore. `DockviewLayout.tsx`
+ * calls this — not `recordActivePanelForKey` directly — from BOTH its
+ * top-level and per-group `onDidActivePanelChange` subscriptions, passing
+ * `isRestoringRef.current` (true for the duration of one
+ * `restoreActivePanelForCurrentThread` call). See that ref's own doc comment
+ * for the traced root cause: `restoreActivePanelForKey`'s
+ * `panel.group.api.setActive()` step can transiently re-fire dockview's
+ * top-level active-panel event carrying the group's OLD panel, before the
+ * following `panel.api.setActive()` corrects it — a headless
+ * dockview-core@7.0.4 repro confirmed the transient is real AND that it
+ * self-corrects to the right final value within the same synchronous call
+ * regardless of this guard. Suppressing here anyway is still correct:
+ * restore only ever APPLIES a value the store already holds, so it never
+ * legitimately needs to write one back — making it read-only w.r.t. the
+ * store by construction removes the whole risk class rather than leaning on
+ * dockview-core's own correction timing.
+ *
+ * A plain `isRestoring: boolean` parameter (not a ref) so this stays a pure,
+ * directly testable decision — same reasoning `recordActivePanelForKey`
+ * itself already applies; the ref lives in the component, this function
+ * doesn't need to know it's a ref to decide what to do with its value.
+ *
+ * Task #108, round 6: also ignores `CHROME_PANEL_IDS` (`SIDEBAR_PANEL_ID`'s
+ * own doc comment above has the traced mechanism this closes). Filtering
+ * HERE — the one seam both of `DockviewLayout.tsx`'s subscriptions already
+ * funnel through — is deliberate, not incidental: a per-group-subscription-only
+ * filter would be insufficient, since the TOP-LEVEL `onDidActivePanelChange`
+ * fires for the sidebar's own group-activation independently of whether any
+ * per-group subscription also exists for it.
+ *
+ * Task #108, round 7: also ignores any event within `SETTLE_MS` of the last
+ * activation-key change (`SETTLE_MS`'s own doc comment above has the traced
+ * mechanism — a Chat-panel autofocus echo landing 9–23ms after restore,
+ * asynchronously, outside `isRestoring`'s synchronous window). `msSinceSwitch`
+ * is computed by the caller (`Date.now() - switchedAtRef.current` in
+ * `DockviewLayout.tsx`) rather than read from a ref in here, same reasoning
+ * `isRestoring` already applies: this function stays a pure, directly
+ * testable decision over plain values, not over ref plumbing.
+ */
+export function recordActivePanelForKeyUnlessRestoring(
+  isRestoring: boolean,
+  msSinceSwitch: number,
+  activationKey: string | number | undefined,
+  panelId: string | null,
+): void {
+  if (isRestoring) return;
+  if (msSinceSwitch < SETTLE_MS) return;
+  if (panelId !== null && CHROME_PANEL_IDS.has(panelId)) return;
+  recordActivePanelForKey(activationKey, panelId);
+}

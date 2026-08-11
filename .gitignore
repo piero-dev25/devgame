@@ -37,3 +37,12 @@ node_modules/
 .env*
 !.env.example
 .t3-dev/
+
+# Godot's per-project editor cache. Regenerated whenever the project is
+# opened, machine-specific, never source.
+#
+# The `*.uid` sidecars Godot 4.4+ writes beside each script are deliberately
+# NOT ignored: they carry stable script identities that scenes and resources
+# reference by UID, so they belong in version control. A fresh clone that
+# regenerated its own would break those references.
+.godot/

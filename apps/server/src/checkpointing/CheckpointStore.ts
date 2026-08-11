@@ -19,7 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import type { CheckpointStoreError } from "./Errors.ts";
-import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
+import type { VcsCheckpointOps, VcsDiffCheckpointsResult } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 
 export interface CaptureCheckpointInput {
@@ -79,11 +79,14 @@ export class CheckpointStore extends Context.Service<
     /**
      * Compute a patch diff between two checkpoint refs.
      *
-     * Can optionally treat a missing "from" ref as `HEAD`.
+     * Can optionally treat a missing "from" ref as `HEAD`. `truncated` is
+     * true when the patch was cut off at the driver's output cap rather
+     * than because there were no more changes — see
+     * `VcsDiffCheckpointsResult`'s doc comment.
      */
     readonly diffCheckpoints: (
       input: DiffCheckpointsInput,
-    ) => Effect.Effect<string, CheckpointStoreError>;
+    ) => Effect.Effect<VcsDiffCheckpointsResult, CheckpointStoreError>;
 
     /**
      * Delete the provided checkpoint refs.

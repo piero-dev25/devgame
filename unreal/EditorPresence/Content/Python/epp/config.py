@@ -15,7 +15,7 @@ sources read directly out of this repo:
   2. packages/client-runtime/src/authorization/remote.ts —
      `bootstrapRemoteBearerSession` shows the exact field set a real T3
      client sends to `POST {base}/oauth/token`.
-  3. unity/com.ironmind.editor-presence/Editor/EditorPresenceSettings.cs —
+  3. unity/com.devgame.editor-presence/Editor/EditorPresenceSettings.cs —
      the sibling Unity publisher already implements this exact flow
      (`RedeemPairingCredential`), confirming the design in (1)/(2) was
      already built and reviewed for an EPP publisher, not just theorized.
