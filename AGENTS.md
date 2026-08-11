@@ -1,5 +1,25 @@
 # T3 Code
 
+## DevGame: this fork
+
+This repository is **DevGame**, a fork of T3 Code (below) specialised for game development —
+Unity integration (engine detection, Play/Stop, selection chips, one-click **Setup
+Integrations**), a dockable workspace, and game-project scaffolding. See
+[ATTRIBUTION.md](./ATTRIBUTION.md) for what T3 Tools built and what we added.
+
+**Unity integration, in one paragraph:** the `unity` CLI (`brew install --cask unity-cli`) is
+Unity Technologies' own official product, not ours. `com.unity.pipeline` is Unity's own
+package, fetched from Unity's own package registry. `com.devgame.editor-presence` is ours —
+bundled inside the app and copied into the user's project. The **Setup Integrations** button in
+the engine toolbar installs both and pairs them automatically. See
+[docs/workbench/unity-integration-architecture.md](./docs/workbench/unity-integration-architecture.md)
+for the architecture, and
+[.agents/skills/unity-setup/SKILL.md](./.agents/skills/unity-setup/SKILL.md) for diagnosing and
+fixing a broken Unity setup.
+
+**Fork doctrine, in one line:** minimize divergence from upstream — we pull from
+`upstream/main` on a regular cadence and never open PRs against it.
+
 T3 Code is a minimal GUI for coding agents. A Node WebSocket server wraps provider CLIs (Codex, Claude Code, Cursor, Grok, OpenCode) and serves web, desktop, and mobile clients.
 
 You can think of T3 Code as an open source "bring-your-own-subscription" alternative to apps like Claude Desktop, Codex App, Cursor Glass and Conductor.

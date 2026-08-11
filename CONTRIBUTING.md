@@ -1,5 +1,10 @@
 # Contributing
 
+> This is **DevGame**, a fork of T3 Code maintained by
+> [piero-dev25](https://github.com/piero-dev25/devgame). The policy below is T3 Tools' own
+> contributing text and describes the upstream T3 Code project it came from — it's kept here
+> because it still describes the spirit we're contributing in, not because DevGame is T3 Code.
+
 ## Read This First
 
 We are not actively accepting contributions right now.

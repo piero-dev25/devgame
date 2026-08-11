@@ -25,7 +25,7 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 ## Installation
 
 > [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
+> DevGame currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
 >
 > - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
 > - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
@@ -33,39 +33,44 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 > - Grok Build: install [Grok Build CLI](https://x.ai/cli) and run `grok login`
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
 
-### Try it out (install-free)
+### Download
 
-The easiest way to test T3 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
+Grab the latest build from [GitHub Releases](https://github.com/piero-dev25/devgame/releases).
 
-```bash
-npx t3@latest
-```
+> [!NOTE]
+> Releases are currently an **unsigned alpha**. macOS Gatekeeper will refuse
+> to open the app on first launch ("cannot be opened because Apple cannot
+> check it for malicious software"). Work around it one of these ways:
+>
+> - Right-click `DevGame.app` → **Open** → **Open** in the dialog that appears.
+> - Or launch it once (it will be blocked), then go to **System Settings →
+>   Privacy & Security** and click **Open Anyway** next to the DevGame entry.
+> - Or strip the quarantine flag directly: `xattr -d com.apple.quarantine /path/to/DevGame.app`
 
-This will launch T3 Code's backend on your machine as well as the local web app to control your agents.
+### Build from source
 
-Tip: Use `npx t3@latest --help` for the full CLI reference.
+There's no package registry install yet — build the desktop app or run the
+dev server yourself. See [docs/user/build-from-source.md](./docs/user/build-from-source.md)
+for the full walkthrough (prerequisites, `vp i`, dev run, and packaging a
+desktop artifact).
 
-### Desktop app
+### Game features setup (Unity)
 
-Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:
-
-#### Windows (`winget`)
-
-```bash
-winget install T3Tools.T3Code
-```
-
-#### macOS (Homebrew)
-
-```bash
-brew install --cask t3-code
-```
-
-#### Arch Linux (AUR)
+The Unity integration (Play/Stop, selection chips, one-click **Setup
+Integrations**) needs Unity's own official CLI on your machine, in addition
+to Unity Editor via Unity Hub:
 
 ```bash
-yay -S t3code-bin
+brew install --cask unity-cli
 ```
+
+(macOS; see [Unity's own CLI docs](https://docs.unity.com/en-us/unity-cli) for
+other platforms.) You may also need to run `unity auth login` once. Without
+the CLI installed, the **Setup Integrations** button in the engine toolbar
+does not appear. With it installed, open a Unity project as your DevGame
+project and click **Setup Integrations** — it installs Unity's own
+`com.unity.pipeline` package plus our bundled `com.devgame.editor-presence`
+package into the project and pairs them automatically.
 
 ## Some notes
 
@@ -86,7 +91,8 @@ Full docs live in [docs/](./docs). There's no docs site yet.
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
 - Linux: [run T3 Code as a background service](./docs/user/background-service.md)
 
-Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
+Building from source? Start at [docs/user/build-from-source.md](./docs/user/build-from-source.md).
+For the architecture behind it, see [docs/internals/overview.md](./docs/internals/overview.md).
 
 ## If you REALLY want to contribute still.... read this first
 
