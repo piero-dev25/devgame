@@ -90,23 +90,64 @@ const resolveSourcePackage = Effect.fn("UnityEmbeddedSelectionPackage.resolveSou
  * into `"failed"` rather than propagated: this is cleanup riding along on
  * an install, not the install itself, and per the rename's owner ruling a
  * stranded legacy directory must never block getting the new package in.
+ *
+ * Merge-gate R1 (blocker): the `exists` PROBE itself can fail with a
+ * non-"NotFound" `PlatformError` — EACCES -> `PermissionDenied`, ENOTDIR/
+ * ELOOP -> `BadResource`, EBUSY -> `Busy`, confirmed live against the real
+ * NodeFileSystem — and effect's own `FileSystem.exists` only converts
+ * `NotFound` to `false`; every other reason re-`Effect.fail`s. Since this
+ * runs BEFORE the new package is copied, an unwrapped probe failure used to
+ * fail the WHOLE install, not just this cleanup. Everything below —
+ * including the probe — is wrapped so NO filesystem error, from either
+ * step, can escape this function; the worst case is `"failed"`.
  */
 const removeLegacyDirectoryBestEffort = Effect.fn(
   "UnityEmbeddedSelectionPackage.removeLegacyDirectoryBestEffort",
 )(function* (directory: string) {
   const fileSystem = yield* FileSystem.FileSystem;
-  const existed = yield* fileSystem.exists(directory);
-  if (!existed) {
-    return "absent" as const;
-  }
-  return yield* fileSystem.remove(directory, { recursive: true, force: true }).pipe(
+  return yield* Effect.gen(function* () {
+    // A failed probe is treated the same as "couldn't confirm present" —
+    // this function's whole contract is that cleanup never blocks install.
+    const probablyExists = yield* fileSystem
+      .exists(directory)
+      .pipe(Effect.orElseSucceed(() => false));
+    if (!probablyExists) {
+      // Merge-gate R2: still attempt a best-effort remove even though the
+      // probe said (or couldn't confirm) nothing is there. `exists` follows
+      // symlinks (`access` semantics), so a DANGLING legacy symlink resolves
+      // ENOENT on its missing target -> `false`, even though the link
+      // itself is a real, removable directory entry. `remove` no-ops
+      // harmlessly on a genuinely absent path either way, and any error it
+      // raises here is discarded — we already can't trust what's there.
+      // Known TOCTOU, accepted (this outcome is reporting-only, not a
+      // correctness guarantee): if something else removes or replaces the
+      // path between the probe and this call, the reported "absent" only
+      // reflects what THIS call observed and attempted, not a race-free
+      // fact about the filesystem.
+      yield* fileSystem.remove(directory, { recursive: true, force: true }).pipe(Effect.ignore);
+      return "absent" as const;
+    }
+    return yield* fileSystem.remove(directory, { recursive: true, force: true }).pipe(
+      Effect.tapError((cause) =>
+        Effect.logWarning("unity embedded selection package: legacy cleanup failed", {
+          cause,
+          directory,
+        }),
+      ),
+      Effect.match({ onFailure: () => "failed" as const, onSuccess: () => "removed" as const }),
+    );
+  }).pipe(
+    // Belt-and-suspenders: every branch above already resolves without
+    // failing, but this final catch-all is what makes the "no filesystem
+    // error anywhere in this path can ever fail the install" contract true
+    // by construction rather than by the current shape of the branches.
     Effect.tapError((cause) =>
-      Effect.logWarning("unity embedded selection package: legacy cleanup failed", {
+      Effect.logWarning("unity embedded selection package: legacy cleanup failed unexpectedly", {
         cause,
         directory,
       }),
     ),
-    Effect.match({ onFailure: () => "failed" as const, onSuccess: () => "removed" as const }),
+    Effect.orElseSucceed(() => "failed" as const),
   );
 });
 

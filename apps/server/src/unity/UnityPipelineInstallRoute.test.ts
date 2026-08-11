@@ -146,6 +146,11 @@ function makeProjectionSnapshotQuerySpy(project: typeof PROJECT | null | "fail")
  * exercise the gate override them. */
 function makeUnityPipelineClientSpy(
   options: {
+    readonly install?: (
+      workspaceRoot: string,
+    ) => Effect.Effect<
+      UnityPipelineClient.UnityPipelineResult<UnityPipelineClient.UnityPipelineInstallResult>
+    >;
     readonly list?: (
       workspaceRoot: string,
     ) => Effect.Effect<
@@ -160,7 +165,7 @@ function makeUnityPipelineClientSpy(
   readonly calls: Array<{ readonly method: string; readonly workspaceRoot: string }>;
 } {
   const calls: Array<{ readonly method: string; readonly workspaceRoot: string }> = [];
-  const outcome: UnityPipelineClient.UnityPipelineResult<UnityPipelineClient.UnityPipelineInstallResult> =
+  const defaultInstallResult: UnityPipelineClient.UnityPipelineResult<UnityPipelineClient.UnityPipelineInstallResult> =
     {
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "0.4.0-exp.1", alreadyInstalled: false },
@@ -185,7 +190,7 @@ function makeUnityPipelineClientSpy(
       },
       install: (workspaceRoot) => {
         calls.push({ method: "install", workspaceRoot });
-        return Effect.succeed(outcome);
+        return options.install?.(workspaceRoot) ?? Effect.succeed(defaultInstallResult);
       },
       open: () => Effect.die("unexpected open call"),
       packageResolve: (workspaceRoot) => {
@@ -411,6 +416,66 @@ describe("dispatchUnityPipelineInstall", () => {
             { method: "packageResolve", workspaceRoot },
           ]);
         }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("merge-gate R3: the pairing handoff prepares BEFORE packageResolve is invoked", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3code-unity-pipeline-install-order-",
+        });
+        // A single shared timeline across two otherwise-independent test
+        // doubles (the pipeline client spy and the pairing handoff) —
+        // neither spy's own call log carries a timestamp comparable to
+        // the other's, so proving an ORDER fact between them needs one
+        // recorder both write into.
+        const order: Array<string> = [];
+        const list = (root: string) =>
+          Effect.succeed({
+            _tag: "ok" as const,
+            value: {
+              instances: [liveMatchedInstance(root)],
+              latestVersion: null,
+              unparseableInstanceCount: 0,
+            },
+          });
+        const packageResolve = () => {
+          order.push("packageResolve");
+          return Effect.succeed({ _tag: "ok" as const, value: undefined });
+        };
+        const spy = makeUnityPipelineClientSpy({ list, packageResolve });
+        const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+        // Deliberately NOT `makeUnityPairingHandoffSpy` — that helper's
+        // own recording (`registeredRoots`/`issued`) isn't on the shared
+        // `order` timeline either, so this constructs the dependency
+        // directly to hook the exact moment `prepare` starts working.
+        const pairingLayer = Layer.effect(
+          UnityPairingHandoff.UnityPairingHandoff,
+          UnityPairingHandoff.make({
+            serverUrl: "http://127.0.0.1:3773",
+            isAlreadyPaired: () => {
+              order.push("pairing.prepare");
+              return Effect.succeed(false);
+            },
+            issuePairingCredential: () => Effect.succeed({ credential: "PAIRING1234" }),
+          }),
+        ).pipe(Layer.provide(NodeServices.layer));
+
+        const outcome = yield* dispatchUnityPipelineInstall(
+          makeSession([AuthPresenceCommandScope]),
+          PROJECT_ID,
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(spy.layer, projection.layer, pairingLayer, NodeServices.layer),
+          ),
+        );
+
+        expect(outcome._tag).toBe("ok");
+        if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+        expect(outcome.value.packageResolve).toBe("invoked");
+        expect(outcome.value.pairingOutcome).toEqual({ _tag: "minted" });
+        expect(order).toEqual(["pairing.prepare", "packageResolve"]);
+      }).pipe(Effect.provide(NodeServices.layer)),
     );
 
     it.effect(
@@ -821,6 +886,166 @@ describe("dispatchUnityPipelineInstall", () => {
           // Left in place, not silently lost — the whole point of "failed"
           // over "removed" is that a human can still find and clear it.
           expect(yield* fileSystem.exists(legacyPackagesDirectory)).toBe(true);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "an EXISTS-probe failure during legacy cleanup degrades to a best-effort remove attempt, never fails the install",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-exists-fails-",
+          });
+          // A plain FILE at "Library" makes `fileSystem.exists(Library/<legacy
+          // id>)` itself throw (ENOTDIR -> PlatformError tag "BadResource",
+          // not "NotFound") rather than resolve to `false` — confirmed live
+          // against the real NodeFileSystem before writing this test. Merge-
+          // gate R1: the OLD code only wrapped `remove`'s failure, not
+          // `exists`'s, so this exact fixture used to propagate out of
+          // `removeLegacyDirectoryBestEffort` and fail the WHOLE install —
+          // see "an unwritable Library path reports pairing as a typed
+          // partial failure" below, whose own `if (... return)` guard was
+          // silently absorbing that regression without ever reaching its
+          // assertions.
+          //
+          // Expected outcome is "absent", not "failed": merge-gate R2 folds
+          // "exists() returned false" and "exists() couldn't confirm" into
+          // the SAME best-effort-remove-then-report-absent path (a dangling
+          // legacy symlink needs exactly this fold — see the dedicated
+          // dangling-symlink test below). "failed" is reserved for a
+          // CONFIRMED-present directory whose remove() itself fails — see
+          // "a legacy directory the process cannot delete" above. What this
+          // test actually proves is narrower and load-bearing regardless of
+          // which outcome string comes back: the probe error does not
+          // propagate and crash the whole install (RED-proofed: this exact
+          // fixture used to throw out of `installUnityEmbeddedSelectionPackage`
+          // entirely before any of these assertions could even run).
+          yield* fileSystem.writeFileString(path.join(workspaceRoot, "Library"), "not a directory");
+
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot);
+
+          expect(outcome.operation).toBe("installed");
+          expect(outcome.legacyCleanup).toEqual({
+            packagesDirectory: "absent",
+            libraryDirectory: "absent",
+          });
+          expect(
+            yield* fileSystem.exists(
+              path.join(workspaceRoot, "Packages", UNITY_SELECTION_PACKAGE_ID, "package.json"),
+            ),
+          ).toBe(true);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "a DANGLING legacy symlink (exists() follows links -> false) is still unlinked, reported absent",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-dangling-symlink-",
+          });
+          const legacyPackagesDirectory = path.join(
+            workspaceRoot,
+            "Packages",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(path.dirname(legacyPackagesDirectory), {
+            recursive: true,
+          });
+          // Points at a target that is never created — `exists` follows
+          // symlinks (`access` semantics), so it resolves ENOENT on the
+          // MISSING TARGET and reports `false`, even though the link itself
+          // is a real, removable directory entry. Merge-gate R2.
+          yield* fileSystem.symlink(
+            path.join(workspaceRoot, "nonexistent-legacy-target"),
+            legacyPackagesDirectory,
+          );
+
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot);
+
+          expect(outcome.legacyCleanup.packagesDirectory).toBe("absent");
+          // The link itself — not a "real" directory, so `exists` on the
+          // link path with `{ symlinks: false }`-equivalent semantics isn't
+          // available here; `lstat`-free confirmation is the practical one:
+          // readDirectory on the parent no longer lists the stale entry.
+          expect(yield* fileSystem.readDirectory(path.dirname(legacyPackagesDirectory))).toEqual([
+            UNITY_SELECTION_PACKAGE_ID,
+          ]);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "merge-gate R8: a step-1 pipeline install failure returns early — the legacy sweep never runs",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-step1-failure-",
+          });
+          const legacyPackagesDirectory = path.join(
+            workspaceRoot,
+            "Packages",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          const legacyLibraryDirectory = path.join(
+            workspaceRoot,
+            "Library",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(legacyPackagesDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyPackagesDirectory, "package.json"),
+            encodeJson({ name: LEGACY_UNITY_SELECTION_PACKAGE_ID, version: "0.3.1" }),
+          );
+          yield* fileSystem.makeDirectory(legacyLibraryDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyLibraryDirectory, "pairing.json"),
+            "stale",
+          );
+
+          // Only the ONE fixture directory contents actually matter for this
+          // test's claim ("no remove calls happened"); a recording FileSystem
+          // makes that claim direct instead of inferring it from survival.
+          const removeCalls: Array<string> = [];
+          const recordingFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            remove: (removePath, opts) => {
+              removeCalls.push(removePath);
+              return fileSystem.remove(removePath, opts);
+            },
+          };
+
+          const spy = makeUnityPipelineClientSpy({
+            install: () =>
+              Effect.succeed({ _tag: "error" as const, message: "Not a Unity project" }),
+          });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const pairing = makeUnityPairingHandoffSpy();
+          const session = makeSession([AuthPresenceCommandScope]);
+
+          const outcome = yield* dispatchUnityPipelineInstall(session, PROJECT_ID).pipe(
+            Effect.provideService(FileSystem.FileSystem, recordingFileSystem),
+            Effect.provide(
+              Layer.mergeAll(spy.layer, projection.layer, pairing.layer, NodeServices.layer),
+            ),
+          );
+
+          expect(outcome).toEqual({
+            _tag: "ok",
+            value: { _tag: "error", message: "Not a Unity project" },
+          });
+          expect(spy.calls).toEqual([{ method: "install", workspaceRoot }]);
+          // The load-bearing proof: NOT "the fixtures still exist" (which a
+          // no-op cleanup and a cleanup that ran-but-failed both look like),
+          // but that `remove` was never even CALLED.
+          expect(removeCalls).toEqual([]);
+          expect(yield* fileSystem.exists(legacyPackagesDirectory)).toBe(true);
+          expect(yield* fileSystem.exists(legacyLibraryDirectory)).toBe(true);
         }).pipe(Effect.provide(NodeServices.layer)),
     );
   });

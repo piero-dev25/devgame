@@ -1,7 +1,8 @@
 // Builds one EPP `selection.items[]` entry from a Unity Object.
 //
 // UNVERIFIED (owner should confirm this against a real project — see
-// UNVERIFIED.md): GlobalObjectId.GetGlobalObjectIdSlow's stability across
+// unity/editor-presence-UNVERIFIED.md in the DevGame repo):
+// GlobalObjectId.GetGlobalObjectIdSlow's stability across
 // nested prefabs and its cost on a real multi-select are both unmeasured —
 // this pass's live verification exercised single-object and small
 // multi-object selections only. This is intentionally the documented

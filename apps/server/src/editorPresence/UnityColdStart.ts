@@ -23,18 +23,30 @@
  * "No Pipeline instance found for project" -> `notReady` handling). This
  * REPLACES the original design of invoking the raw Unity Editor binary
  * directly with `-projectPath <path> -executeMethod <Class.Method>`, whose
- * target — `com.ironmind.editor-presence`'s
+ * target — the deleted package's
  * `EditorPresenceColdStartEntryPoint.EnterPlaymodeOnLaunch` — no longer
- * exists: that whole package was DELETED (see "Delete our Unity plugin —
- * Unity is served by com.unity.pipeline"). It was never installed in the
- * one project that matters (`~/Projects/Deepmind` carries
- * `com.unity.pipeline`, not ours) and never compiled, and Pipeline already
- * covers what it existed for. Unity is now the one engine of the three
- * (Godot, Unreal, Unity) with NO Editor Presence publisher — the WebSocket
- * path this comment previously described as "kept for NAT/remote" does not
- * exist for Unity anymore either. `docs/workbench/unity-integration-architecture.md`
- * records the study; task #68 tracks the one open gap that deletion left
- * (selection chips), which is not this module's concern.
+ * exists and was never carried forward: that whole ORIGINAL package was
+ * DELETED (see "Delete our Unity plugin — Unity is served by
+ * com.unity.pipeline"), never installed in the one project that mattered,
+ * never compiled, and Pipeline already covered what it existed for.
+ *
+ * CORRECTED (merge-gate R7, 2026-08-11) — the paragraph above is historical
+ * and still accurate as history, but this comment used to go on to claim
+ * Unity has NO Editor Presence publisher at all, which is no longer true
+ * and was already stale by the time of this correction: the deleted
+ * package was REBUILT, thin, selection-plus-play-state-reporting only
+ * (`unity/com.devgame.editor-presence/`, formerly `com.ironmind.editor-
+ * presence` before the 2026-08-11 rename), and — unlike the deleted
+ * original — it is now actually bundled, installed, and paired into real
+ * projects via `UnityEmbeddedSelectionPackage.ts` /
+ * `UnityPipelineInstallRoute.ts`. See `unity/README.md` for the full
+ * history (delete -> rebuild -> rename) and `docs/workbench/unity-
+ * integration-architecture.md` for the original study. What is STILL true,
+ * and is this module's actual concern: that rebuilt package advertises
+ * `capabilities: []` and implements no `command`/`commandResult` handling
+ * — it cannot be told to play/stop/pause. Pipeline (the CLI this module
+ * shells out to) remains the only path that can, which is why this
+ * module's cold-start design is unaffected by any of the above.
  *
  * The cold path is launch-time ONLY — per the spec's own warning, it cannot
  * drive an Editor that is already running (the lockfile rejects the second

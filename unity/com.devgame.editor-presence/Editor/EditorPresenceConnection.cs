@@ -16,13 +16,15 @@
 // remain entirely unimplemented; this plugin still never receives an
 // actionable frame.
 //
-// UNVERIFIED (see UNVERIFIED.md): ClientWebSocket's async handshake/read/
+// UNVERIFIED (see unity/editor-presence-UNVERIFIED.md in the DevGame repo —
+// moved out of this package per merge-gate R6 so it doesn't ship into every
+// installed Unity project): ClientWebSocket's async handshake/read/
 // write behavior inside the Unity Editor's Mono/CoreCLR runtime and
 // synchronization context — the shape below (async Task methods kicked off
 // from an `async void` entry point, pumped by nothing special — Unity's
 // Editor process runs a normal .NET thread pool, and Task continuations are
 // dispatched onto it the same way they would be in any console app) is the
-// standard, documented pattern. UNVERIFIED.md records exactly what this
+// standard, documented pattern. That doc records exactly what this
 // pass did and did not exercise against a real Editor process.
 //
 // Reload handling: [InitializeOnLoad] static constructors re-run on every
@@ -136,6 +138,22 @@ namespace DevGame.EditorPresence
 
         static EditorPresenceConnection()
         {
+            // Merge-gate R4: the 2026-08-11 com.ironmind.editor-presence ->
+            // com.devgame.editor-presence rename abandoned these EditorPrefs
+            // keys, leaving a live bearer token sitting in the user's
+            // EditorPrefs indefinitely with nothing left to ever read or
+            // clear it. One-time, idempotent (EditorPrefs.DeleteKey no-ops
+            // on an already-absent key, so this converges to nothing after
+            // the first domain load that runs it), no value migration —
+            // pairing re-mints a fresh bearer under the new keys anyway
+            // (EditorPresenceSettings.cs's RedeemPairingCredential /
+            // TryRedeemPairingHandoff), so there is nothing worth carrying
+            // over. This is the package's own init seam ([InitializeOnLoad]
+            // static constructor), the earliest point every domain load
+            // reaches regardless of whether anything else in the package
+            // gets touched.
+            EditorPrefs.DeleteKey("Ironmind.EditorPresence.ServerUrl");
+            EditorPrefs.DeleteKey("Ironmind.EditorPresence.BearerToken");
             AssemblyReloadEvents.beforeAssemblyReload += HandleBeforeAssemblyReload;
             EditorApplication.quitting += HandleEditorQuitting;
             EditorApplication.update += HandleEditorUpdate;
@@ -350,7 +368,8 @@ namespace DevGame.EditorPresence
         // matching name but casting `(int)closeStatus.Value` still recovers
         // the raw code — .NET enums are plain typed integers and are not
         // validated against their declared members at runtime. UNVERIFIED
-        // against a real ClientWebSocket instance — see UNVERIFIED.md.
+        // against a real ClientWebSocket instance — see
+        // unity/editor-presence-UNVERIFIED.md in the DevGame repo.
         private static async Task ReceiveUntilClosedAsync(CancellationToken cancellationToken)
         {
             var buffer = new byte[ReceiveBufferSize];

@@ -145,6 +145,33 @@ export const dispatchUnityPipelineInstall = (
         value: { _tag: "error", message: "Could not install Unity selection package." },
       } as const;
     }
+    // Hoisted to a local `const` (unlike every other `lookup.project.value.*`
+    // read in this function, all at the top level of the generator body):
+    // TypeScript's `Option.isNone` narrowing of `lookup.project` does not
+    // survive into the `.find()` callback further down — a property access
+    // narrowed on the OUTER scope reverts to its widened `Option<...>` type
+    // inside a nested closure, which is exactly what tripped a real
+    // `Property 'value' does not exist on type 'Option<...>'` typecheck
+    // error here.
+    const workspaceRoot = lookup.project.value.workspaceRoot;
+
+    // Merge-gate R3: pairing MUST prepare (and, on the minted path, write
+    // Library/<id>/pairing.json) BEFORE the packageResolve nudge below.
+    // packageResolve triggers Unity to (re)load the just-copied package,
+    // and that load path is what reads the pairing handoff — under the OLD
+    // ordering, a resolve-triggered load could run against a request that
+    // hadn't written its own handoff yet. The C# side self-heals via its
+    // own 1s `HandleEditorUpdate` poll regardless (see EditorPresenceSettings.cs),
+    // so this was never a correctness bug, but the live round-9 evidence
+    // (evidence/qa-round9/REPORT.md) was gathered under the old ordering —
+    // this removes the needless race rather than relying on the poll to
+    // paper over it.
+    const pairingHandoff = yield* UnityPairingHandoff.UnityPairingHandoff;
+    const pairingOutcome = yield* pairingHandoff.prepare({
+      workspaceRoot,
+      projectTitle: lookup.project.value.title,
+    });
+
     // Task #130's zero-touch wire: an Auto-Refresh-OFF Editor does not
     // notice the embedded package this call just replaced on disk until
     // Unity's resolver is nudged (verified live,
@@ -157,16 +184,6 @@ export const dispatchUnityPipelineInstall = (
     // see `UnityPipelineClient.ts`'s own `open` for why cold-starting Unity
     // is a separate, deliberate user action this route does not take on
     // its own.
-    //
-    // Hoisted to a local `const` (unlike every other `lookup.project.value.*`
-    // read in this function, all at the top level of the generator body):
-    // TypeScript's `Option.isNone` narrowing of `lookup.project` does not
-    // survive into the `.find()` callback below — a property access
-    // narrowed on the OUTER scope reverts to its widened `Option<...>` type
-    // inside a nested closure, which is exactly what tripped a real
-    // `Property 'value' does not exist on type 'Option<...>'` typecheck
-    // error here.
-    const workspaceRoot = lookup.project.value.workspaceRoot;
     const listResult = yield* client.list(workspaceRoot);
     const liveMatch =
       listResult._tag === "ok"
@@ -196,11 +213,6 @@ export const dispatchUnityPipelineInstall = (
     } else {
       packageResolve = "skipped_no_editor";
     }
-    const pairingHandoff = yield* UnityPairingHandoff.UnityPairingHandoff;
-    const pairingOutcome = yield* pairingHandoff.prepare({
-      workspaceRoot,
-      projectTitle: lookup.project.value.title,
-    });
     return {
       _tag: "ok",
       value: { ...pipeline, selectionPackage, pairingOutcome, packageResolve },

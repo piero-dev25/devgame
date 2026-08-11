@@ -19,8 +19,9 @@
 // ignored" bug. SessionState is a Unity Editor API that persists for the
 // life of the Editor PROCESS (survives domain reload, resets on Editor
 // restart) — exactly the "stable per editor-process launch" semantic both
-// session.id and seq need. See UNVERIFIED.md for exactly what was and
-// wasn't exercised against a real Unity 6000.3.14f1 project in this pass.
+// session.id and seq need. See unity/editor-presence-UNVERIFIED.md in the
+// DevGame repo for exactly what was and wasn't exercised against a real
+// Unity 6000.3.14f1 project in this pass.
 using System.Collections.Generic;
 using UnityEditor;
 
