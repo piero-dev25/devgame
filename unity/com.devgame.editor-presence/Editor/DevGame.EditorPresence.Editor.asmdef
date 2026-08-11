@@ -1,6 +1,6 @@
 {
-    "name": "Ironmind.EditorPresence.Editor",
-    "rootNamespace": "Ironmind.EditorPresence",
+    "name": "DevGame.EditorPresence.Editor",
+    "rootNamespace": "DevGame.EditorPresence",
     "references": [],
     "includePlatforms": [
         "Editor"

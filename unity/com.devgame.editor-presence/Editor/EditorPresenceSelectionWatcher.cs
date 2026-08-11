@@ -24,13 +24,13 @@
 using System.Collections.Generic;
 using UnityEditor;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     [InitializeOnLoad]
     internal static class EditorPresenceSelectionWatcher
     {
         private const double DebounceSeconds = 0.1;
-        private const string SequenceSessionStateKey = "Ironmind.EditorPresence.Sequence";
+        private const string SequenceSessionStateKey = "DevGame.EditorPresence.Sequence";
 
         private static bool _publishPending;
         private static double _pendingSinceTime;

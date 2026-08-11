@@ -25,7 +25,7 @@ path, but **this revision could not be compiled or run in a live Unity Editor
 in the current environment.** These claims remain unverified:
 
 - `EditorPresenceConnection.HandleEditorUpdate` observes a
-  `Library/com.ironmind.editor-presence/pairing.json` written after the
+  `Library/com.devgame.editor-presence/pairing.json` written after the
   package has already loaded, including an S10 recovery re-click, without
   interfering with the existing reconnect lifecycle.
 - `Directory.GetParent(Application.dataPath)` resolves the current Unity
@@ -90,8 +90,8 @@ in the current environment.** These claims remain unverified:
   behavior — this pass's verification includes forcing a domain reload
   (script recompile) and confirming both values survive it; see "Verified
   this pass" below.
-- Whether the `SessionState` keys (`Ironmind.EditorPresence.SessionId`,
-  `Ironmind.EditorPresence.Sequence`) collide with anything else in a real
+- Whether the `SessionState` keys (`DevGame.EditorPresence.SessionId`,
+  `DevGame.EditorPresence.Sequence`) collide with anything else in a real
   project: namespaced by convention only, no registry of `SessionState` key
   usage exists to check against.
 

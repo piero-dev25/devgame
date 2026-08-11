@@ -488,7 +488,7 @@ export const make = Effect.gen(function* EditorPresenceRegistryMake() {
             // takes over an existing session — same self-healing shape as
             // `selection: null` above. A `playState` frame follows
             // immediately after `hello` (see plugin.gd for Godot; Unity's
-            // com.ironmind.editor-presence package (>=0.3.1) does the same
+            // com.devgame.editor-presence package (>=0.3.1) does the same
             // — see EditorPresenceConnection.cs's awaited post-hello send in
             // ConnectAndRunAsync), so this null window is momentary, not a
             // lasting regression to "unknown" on every reconnect.

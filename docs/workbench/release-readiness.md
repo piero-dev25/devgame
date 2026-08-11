@@ -1,5 +1,7 @@
 # Release Readiness Plan — `t3code-fork` → our product
 
+> Renamed `com.ironmind.editor-presence` → `com.devgame.editor-presence` (2026-08-11).
+
 **Prepared:** overnight audit synthesis, 5 audits + 3 build attempts, branch `workbench/dock-port`, repo `/Users/pieroherrera/Projects/t3code-fork`.
 **Ask being answered:** "get the macOS, Windows and mobile applications ready, and TestFlight so we can publish."
 

@@ -1,5 +1,7 @@
 # Spec: Unity Play/Stop (task #49)
 
+> Renamed `com.ironmind.editor-presence` → `com.devgame.editor-presence` (2026-08-11).
+
 Frozen design. If the code disagrees with this spec, correct the spec rather
 than diverging from it silently.
 

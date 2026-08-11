@@ -1,5 +1,7 @@
 # Unity integration: what this repo already has, and where Unity status attaches
 
+> Renamed `com.ironmind.editor-presence` → `com.devgame.editor-presence` (2026-08-11).
+
 Architecture study of the DevGame fork at `/Users/pieroherrera/Projects/t3code-fork`
 (branch `workbench/dock-port`). Investigation only — no code was changed.
 

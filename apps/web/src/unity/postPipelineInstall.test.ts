@@ -49,7 +49,7 @@ describe("postUnityPipelineInstall", () => {
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
       selectionPackage: {
-        packageId: "com.ironmind.editor-presence",
+        packageId: "com.devgame.editor-presence",
         version: "0.3.0",
         operation: "installed",
       },

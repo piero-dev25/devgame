@@ -1,5 +1,7 @@
 # Editor Presence Protocol — Unity selection in the composer
 
+> Renamed `com.ironmind.editor-presence` → `com.devgame.editor-presence` (2026-08-11).
+
 Design from a mapped + adversarially-reviewed pass. Neither critic refuted it.
 Line citations in the source design drifted by 1-6 lines throughout; the
 substance was verified correct but re-check any exact line before relying on it.

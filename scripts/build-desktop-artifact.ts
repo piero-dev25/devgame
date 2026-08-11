@@ -646,8 +646,8 @@ export const DESKTOP_EXTRA_RESOURCES = [
     to: "resource-monitor",
   },
   {
-    from: "apps/desktop/prod-resources/unity-packages/com.ironmind.editor-presence",
-    to: "unity-packages/com.ironmind.editor-presence",
+    from: "apps/desktop/prod-resources/unity-packages/com.devgame.editor-presence",
+    to: "unity-packages/com.devgame.editor-presence",
   },
 ] as const;
 
@@ -656,8 +656,8 @@ export const stageUnitySelectionPackage = Effect.fn("stageUnitySelectionPackage"
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     yield* fs.copy(
-      path.join(input.repoRoot, "unity/com.ironmind.editor-presence"),
-      path.join(input.stageResourcesDir, "unity-packages/com.ironmind.editor-presence"),
+      path.join(input.repoRoot, "unity/com.devgame.editor-presence"),
+      path.join(input.stageResourcesDir, "unity-packages/com.devgame.editor-presence"),
     );
   },
 );

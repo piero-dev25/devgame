@@ -14,7 +14,7 @@
 using UnityEditor;
 using UnityEngine;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     internal static class EditorPresenceSettingsProvider
     {

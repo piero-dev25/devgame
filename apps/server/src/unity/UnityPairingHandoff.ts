@@ -17,7 +17,7 @@ import { ServerConfig } from "../config.ts";
 import * as EditorPresenceRegistry from "../editorPresence/EditorPresenceRegistry.ts";
 import { resolveHeadlessConnectionString, resolveListeningPort } from "../startupAccess.ts";
 
-const PAIRING_HANDOFF_DIRECTORY = ["Library", "com.ironmind.editor-presence"] as const;
+const PAIRING_HANDOFF_DIRECTORY = ["Library", "com.devgame.editor-presence"] as const;
 const PAIRING_HANDOFF_FILE = "pairing.json";
 const PAIRING_HANDOFF_TTL = Duration.hours(24);
 const MAX_PAIRING_PROJECT_TITLE_LENGTH = 64;

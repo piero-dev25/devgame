@@ -34,14 +34,14 @@ using UnityEditor;
 using UnityEngine;
 using UnityEngine.Networking;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     internal static class EditorPresenceSettings
     {
-        private const string ServerUrlKey = "Ironmind.EditorPresence.ServerUrl";
-        private const string BearerTokenKey = "Ironmind.EditorPresence.BearerToken";
+        private const string ServerUrlKey = "DevGame.EditorPresence.ServerUrl";
+        private const string BearerTokenKey = "DevGame.EditorPresence.BearerToken";
         private const string DefaultServerUrl = "http://127.0.0.1:3777";
-        private const string PairingHandoffDirectory = "com.ironmind.editor-presence";
+        private const string PairingHandoffDirectory = "com.devgame.editor-presence";
         private const string PairingHandoffFile = "pairing.json";
         private const string PublisherPairingScope = "orchestration:operate";
         private const double AutomaticPairingCheckIntervalSeconds = 1.0;

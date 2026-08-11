@@ -23,6 +23,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import {
@@ -46,6 +47,11 @@ import {
 } from "./UnityPipelineInstallRoute.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 import * as UnityPairingHandoff from "./UnityPairingHandoff.ts";
+import {
+  installUnityEmbeddedSelectionPackage,
+  LEGACY_UNITY_SELECTION_PACKAGE_ID,
+  UNITY_SELECTION_PACKAGE_ID,
+} from "./UnityEmbeddedSelectionPackage.ts";
 
 const encodeJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const decodeProjectShell = Schema.decodeUnknownSync(OrchestrationProjectShell);
@@ -226,10 +232,10 @@ describe("dispatchUnityPipelineInstall", () => {
           cwd: "/Users/dev/t3code-fork",
         }),
       ).toEqual([
-        "/Applications/DevGame.app/Contents/Resources/unity-packages/com.ironmind.editor-presence",
-        "/Applications/DevGame.app/Contents/Resources/unity/com.ironmind.editor-presence",
-        "/Applications/DevGame.app/Contents/Resources/app.asar/unity/com.ironmind.editor-presence",
-        "/Users/dev/t3code-fork/unity/com.ironmind.editor-presence",
+        "/Applications/DevGame.app/Contents/Resources/unity-packages/com.devgame.editor-presence",
+        "/Applications/DevGame.app/Contents/Resources/unity/com.devgame.editor-presence",
+        "/Applications/DevGame.app/Contents/Resources/app.asar/unity/com.devgame.editor-presence",
+        "/Users/dev/t3code-fork/unity/com.devgame.editor-presence",
       ]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
@@ -279,9 +285,10 @@ describe("dispatchUnityPipelineInstall", () => {
             alreadyInstalled: false,
           },
           selectionPackage: {
-            packageId: "com.ironmind.editor-presence",
-            version: "0.3.1",
+            packageId: "com.devgame.editor-presence",
+            version: "0.4.0",
             operation: "installed",
+            legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "absent" },
           },
           pairingOutcome: { _tag: "minted" },
         });
@@ -297,11 +304,11 @@ describe("dispatchUnityPipelineInstall", () => {
         ]);
         expect(
           yield* fileSystem.exists(
-            path.join(workspaceRoot, "Packages/com.ironmind.editor-presence/package.json.meta"),
+            path.join(workspaceRoot, "Packages/com.devgame.editor-presence/package.json.meta"),
           ),
         ).toBe(true);
         const pairingFile = yield* fileSystem.readFileString(
-          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+          path.join(workspaceRoot, "Library/com.devgame.editor-presence/pairing.json"),
         );
         expect(yield* decodePairingFile(pairingFile)).toEqual({
           serverUrl: "http://127.0.0.1:3773",
@@ -331,7 +338,7 @@ describe("dispatchUnityPipelineInstall", () => {
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const { fileSystem, workspaceRoot } = yield* runTempProjectDispatch();
-      const pairingDirectory = path.join(workspaceRoot, "Library/com.ironmind.editor-presence");
+      const pairingDirectory = path.join(workspaceRoot, "Library/com.devgame.editor-presence");
 
       expect((yield* fileSystem.stat(pairingDirectory)).mode & 0o777).toBe(0o700);
       expect(
@@ -363,7 +370,7 @@ describe("dispatchUnityPipelineInstall", () => {
       const outcome = yield* handoff.prepare({ workspaceRoot, projectTitle: "Deepmind" });
       const pairingPath = path.join(
         workspaceRoot,
-        "Library/com.ironmind.editor-presence/pairing.json",
+        "Library/com.devgame.editor-presence/pairing.json",
       );
 
       expect(outcome).toEqual({ _tag: "minted" });
@@ -381,17 +388,17 @@ describe("dispatchUnityPipelineInstall", () => {
       const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3code-unity-pipeline-install-same-",
       });
-      const destination = path.join(workspaceRoot, "Packages/com.ironmind.editor-presence");
+      const destination = path.join(workspaceRoot, "Packages/com.devgame.editor-presence");
       yield* fileSystem.makeDirectory(destination, { recursive: true });
       yield* fileSystem.writeFileString(
         path.join(destination, "package.json"),
         // Must match the embedded SOURCE package's real on-disk version
-        // (unity/com.ironmind.editor-presence/package.json, currently
-        // 0.3.1) — this test's whole premise is "destination already at the
+        // (unity/com.devgame.editor-presence/package.json, currently
+        // 0.4.0) — this test's whole premise is "destination already at the
         // same version as source," so this fixture has to track that
         // version, not a hardcoded historical one, or it silently starts
         // testing the "replaced" path instead of "alreadyInstalled".
-        encodeJson({ name: "com.ironmind.editor-presence", version: "0.3.1" }),
+        encodeJson({ name: "com.devgame.editor-presence", version: "0.4.0" }),
       );
       yield* fileSystem.writeFileString(path.join(destination, "keep-on-no-op.txt"), "sentinel");
 
@@ -406,9 +413,10 @@ describe("dispatchUnityPipelineInstall", () => {
       expect(outcome._tag).toBe("ok");
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
-        packageId: "com.ironmind.editor-presence",
-        version: "0.3.1",
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
         operation: "alreadyInstalled",
+        legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "absent" },
       });
       expect(yield* fileSystem.exists(path.join(destination, "keep-on-no-op.txt"))).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -421,11 +429,11 @@ describe("dispatchUnityPipelineInstall", () => {
       const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3code-unity-pipeline-install-replace-",
       });
-      const destination = path.join(workspaceRoot, "Packages/com.ironmind.editor-presence");
+      const destination = path.join(workspaceRoot, "Packages/com.devgame.editor-presence");
       yield* fileSystem.makeDirectory(destination, { recursive: true });
       yield* fileSystem.writeFileString(
         path.join(destination, "package.json"),
-        encodeJson({ name: "com.ironmind.editor-presence", version: "0.1.0" }),
+        encodeJson({ name: "com.devgame.editor-presence", version: "0.1.0" }),
       );
       yield* fileSystem.writeFileString(path.join(destination, "stale.txt"), "remove me");
 
@@ -440,14 +448,153 @@ describe("dispatchUnityPipelineInstall", () => {
       expect(outcome._tag).toBe("ok");
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.selectionPackage).toEqual({
-        packageId: "com.ironmind.editor-presence",
-        version: "0.3.1",
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
         operation: "replaced",
+        legacyCleanup: { packagesDirectory: "absent", libraryDirectory: "absent" },
       });
       expect(yield* fileSystem.exists(path.join(destination, "stale.txt"))).toBe(false);
       expect(yield* fileSystem.exists(path.join(destination, "package.json.meta"))).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  describe("legacy (com.ironmind.editor-presence) cleanup migration", () => {
+    it.effect("sweeps a stranded legacy Packages directory and reports it removed", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3code-unity-pipeline-install-legacy-packages-",
+        });
+        const legacyPackagesDirectory = path.join(
+          workspaceRoot,
+          "Packages",
+          LEGACY_UNITY_SELECTION_PACKAGE_ID,
+        );
+        yield* fileSystem.makeDirectory(legacyPackagesDirectory, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(legacyPackagesDirectory, "package.json"),
+          encodeJson({ name: LEGACY_UNITY_SELECTION_PACKAGE_ID, version: "0.3.1" }),
+        );
+
+        const spy = makeUnityPipelineClientSpy();
+        const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+        const outcome = yield* runDispatchTest(
+          spy,
+          makeSession([AuthPresenceCommandScope]),
+          projection,
+        );
+
+        expect(outcome._tag).toBe("ok");
+        if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+        expect(outcome.value.selectionPackage.legacyCleanup).toEqual({
+          packagesDirectory: "removed",
+          libraryDirectory: "absent",
+        });
+        expect(yield* fileSystem.exists(legacyPackagesDirectory)).toBe(false);
+        // The new-id package still lands correctly alongside the sweep — the
+        // migration must never trade "legacy gone" for "new package missing".
+        expect(
+          yield* fileSystem.exists(
+            path.join(workspaceRoot, "Packages", UNITY_SELECTION_PACKAGE_ID, "package.json"),
+          ),
+        ).toBe(true);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect("sweeps a stranded legacy Library pairing directory and reports it removed", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3code-unity-pipeline-install-legacy-library-",
+        });
+        // Same fixture shape this file already uses for the CURRENT-id
+        // pairing handoff (see "a stale unredeemed pairing.json..." above),
+        // repurposed at the LEGACY id to simulate a pre-rename stranded
+        // pairing directory a project picked up before 2026-08-11.
+        const legacyLibraryDirectory = path.join(
+          workspaceRoot,
+          "Library",
+          LEGACY_UNITY_SELECTION_PACKAGE_ID,
+        );
+        yield* fileSystem.makeDirectory(legacyLibraryDirectory, { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(legacyLibraryDirectory, "pairing.json"),
+          encodeJson({ serverUrl: "http://127.0.0.1:3773", pairingCredential: "STRANDED0000" }),
+        );
+
+        const spy = makeUnityPipelineClientSpy();
+        const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+        const outcome = yield* runDispatchTest(
+          spy,
+          makeSession([AuthPresenceCommandScope]),
+          projection,
+        );
+
+        expect(outcome._tag).toBe("ok");
+        if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+        expect(outcome.value.selectionPackage.legacyCleanup).toEqual({
+          packagesDirectory: "absent",
+          libraryDirectory: "removed",
+        });
+        expect(yield* fileSystem.exists(legacyLibraryDirectory)).toBe(false);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "a legacy directory the process cannot delete is reported failed, but never fails the install",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-undeletable-",
+          });
+          const legacyPackagesDirectory = path.join(
+            workspaceRoot,
+            "Packages",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(legacyPackagesDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyPackagesDirectory, "package.json"),
+            encodeJson({ name: LEGACY_UNITY_SELECTION_PACKAGE_ID, version: "0.3.1" }),
+          );
+          const undeletableFileSystem: FileSystem.FileSystem = {
+            ...fileSystem,
+            remove: (removePath, options) =>
+              removePath === legacyPackagesDirectory
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "remove",
+                      pathOrDescriptor: removePath,
+                    }),
+                  )
+                : fileSystem.remove(removePath, options),
+          };
+
+          // Calling the install function directly (bypassing the full HTTP
+          // dispatch) is the only way to inject a FileSystem override for
+          // just this one path while every other operation — including the
+          // REAL source-package copy — still runs for real.
+          const outcome = yield* installUnityEmbeddedSelectionPackage(workspaceRoot).pipe(
+            Effect.provideService(FileSystem.FileSystem, undeletableFileSystem),
+          );
+
+          expect(outcome.operation).toBe("installed");
+          expect(outcome.legacyCleanup).toEqual({
+            packagesDirectory: "failed",
+            libraryDirectory: "absent",
+          });
+          // Left in place, not silently lost — the whole point of "failed"
+          // over "removed" is that a human can still find and clear it.
+          expect(yield* fileSystem.exists(legacyPackagesDirectory)).toBe(true);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  });
 
   it.effect("an already-registered selection publisher skips minting entirely", () =>
     Effect.gen(function* () {
@@ -473,7 +620,7 @@ describe("dispatchUnityPipelineInstall", () => {
       expect(pairing.issued).toEqual([]);
       expect(
         yield* fileSystem.exists(
-          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+          path.join(workspaceRoot, "Library/com.devgame.editor-presence/pairing.json"),
         ),
       ).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -501,8 +648,8 @@ describe("dispatchUnityPipelineInstall", () => {
       if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
       expect(outcome.value.value.packageId).toBe("com.unity.pipeline");
       expect(outcome.value.selectionPackage).toMatchObject({
-        packageId: "com.ironmind.editor-presence",
-        version: "0.3.1",
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
       });
       expect(outcome.value.pairingOutcome).toEqual({
         _tag: "skipped",
@@ -521,7 +668,7 @@ describe("dispatchUnityPipelineInstall", () => {
       });
       const pairingPath = path.join(
         workspaceRoot,
-        "Library/com.ironmind.editor-presence/pairing.json",
+        "Library/com.devgame.editor-presence/pairing.json",
       );
       yield* fileSystem.makeDirectory(path.dirname(pairingPath), { recursive: true });
       yield* fileSystem.writeFileString(
@@ -574,10 +721,10 @@ describe("dispatchUnityPipelineInstall", () => {
         _tag: "skipped",
         reason: "Could not mint a Unity pairing credential.",
       });
-      expect(outcome.value.selectionPackage.packageId).toBe("com.ironmind.editor-presence");
+      expect(outcome.value.selectionPackage.packageId).toBe("com.devgame.editor-presence");
       expect(
         yield* fileSystem.exists(
-          path.join(workspaceRoot, "Library/com.ironmind.editor-presence/pairing.json"),
+          path.join(workspaceRoot, "Library/com.devgame.editor-presence/pairing.json"),
         ),
       ).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),

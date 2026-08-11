@@ -565,8 +565,8 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         to: "resource-monitor",
       },
       {
-        from: "apps/desktop/prod-resources/unity-packages/com.ironmind.editor-presence",
-        to: "unity-packages/com.ironmind.editor-presence",
+        from: "apps/desktop/prod-resources/unity-packages/com.devgame.editor-presence",
+        to: "unity-packages/com.devgame.editor-presence",
       },
     ]);
     assert.deepStrictEqual(resolveResourceMonitorRustTargets("mac", "universal"), [
@@ -593,17 +593,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       const stageResourcesDir = yield* fileSystem.makeTempDirectoryScoped({
         prefix: "t3code-desktop-unity-stage-",
       });
-      const source = path.join(repoRoot, "unity/com.ironmind.editor-presence");
+      const source = path.join(repoRoot, "unity/com.devgame.editor-presence");
       yield* fileSystem.makeDirectory(source, { recursive: true });
       yield* fileSystem.writeFileString(
         path.join(source, "package.json"),
-        encodeJson({ name: "com.ironmind.editor-presence", version: "0.2.0" }),
+        encodeJson({ name: "com.devgame.editor-presence", version: "0.2.0" }),
       );
       yield* fileSystem.writeFileString(path.join(source, "package.json.meta"), "meta");
 
       yield* stageUnitySelectionPackage({ repoRoot, stageResourcesDir });
 
-      const staged = path.join(stageResourcesDir, "unity-packages/com.ironmind.editor-presence");
+      const staged = path.join(stageResourcesDir, "unity-packages/com.devgame.editor-presence");
       assert.equal(
         yield* fileSystem.readFileString(path.join(staged, "package.json.meta")),
         "meta",

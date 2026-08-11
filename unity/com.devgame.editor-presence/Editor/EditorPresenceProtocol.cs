@@ -32,7 +32,7 @@
 // empty string identically to a missing/null field for exactly this reason.
 using System;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     [Serializable]
     internal sealed class EditorIdentityDto

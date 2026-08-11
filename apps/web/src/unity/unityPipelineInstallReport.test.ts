@@ -8,7 +8,7 @@ describe("describeUnityPipelineInstallOutcome — ok, freshly installed", () => 
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
       selectionPackage: {
-        packageId: "com.ironmind.editor-presence",
+        packageId: "com.devgame.editor-presence",
         version: "0.3.0",
         operation: "installed",
       },
@@ -19,7 +19,7 @@ describe("describeUnityPipelineInstallOutcome — ok, freshly installed", () => 
     expect(report.title).toContain("Unity integrations");
     expect(report.description).toContain("manifest.json");
     expect(report.description).toContain("com.unity.pipeline@1.2.3");
-    expect(report.description).toContain("com.ironmind.editor-presence@0.3.0");
+    expect(report.description).toContain("com.devgame.editor-presence@0.3.0");
     expect(report.description).toContain("Packages/");
     expect(report.description).toContain("pairing will finish automatically");
   });
@@ -31,7 +31,7 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
       selectionPackage: {
-        packageId: "com.ironmind.editor-presence",
+        packageId: "com.devgame.editor-presence",
         version: "0.3.0",
         operation: "alreadyInstalled",
       },
@@ -46,7 +46,7 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
     // regardless of `alreadyInstalled`.
     expect(report.description).not.toContain("manifest.json");
     expect(report.description).toContain("com.unity.pipeline@1.2.3");
-    expect(report.description).toContain("com.ironmind.editor-presence@0.3.0");
+    expect(report.description).toContain("com.devgame.editor-presence@0.3.0");
     expect(report.description).toContain("already paired");
   });
 
@@ -55,7 +55,7 @@ describe("describeUnityPipelineInstallOutcome — ok, already installed", () => 
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
       selectionPackage: {
-        packageId: "com.ironmind.editor-presence",
+        packageId: "com.devgame.editor-presence",
         version: "0.3.0",
         operation: "alreadyInstalled",
       },

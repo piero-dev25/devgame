@@ -21,7 +21,7 @@ import { ProjectId } from "./baseSchemas.ts";
  * `packages-lock.json`'s (or the equivalent embedded-package check's) own
  * verdict for ONE package id — shared shape for both Pipeline
  * (`com.unity.pipeline`) and the selection package
- * (`com.ironmind.editor-presence`). Plan §1, F1: `packages-lock.json` is
+ * (`com.devgame.editor-presence`). Plan §1, F1: `packages-lock.json` is
  * the authoritative resolved-package source, not `manifest.json` — a
  * package embedded or vendored (present in the lock, absent from
  * `manifest.json`) is still genuinely installed. For the selection package,

@@ -14,7 +14,9 @@ equivalent.
 gone.** An earlier version of this file said it was deleted outright and
 that "Unity selection is currently unimplemented"; that led at least one
 research pass to the wrong conclusion. The package exists on disk today at
-`unity/com.ironmind.editor-presence/`, v0.2.0.
+`unity/com.devgame.editor-presence/`, v0.2.0 (renamed from
+`com.ironmind.editor-presence` on 2026-08-11 — packaging identity only,
+nothing behavioral changed).
 
 Don't trust a specific commit sha as proof of this — a sha pinned here goes
 stale the moment another lane commits, which has already happened twice in
@@ -50,7 +52,7 @@ Pipeline's job, same division as the rest of this file describes. Verified
 live against a real Unity 6000.3.14f1 Editor on a disposable project: connects,
 sends selection (single-select, multi-select, deselect), survives a forced
 domain reload with session identity intact, and a real pairing redeem
-against a live server. See `unity/com.ironmind.editor-presence/UNVERIFIED.md`
+against a live server. See `unity/com.devgame.editor-presence/UNVERIFIED.md`
 for the full verification record and what remains unverified.
 
 **Corrected 2026-08-10 — 0.3.1 added play-state REPORTING, not play-state

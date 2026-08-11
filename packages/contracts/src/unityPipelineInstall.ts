@@ -42,10 +42,26 @@ export const UnityPipelineInstallOutcome = Schema.Struct({
 });
 export type UnityPipelineInstallOutcome = typeof UnityPipelineInstallOutcome.Type;
 
+/** Best-effort outcome of removing one stranded legacy-id directory during
+ * install — `"absent"` (nothing to clean), `"removed"`, or `"failed"` (left
+ * in place; the install itself still succeeds, see
+ * `UnityEmbeddedSelectionPackage.ts`'s `installUnityEmbeddedSelectionPackage`). */
+export const UnityLegacySelectionPackageCleanupOutcome = Schema.Struct({
+  packagesDirectory: Schema.Literals(["absent", "removed", "failed"]),
+  libraryDirectory: Schema.Literals(["absent", "removed", "failed"]),
+});
+export type UnityLegacySelectionPackageCleanupOutcome =
+  typeof UnityLegacySelectionPackageCleanupOutcome.Type;
+
 export const UnitySelectionPackageInstallOutcome = Schema.Struct({
-  packageId: Schema.Literal("com.ironmind.editor-presence"),
+  packageId: Schema.Literal("com.devgame.editor-presence"),
   version: Schema.String,
   operation: Schema.Literals(["installed", "alreadyInstalled", "replaced"]),
+  // Optional: only present once the rename's legacy-cleanup migration runs.
+  // Absent (not merely `undefined`) on any wire payload predating it, and on
+  // every existing test fixture in this repo that doesn't opt in — keeps
+  // this addition non-breaking for those call sites.
+  legacyCleanup: Schema.optional(UnityLegacySelectionPackageCleanupOutcome),
 });
 export type UnitySelectionPackageInstallOutcome = typeof UnitySelectionPackageInstallOutcome.Type;
 

@@ -15,7 +15,7 @@ class_name EppSelection
 ## (see godot/addons/editor_presence/README.md).
 ##
 ## Field mapping matches the Unity package's shape (see
-## unity/com.ironmind.editor-presence/Editor/EditorPresenceItemBuilder.cs)
+## unity/com.devgame.editor-presence/Editor/EditorPresenceItemBuilder.cs)
 ## as closely as Godot's API allows; see docs/workbench/spec-godot-publisher.md
 ## step 2 for the full rationale on identity durability.
 

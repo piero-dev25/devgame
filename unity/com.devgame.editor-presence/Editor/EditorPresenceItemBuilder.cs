@@ -12,7 +12,7 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     internal static class EditorPresenceItemBuilder
     {

@@ -37,7 +37,7 @@
 // reason — resetting them on every domain reload is correct, not a gap.
 using UnityEditor;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     [InitializeOnLoad]
     internal static class EditorPresencePlayStateWatcher

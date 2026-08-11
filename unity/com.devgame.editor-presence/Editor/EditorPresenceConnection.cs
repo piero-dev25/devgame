@@ -60,7 +60,7 @@ using System.Threading.Tasks;
 using UnityEditor;
 using UnityEngine;
 
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     [InitializeOnLoad]
     internal static class EditorPresenceConnection
@@ -72,7 +72,7 @@ namespace Ironmind.EditorPresence
         // step 1 of the original design.
         private const double ReconnectIntervalSeconds = 3.0;
         private const int ReceiveBufferSize = 4096;
-        private const string SessionIdSessionStateKey = "Ironmind.EditorPresence.SessionId";
+        private const string SessionIdSessionStateKey = "DevGame.EditorPresence.SessionId";
 
         // A close code >= 4000 means the server told us why: the presence
         // route accepts the WebSocket upgrade FIRST, then authenticates,

@@ -112,7 +112,7 @@ it.layer(TestLayer)("UnityPackageLockLive", (it) => {
 
         const dependencies = yield* lock.readDependencies(cwd);
 
-        expect(dependencies.has("com.ironmind.editor-presence")).toBe(false);
+        expect(dependencies.has("com.devgame.editor-presence")).toBe(false);
       }),
     );
 

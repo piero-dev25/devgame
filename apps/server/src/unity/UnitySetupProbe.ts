@@ -39,7 +39,7 @@ import * as UnityPackageLock from "./UnityPackageLock.ts";
 import * as UnityPipelineClient from "./UnityPipelineClient.ts";
 
 const PIPELINE_PACKAGE_ID = "com.unity.pipeline";
-const SELECTION_PACKAGE_ID = "com.ironmind.editor-presence";
+const SELECTION_PACKAGE_ID = "com.devgame.editor-presence";
 const UNITY_PROJECT_VERSION_PATH = ["ProjectSettings", "ProjectVersion.txt"] as const;
 const EMBEDDED_SELECTION_PACKAGE_MANIFEST_PATH = [
   "Packages",

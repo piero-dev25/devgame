@@ -349,9 +349,9 @@ describe("UnitySetupProbe", () => {
             );
             yield* writeTextFile(
               cwd,
-              "Packages/com.ironmind.editor-presence/package.json",
+              "Packages/com.devgame.editor-presence/package.json",
               encodeJson({
-                name: "com.ironmind.editor-presence",
+                name: "com.devgame.editor-presence",
                 version: "0.2.0",
               }),
             );
@@ -404,7 +404,7 @@ describe("UnitySetupProbe", () => {
               encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
-                  "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                  "com.devgame.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
                 },
               }),
             );
@@ -470,7 +470,7 @@ describe("UnitySetupProbe", () => {
               encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
-                  "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                  "com.devgame.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
                 },
               }),
             );
@@ -562,7 +562,7 @@ describe("UnitySetupProbe", () => {
               encodeJson({
                 dependencies: {
                   "com.unity.pipeline": { version: "0.4.0", depth: 0, source: "registry" },
-                  "com.ironmind.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
+                  "com.devgame.editor-presence": { version: "0.2.0", depth: 0, source: "git" },
                 },
               }),
             );

@@ -1,4 +1,4 @@
-namespace Ironmind.EditorPresence
+namespace DevGame.EditorPresence
 {
     internal enum EditorPresenceConnectionState
     {
