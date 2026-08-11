@@ -788,6 +788,24 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       // below) is load-bearing, not incidental.
       let topBandLayoutSub: ReturnType<DockviewApi["onDidLayoutChange"]> | undefined;
       let topBandMutateSub: ReturnType<DockviewApi["onDidMutateLayout"]> | undefined;
+      // QA round 12 fix: event-driven application alone is hopeful about
+      // dockview's own geometry-settlement timing (see `applyTopBandLayout`'s
+      // own comment for the two concrete failures this closes). These make
+      // the application self-correcting against the ACTUAL DOM geometry
+      // instead: a ResizeObserver (fires whenever a watched element's own
+      // box genuinely changes size, independent of which dockview event did
+      // or didn't fire) and the first-paint rAF follow-up id (so it can be
+      // cancelled on an early unmount).
+      let topBandResizeObserver: ResizeObserver | undefined;
+      let topBandInitialRafId: number | undefined;
+      // Independent of `addGroupSub`/`removeGroupSub` below — keeps the
+      // ResizeObserver's watch list current as groups come and go (a real
+      // split adds one; closing the last tab in a group removes it), same
+      // "subscribe now, keep current via add/remove" shape as that pair's
+      // own per-group tracking, but for an unrelated concern (see the
+      // subscription's own comment for why this stays a separate pair).
+      let topBandAddGroupSub: ReturnType<DockviewApi["onDidAddGroup"]> | undefined;
+      let topBandRemoveGroupSub: ReturnType<DockviewApi["onDidRemoveGroup"]> | undefined;
       let persistTimer: ReturnType<typeof setTimeout> | undefined;
       // Tracks whether a debounced save is currently outstanding — separate
       // from `persistTimer` itself, which still holds the last timer id even
@@ -1094,6 +1112,70 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // on BOTH events, is load-bearing.
         topBandLayoutSub = api.onDidLayoutChange(applyTopBandLayout);
         topBandMutateSub = api.onDidMutateLayout(applyTopBandLayout);
+        // QA round 12 fix (real defect, live-QA-confirmed, not a false
+        // positive): the two event subscriptions above fire at the MOMENT a
+        // layout mutation is REQUESTED, not once the resulting DOM geometry
+        // has actually settled — `DockviewGroupPanelApiImpl.boundingBox`'s
+        // own doc comment warns "only meaningful once the layout has
+        // actually been sized." Round 12 observed this live twice: (1) a
+        // `setVisible` transition (the sidebar hide/show toggle) redistributes
+        // the splitview's pixel widths on a LATER tick than the
+        // onDidLayoutChange/onDidMutateLayout events announcing the change —
+        // the new (0,0) group's strip rendered under the corner with no
+        // clearance, uncorrected until some unrelated later event happened
+        // to fire (the restore, by accident); (2) first paint, covered
+        // separately below.
+        //
+        // A ResizeObserver makes the application self-correcting against the
+        // ACTUAL geometry instead of hopeful about dockview's event timing —
+        // it fires whenever an OBSERVED element's own box genuinely changes
+        // size, regardless of which (if any) dockview event did or didn't
+        // fire for that change. Observed at TWO levels:
+        //   - every GROUP's own `.element` — this is the level that actually
+        //     catches a `setVisible` splitview redistribution: dockview
+        //     resizes each SIBLING group's own box individually (pixel
+        //     widths set via inline style on each `.dv-groupview`), while
+        //     the OUTER `container` element's own box stays constant across
+        //     that internal redistribution (ResizeObserver only fires for
+        //     the exact observed element's own box, never a descendant's —
+        //     per spec, not assumed).
+        //   - `container` itself — the general case (window resizes, or any
+        //     other change to the container's own box), cheap to add on the
+        //     SAME observer instance.
+        // Idempotent + cheap either way: `applyTopBandLayout` already
+        // recomputes fresh from live boundingBoxes every call and clears
+        // stale `data-dv-topband`/padding from any group that left the band
+        // or lost corner-owner status (its own `else` branches), so an
+        // observer firing when nothing meaningful actually changed is a
+        // harmless no-op write, not a correctness risk.
+        topBandResizeObserver = new ResizeObserver(() => {
+          applyTopBandLayout();
+        });
+        // `container` was narrowed non-null at the top of this effect (the
+        // early `if (!container) return undefined;` above) and is never
+        // reassigned — safe to assert here. TypeScript doesn't carry that
+        // narrowing through a hoisted `function loadInitialLayout()`
+        // declaration's body the way it does for the arrow-function `const`s
+        // above (e.g. `applyTopBandLayout`, which reads `container`
+        // un-asserted).
+        topBandResizeObserver.observe(container!);
+        const topBandObservedGroupIds = new Set<string>();
+        const observeGroupForTopBand = (group: DockviewGroupPanel) => {
+          if (topBandObservedGroupIds.has(group.id)) return;
+          topBandObservedGroupIds.add(group.id);
+          topBandResizeObserver?.observe(group.element);
+        };
+        for (const group of api.groups) observeGroupForTopBand(group);
+        // Independent of `addGroupSub`/`removeGroupSub` below (which drive
+        // the UNRELATED per-group active-panel-change tracking) — dockview's
+        // events support multiple independent subscribers, and coupling two
+        // unrelated concerns into one callback would make either harder to
+        // reason about or safely change later.
+        topBandAddGroupSub = api.onDidAddGroup(observeGroupForTopBand);
+        topBandRemoveGroupSub = api.onDidRemoveGroup((group) => {
+          topBandObservedGroupIds.delete(group.id);
+          topBandResizeObserver?.unobserve(group.element);
+        });
         // Task #108: records which panel is active RIGHT NOW under the
         // CURRENT thread's key — fires for every activation, whatever
         // triggered it (a genuine tab click, or the initial load applying a
@@ -1169,7 +1251,23 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         // same function — run it once explicitly so the very first paint
         // already has `data-dv-topband`/corner clearance applied, not just
         // whichever layout change happens to fire next.
+        //
+        // QA round 12 fix: a SINGLE explicit call here was the first-paint
+        // failure — it fires before dockview has actually SIZED the
+        // just-created groups (the Sidebar tab rendered under the corner
+        // live, no clearance). "now" still runs immediately (cheap, and
+        // right the majority of the time), but a `requestAnimationFrame`
+        // follow-up re-applies once the browser has completed a layout/paint
+        // pass, catching the case where "now" was too early. Guarded by
+        // `cancelled` (this file's own established async-continuation guard
+        // — see `loadInitialLayout`'s own top-of-function comment) since the
+        // frame can land after an early unmount/workspace-switch; the rAF id
+        // is also cancelled directly in cleanup as a second line of defense.
         applyTopBandLayout();
+        topBandInitialRafId = requestAnimationFrame(() => {
+          if (cancelled) return;
+          applyTopBandLayout();
+        });
       }
 
       void loadInitialLayout();
@@ -1199,6 +1297,10 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         }
         window.removeEventListener("keydown", handleEscape);
         container.removeEventListener("dragstart", handleTopBandDragStartCapture, true);
+        if (topBandInitialRafId !== undefined) cancelAnimationFrame(topBandInitialRafId);
+        topBandResizeObserver?.disconnect();
+        topBandAddGroupSub?.dispose();
+        topBandRemoveGroupSub?.dispose();
         layoutChangeSub?.dispose();
         mutateLayoutSub?.dispose();
         topBandLayoutSub?.dispose();
