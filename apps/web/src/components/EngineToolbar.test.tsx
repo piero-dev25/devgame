@@ -19,6 +19,7 @@ const THREEJS_VIEW: EngineToolbarView = {
   availableActions: [],
   playState: null,
   disabledReason: null,
+  unityCliMissing: false,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
@@ -37,6 +38,7 @@ const NULL_ENGINE_VIEW: EngineToolbarView = {
   availableActions: [],
   playState: null,
   disabledReason: null,
+  unityCliMissing: false,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
@@ -235,6 +237,7 @@ const UNITY_NOT_READY_INSTALL_OFFERED_VIEW: EngineToolbarView = {
   playState: null,
   disabledReason:
     "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.",
+  unityCliMissing: false,
   unitySetupCheckFailed: false,
   unityInstallOffered: true,
   unitySetupPending: false,
@@ -253,6 +256,27 @@ const UNITY_NOT_READY_NO_INSTALL_VIEW: EngineToolbarView = {
   playState: null,
   disabledReason:
     "This project doesn't have Unity's Pipeline package, and Unity isn't open. Add the package, then open the project in Unity.",
+  unityCliMissing: false,
+  unitySetupCheckFailed: false,
+  unityInstallOffered: false,
+  unitySetupPending: false,
+  unitySetupResolved: true,
+};
+
+// Merge-gate W1: the real S1 sentence (task #130) — an actual command a
+// user needs to run, unlike every other classified sentence in this file.
+const UNITY_S1_DISABLED_REASON =
+  "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.";
+
+const UNITY_CLI_MISSING_VIEW: EngineToolbarView = {
+  engineType: "unity",
+  backend: "unity-cli",
+  requiresPresenceCommandScope: true,
+  hasConnectedEditor: false,
+  availableActions: [],
+  playState: null,
+  disabledReason: UNITY_S1_DISABLED_REASON,
+  unityCliMissing: true,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
@@ -267,6 +291,7 @@ const UNITY_READY_VIEW: EngineToolbarView = {
   availableActions: ["play", "pause", "stop"],
   playState: null,
   disabledReason: null,
+  unityCliMissing: false,
   unitySetupCheckFailed: false,
   unityInstallOffered: false,
   unitySetupPending: false,
@@ -369,6 +394,55 @@ describe("EngineToolbar — Unity not-ready state withholds the CTA when an inst
     expect(
       hasAriaLabel(unityButton ?? "", UNITY_NOT_READY_NO_INSTALL_VIEW.disabledReason ?? ""),
     ).toBe(true);
+  });
+});
+
+// Merge-gate W1: S1's remedy is an actual shell command
+// (`brew install --cask unity-cli`) — before this fix it was delivered ONLY
+// through the ordinary Unity badge's aria-label + hover tooltip, which
+// (task #124) may never open for a pointer user, and even when it does,
+// tooltip text can't be selected or copied. This proves the fix renders
+// that text as PLAIN, ALWAYS-PRESENT markup (not gated behind a Popover or
+// any other open/closed disclosure) for S1 specifically, and that no other
+// not-ready state gains this new surface.
+describe("EngineToolbar — merge-gate W1: S1's install remedy is visible AND copyable, not tooltip-only", () => {
+  it("renders the exact install command as VISIBLE text content for S1 — not merely inside an aria-label/tooltip", () => {
+    const html = renderUnityToolbar(UNITY_CLI_MISSING_VIEW);
+
+    // Visible text content, i.e. found between `>` and `<` — an aria-label
+    // attribute value alone would NOT satisfy this (that's what the OLD,
+    // tooltip-only rendering already did, and is exactly the defect this
+    // proves fixed).
+    expect(html).toMatch(/>[^<]*brew install --cask unity-cli[^<]*</);
+    // And a real copy affordance sits alongside it — not just visible text
+    // with no way to get the exact command out.
+    expect(hasAriaLabel(html, "Copy Unity CLI install command")).toBe(true);
+  });
+
+  it("does NOT render the visible/copyable remedy row for a different not-ready reason (S4) — this surface is S1-specific", () => {
+    const html = renderUnityToolbar(UNITY_NOT_READY_INSTALL_OFFERED_VIEW, {
+      onSetupUnityIntegrations: () => {},
+    });
+
+    expect(html).not.toMatch(/brew install --cask unity-cli/);
+    expect(hasAriaLabel(html, "Copy Unity CLI install command")).toBe(false);
+  });
+
+  it("does NOT render it once Unity is fully ready (S11) — no not-ready state to speak of", () => {
+    const html = renderUnityToolbar(UNITY_READY_VIEW);
+
+    expect(html).not.toMatch(/brew install --cask unity-cli/);
+    expect(hasAriaLabel(html, "Copy Unity CLI install command")).toBe(false);
+  });
+
+  it("still falls back to the ordinary tooltip-only badge for S1 when unityCliMissing is somehow false (defensive: this surface is gated on the flag, not a state guess of its own)", () => {
+    const html = renderUnityToolbar({ ...UNITY_CLI_MISSING_VIEW, unityCliMissing: false });
+
+    // The message is STILL present (as the tooltip badge's aria-label —
+    // this component never invents or drops `disabledReason`), but the
+    // new visible/copyable surface specifically is absent.
+    expect(hasAriaLabel(html, UNITY_S1_DISABLED_REASON)).toBe(true);
+    expect(hasAriaLabel(html, "Copy Unity CLI install command")).toBe(false);
   });
 });
 
@@ -575,6 +649,7 @@ describe("EngineToolbar — non-Unity editor-presence toolbar is untouched", () 
     availableActions: ["play", "pause", "stop"],
     playState: null,
     disabledReason: null,
+    unityCliMissing: false,
     unitySetupCheckFailed: false,
     unityInstallOffered: false,
     unitySetupPending: false,
@@ -622,6 +697,7 @@ describe("EngineToolbar — disabled Unity controls' accessible names (#107)", (
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unityCliMissing: false,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,

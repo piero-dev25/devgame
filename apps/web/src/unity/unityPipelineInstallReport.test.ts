@@ -106,18 +106,7 @@ describe("describeUnityPipelineInstallOutcome — package_resolve (task #130), s
     expect(report.description.toLowerCase()).not.toContain("click into");
   });
 
-  it("says nothing extra when package_resolve was skipped (no live editor) or absent (pre-#130 fixture)", () => {
-    const skipped = describeUnityPipelineInstallOutcome({
-      _tag: "ok",
-      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
-      selectionPackage: {
-        packageId: "com.devgame.editor-presence",
-        version: "0.3.0",
-        operation: "installed",
-      },
-      pairingOutcome: { _tag: "minted" },
-      packageResolve: "skipped_no_editor",
-    });
+  it("says nothing extra (no failure-remedy line) when package_resolve is absent (pre-#130 fixture) — genuinely silent, unlike skipped_no_editor below", () => {
     const absent = describeUnityPipelineInstallOutcome({
       _tag: "ok",
       value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
@@ -129,8 +118,60 @@ describe("describeUnityPipelineInstallOutcome — package_resolve (task #130), s
       pairingOutcome: { _tag: "minted" },
     });
 
-    expect(skipped.description.toLowerCase()).not.toContain("click into");
     expect(absent.description.toLowerCase()).not.toContain("click into");
+    expect(absent.description.toLowerCase()).not.toContain("open the project in unity");
+  });
+
+  // CHANGED 2026-08-11 (merge-gate W2): this used to assert skipped_no_editor
+  // says "nothing extra," same as invoked — that was the actual bug. Clicking
+  // Setup with Unity closed (exactly what S13's own copy tells a user to do
+  // AFTER opening Unity, but nothing stops them clicking with it still
+  // closed) yields packageResolve: "skipped_no_editor", and this report used
+  // to stay completely silent about it, so the toast read as an unqualified
+  // success ("Unity integrations already installed") while the pipeline
+  // package was, in fact, still just staged in the manifest, not actually
+  // resolved. Silent is still correct for "invoked" (a live Editor really
+  // did just load it) — "skipped_no_editor" is a genuinely different,
+  // still-incomplete outcome and needs its own honest line.
+  it("adds an honest 'package staged, open Unity to finish loading it' line when package_resolve was skipped (no live editor)", () => {
+    const skipped = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: false },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.3.0",
+        operation: "installed",
+      },
+      pairingOutcome: { _tag: "minted" },
+      packageResolve: "skipped_no_editor",
+    });
+
+    // Never the FAILED-outcome remedy line (that implies a live Editor
+    // attempt genuinely failed, which is not what happened here).
+    expect(skipped.description.toLowerCase()).not.toContain("click into");
+    expect(skipped.description.toLowerCase()).toContain("open the project in unity");
+  });
+
+  // The exact reproduction from the merge-gate finding: BOTH packages report
+  // "alreadyInstalled" (a re-click of S13's own escape hatch is idempotent —
+  // the manifest/embedded-copy writes were already done by the first click),
+  // so this hits the toast's "already installed" branch specifically, not
+  // the general "installed" one — the branch team-lead's own report named.
+  it("the 'already installed' branch is NOT silent about skipped_no_editor either — this is the S13 re-click scenario verbatim", () => {
+    const report = describeUnityPipelineInstallOutcome({
+      _tag: "ok",
+      value: { packageId: "com.unity.pipeline", version: "1.2.3", alreadyInstalled: true },
+      selectionPackage: {
+        packageId: "com.devgame.editor-presence",
+        version: "0.4.0",
+        operation: "alreadyInstalled",
+      },
+      pairingOutcome: { _tag: "alreadyPaired" },
+      packageResolve: "skipped_no_editor",
+    });
+
+    expect(report.title).toContain("already installed");
+    expect(report.description.toLowerCase()).toContain("open the project in unity");
   });
 });
 

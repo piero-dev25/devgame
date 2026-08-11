@@ -245,6 +245,83 @@ describe("resolveEngineToolbarView — unity-cli backend", () => {
     });
   });
 
+  describe("unityCliMissing — merge-gate W1: gates the S1 visible+copyable install remedy row", () => {
+    it("true at S1 (CLI genuinely not installed, no discovered candidate)", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts({ cliAvailable: false }), {
+          state: "S1",
+          message:
+            "Unity's command-line tool isn't installed on this machine. DevGame needs it to talk to the Editor. Install it with `brew install --cask unity-cli` on macOS, or see Unity's CLI docs at https://docs.unity.com/en-us/unity-cli on other platforms — then restart DevGame.",
+        }),
+      });
+      expect(view.unityCliMissing).toBe(true);
+    });
+
+    it("false at S2 (a candidate WAS found off-PATH) — a different remedy (relaunch), not this one", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts({ cliAvailable: false }), {
+          state: "S2",
+          message: "The Unity CLI is installed at `/opt/homebrew/bin/unity`, but...",
+          discoveredPath: "/opt/homebrew/bin/unity",
+        }),
+      });
+      expect(view.unityCliMissing).toBe(false);
+    });
+
+    it("false once the CLI is confirmed available, even while otherwise not ready (S4)", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(
+          readyFacts({
+            pipelinePackage: { installed: false, resolvedVersion: null, declaredInManifest: false },
+          }),
+          {
+            state: "S4",
+            message:
+              "Unity is open, but this project doesn't have Unity's Pipeline package — that's why Play doesn't work here. DevGame can add it to this project.",
+          },
+        ),
+      });
+      expect(view.unityCliMissing).toBe(false);
+    });
+
+    it("false when fully ready (S11)", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: probeResult(readyFacts(), S11),
+      });
+      expect(view.unityCliMissing).toBe(false);
+    });
+
+    it("false while still loading — no probe result yet is never a default-to-S1 guess", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "unity",
+        connectedEditor: null,
+        unitySetup: null,
+      });
+      expect(view.unityCliMissing).toBe(false);
+    });
+
+    it("always false for non-unity-cli backends", () => {
+      const view = resolveEngineToolbarView({
+        engineType: "godot",
+        connectedEditor: null,
+      });
+      expect(view.unityCliMissing).toBe(false);
+    });
+
+    it("always false when no engine is resolved at all", () => {
+      const view = resolveEngineToolbarView({ engineType: null, connectedEditor: null });
+      expect(view.unityCliMissing).toBe(false);
+    });
+  });
+
   // Task: F13 (merge-gate review, low) — `unitySetupPending` threads
   // `unitySetupQuery.isPending` straight through with no re-derivation
   // (this function only ever sees SETTLED inputs, so it has no other way

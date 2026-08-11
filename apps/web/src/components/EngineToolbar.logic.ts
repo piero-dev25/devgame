@@ -360,6 +360,27 @@ export interface EngineToolbarView {
    * decision (see `isUnityPlayReady`). */
   readonly disabledReason: string | null;
   /**
+   * Whether the disabled reason is specifically S1 (Unity's CLI genuinely
+   * not installed, no discovered off-PATH candidate) — merge-gate W1: `S1`
+   * is the one classified state whose remedy is an actual command the user
+   * needs to run (`brew install --cask unity-cli`, baked into
+   * `disabledReason` itself as of task #130), so `EngineToolbar.tsx` uses
+   * this to render that text VISIBLY and COPYABLE (an inline row, not
+   * tooltip-only) rather than through the ordinary aria-label/tooltip path
+   * every other not-ready reason uses — a tooltip's text can't be selected
+   * or copied, and (per task #124) may never even open for a pointer user.
+   * Same "read the fact, never `primary.state`'s bare literal for a UI
+   * branch elsewhere" posture as `isUnityPlayReady`/
+   * `shouldOfferUnityPipelineInstall` EXCEPT here, deliberately: this is
+   * the one place in this file a specific state literal (not a derived
+   * fact) is the correct thing to gate on, because S1's remedy — unlike
+   * every other state's — is genuinely different in KIND (a copyable shell
+   * command), not just in wording. `false` while `setup` is still `null`
+   * (no probe result yet — never a default-to-S1 guess, same posture every
+   * other field here uses) and for every non-`"unity-cli"` backend.
+   */
+  readonly unityCliMissing: boolean;
+  /**
    * Whether `disabledReason` reflects a FAILED status check — a rejected
    * `unitySetupProbeAtom` fetch, or the atom's own bounded wait for the
    * environment's connection giving up (#106) — rather than a genuine
@@ -485,6 +506,7 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unityCliMissing: false,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
@@ -503,6 +525,7 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unityCliMissing: false,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
@@ -541,6 +564,9 @@ export function resolveEngineToolbarView(input: {
       // presence returns. That is the status quo, not a regression.
       playState: connectedEditor?.playState ?? input.unityPlayState ?? null,
       disabledReason: playReady ? null : unityDisabledReason(setup, unitySetupError),
+      // See this field's own doc comment for why S1 specifically (and only
+      // S1) is checked by literal state here.
+      unityCliMissing: setup !== null && setup.primary.state === "S1",
       // A failed CHECK, not a confirmed classifier state — see this field's
       // own doc comment. Only possible while `setup` is still `null`
       // (`unityDisabledReason` only reads `error` in that branch); once a
@@ -570,6 +596,7 @@ export function resolveEngineToolbarView(input: {
       availableActions: [],
       playState: null,
       disabledReason: null,
+      unityCliMissing: false,
       unitySetupCheckFailed: false,
       unityInstallOffered: false,
       unitySetupPending: false,
@@ -585,6 +612,7 @@ export function resolveEngineToolbarView(input: {
     availableActions: CONTROL_ACTION_ORDER.filter((action) => actionSet.has(action)),
     playState: connectedEditor.playState,
     disabledReason: null,
+    unityCliMissing: false,
     unitySetupCheckFailed: false,
     unityInstallOffered: false,
     unitySetupPending: false,

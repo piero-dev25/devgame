@@ -41,18 +41,32 @@ export function describeUnityPipelineInstallOutcome(
     const legacyRemovedLine = legacyRemoved
       ? " Removed the old com.ironmind.editor-presence package."
       : "";
-    // Task #130's package_resolve nudge: silent on every outcome except
-    // `"failed"` — `"invoked"` and `"skipped_no_editor"` are both ordinary,
-    // and the embedded-package copy already succeeded regardless (this
-    // nudge is best-effort, not load-bearing for the install's own
-    // success). Only a `"failed"` nudge needs the user told, since it's the
-    // one case where Unity might silently sit on the old package longer
-    // than expected.
+    // Task #130's package_resolve nudge: silent ONLY for `"invoked"` — a
+    // live Editor really did just load the package, so there's nothing left
+    // to tell the user. `"failed"` and `"skipped_no_editor"` are BOTH
+    // genuinely incomplete outcomes and each need their own honest line.
+    //
+    // CHANGED 2026-08-11 (merge-gate W2): `"skipped_no_editor"` used to be
+    // silent too, under the same "embedded-package copy already succeeded,
+    // this nudge is best-effort" reasoning that's still correct for
+    // `"failed"` — but for `"skipped_no_editor"` that reasoning missed the
+    // actual S13 scenario: clicking Setup while Unity is closed (exactly
+    // what a user might do BEFORE following S13's own "open Unity" copy,
+    // not after) is the COMMON case here, not a rare failure, and staying
+    // silent let the toast read as an unqualified "Unity integrations
+    // already installed" while the pipeline package was, in fact, still
+    // just staged in the manifest — never actually resolved. Worded
+    // differently from the `"failed"` line on purpose: this is not a
+    // failure to explain away, just an honest "not finished yet."
     const packageResolveFailedLine =
       result.packageResolve === "failed"
         ? " If the change hasn't appeared in Unity, click into the Editor to trigger it — it will also load automatically the next time you open the project."
         : "";
-    const trailer = `${legacyRemovedLine}${packageResolveFailedLine}`;
+    const packageResolveSkippedLine =
+      result.packageResolve === "skipped_no_editor"
+        ? " Unity isn't open for this project right now — the package is staged; open the project in Unity to finish loading it."
+        : "";
+    const trailer = `${legacyRemovedLine}${packageResolveFailedLine}${packageResolveSkippedLine}`;
     if (pipelineAlreadyInstalled && selectionAlreadyInstalled) {
       if (result.pairingOutcome._tag === "skipped") {
         return {

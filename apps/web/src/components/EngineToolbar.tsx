@@ -13,7 +13,9 @@
 // its own mutation-proven test suite — this file is deliberately thin.
 import type { EngineType } from "@t3tools/contracts";
 import {
+  CheckIcon,
   ChevronDownIcon,
+  CopyIcon,
   PauseIcon,
   PlayIcon,
   RotateCcwIcon,
@@ -30,6 +32,7 @@ import {
   type EngineToolbarAction,
   type EngineToolbarView,
 } from "./EngineToolbar.logic";
+import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { UnityIcon } from "./icons/UnityIcon";
 import { MenuGroup, MenuItem } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
@@ -234,6 +237,46 @@ function ThreeJsPlayButton(props: {
   );
 }
 
+/**
+ * Merge-gate W1: S1's remedy (`brew install --cask unity-cli`, baked into
+ * `EngineToolbarView.disabledReason` as of task #130) used to be delivered
+ * ONLY through the Unity badge's aria-label + hover tooltip
+ * (`UnityControlCluster`'s ordinary not-ready path). Two problems with
+ * that, both real: task #124 means a tooltip may never even OPEN for a
+ * pointer user, and even when it does, tooltip text is neither selectable
+ * nor copyable — so the one thing a stranger needs from this message (the
+ * exact command) couldn't be gotten out of it. This renders the SAME text
+ * as a plain, always-present row (never gated behind hover or an
+ * open/closed disclosure — the message must appear in this component's
+ * own rendered output unconditionally, which is also what makes it
+ * testable via `renderToStaticMarkup`: a `Popover`'s content, checked live
+ * against this exact primitive, is NOT present in static markup when
+ * closed, so hiding the remedy inside one would have made it untestable
+ * AND reintroduced the "have to interact to see it" problem this exists to
+ * fix) plus an explicit copy button that copies the exact string shown,
+ * independent of `useCopyToClipboard`'s own cleanup-only effect (which
+ * never runs during static rendering and isn't needed for the initial
+ * markup either way).
+ */
+function UnityCliMissingRemedy(props: { readonly message: string }) {
+  const { copyToClipboard, isCopied } = useCopyToClipboard<void>({ target: "install command" });
+  return (
+    <div className="flex max-w-sm items-start gap-1.5 rounded-md border border-dashed border-border px-2 py-1 text-xs text-muted-foreground">
+      <UnityIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+      <span className="select-text">{props.message}</span>
+      <Button
+        size="icon-xs"
+        variant="ghost"
+        aria-label="Copy Unity CLI install command"
+        className="shrink-0"
+        onClick={() => copyToClipboard(props.message, undefined)}
+      >
+        {isCopied ? <CheckIcon className="size-3 text-primary" /> : <CopyIcon className="size-3" />}
+      </Button>
+    </div>
+  );
+}
+
 const UNITY_BRING_TO_FRONT_REASON = "Bringing the Unity Editor to the front isn't wired up yet.";
 const UNITY_PAUSE_UNAVAILABLE_REASON = "Nothing is playing to pause.";
 const UNITY_PERMISSION_REASON =
@@ -270,6 +313,8 @@ function UnityControlCluster(props: {
       <UnityIcon className="size-3.5" />
       <span className="ml-0.5">Setup Integrations</span>
     </Button>
+  ) : view.unityCliMissing ? (
+    <UnityCliMissingRemedy message={unavailableReason} />
   ) : (
     <Tooltip>
       <TooltipTrigger
