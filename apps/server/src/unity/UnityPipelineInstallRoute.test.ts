@@ -610,6 +610,165 @@ describe("dispatchUnityPipelineInstall", () => {
           expect(spy.calls.map((call) => call.method)).toEqual(["install", "list"]);
         }).pipe(Effect.provide(NodeServices.layer)),
     );
+
+    // Round-18 observability gap: this route's own packageResolve outcome
+    // was completely invisible in server logs — no span, no log line for
+    // "invoked" or "skipped_no_editor" at all (only "failed" had one) — so
+    // round-18's forensics could not tell whether the nudge ran, was
+    // skipped, or failed; only Editor.log's OWN timestamps, read minutes
+    // later, hinted the import started late. Captured-logger pattern (this
+    // file's own merge-gate R1 tests, above) — a branch-result assertion
+    // alone would pass even with the log call deleted entirely, so each
+    // test here pins something the log call SPECIFICALLY carries, not just
+    // "some log exists."
+    describe("round-18: the packageResolve outcome is now logged (was previously invisible)", () => {
+      function captureLogger(): {
+        readonly messages: Array<unknown>;
+        readonly layer: Layer.Layer<never>;
+      } {
+        const messages: Array<unknown> = [];
+        const logger = Logger.make<unknown, void>((options) => {
+          if (Array.isArray(options.message)) {
+            messages.push(...options.message);
+          } else {
+            messages.push(options.message);
+          }
+        });
+        return { messages, layer: Logger.layer([logger], { mergeWithExisting: false }) };
+      }
+
+      function findPackageResolveLog(
+        messages: ReadonlyArray<unknown>,
+      ): Record<string, unknown> | undefined {
+        return messages.find(
+          (message): message is Record<string, unknown> =>
+            typeof message === "object" && message !== null && "packageResolve" in message,
+        );
+      }
+
+      it.effect("logs 'invoked' for a live matched RUNNING instance", () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-resolve-log-invoked-",
+          });
+          const list = (root: string) =>
+            Effect.succeed({
+              _tag: "ok" as const,
+              value: {
+                instances: [liveMatchedInstance(root)],
+                latestVersion: null,
+                unparseableInstanceCount: 0,
+              },
+            });
+          const spy = makeUnityPipelineClientSpy({ list });
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const { messages, layer } = captureLogger();
+
+          yield* runDispatchTest(spy, makeSession([AuthPresenceCommandScope]), projection).pipe(
+            Effect.provide(layer),
+          );
+
+          const log = findPackageResolveLog(messages);
+          expect(log).toBeDefined();
+          expect(log?.packageResolve).toBe("invoked");
+          expect(log?.skipReason).toBeUndefined();
+        }).pipe(Effect.provide(NodeServices.layer)),
+      );
+
+      it.effect(
+        "logs 'skipped_no_editor' with a DISTINCT reason for 'no matched instance' vs 'matched but not running'",
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+
+            const noMatchWorkspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "t3code-unity-pipeline-install-resolve-log-nomatch-",
+            });
+            const noMatchSpy = makeUnityPipelineClientSpy(); // default: empty instances
+            const noMatchProjection = makeProjectionSnapshotQuerySpy(
+              makeProject(noMatchWorkspaceRoot),
+            );
+            const noMatchCapture = captureLogger();
+            yield* runDispatchTest(
+              noMatchSpy,
+              makeSession([AuthPresenceCommandScope]),
+              noMatchProjection,
+            ).pipe(Effect.provide(noMatchCapture.layer));
+            const noMatchLog = findPackageResolveLog(noMatchCapture.messages);
+
+            const staleWorkspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "t3code-unity-pipeline-install-resolve-log-stale-",
+            });
+            const staleList = (root: string) =>
+              Effect.succeed({
+                _tag: "ok" as const,
+                value: {
+                  instances: [liveMatchedInstance(root, { isRunning: false, pid: null })],
+                  latestVersion: null,
+                  unparseableInstanceCount: 0,
+                },
+              });
+            const staleSpy = makeUnityPipelineClientSpy({ list: staleList });
+            const staleProjection = makeProjectionSnapshotQuerySpy(makeProject(staleWorkspaceRoot));
+            const staleCapture = captureLogger();
+            yield* runDispatchTest(
+              staleSpy,
+              makeSession([AuthPresenceCommandScope]),
+              staleProjection,
+            ).pipe(Effect.provide(staleCapture.layer));
+            const staleLog = findPackageResolveLog(staleCapture.messages);
+
+            expect(noMatchLog).toBeDefined();
+            expect(staleLog).toBeDefined();
+            expect(noMatchLog?.packageResolve).toBe("skipped_no_editor");
+            expect(staleLog?.packageResolve).toBe("skipped_no_editor");
+            expect(typeof noMatchLog?.skipReason).toBe("string");
+            expect(typeof staleLog?.skipReason).toBe("string");
+            // The load-bearing assertion: these two skip reasons must be
+            // genuinely DIFFERENT strings, not the same generic "skipped"
+            // filler — a vacuous implementation (log the tag alone, no real
+            // reason) would pass every assertion above this one.
+            expect(noMatchLog?.skipReason).not.toBe(staleLog?.skipReason);
+          }).pipe(Effect.provide(NodeServices.layer)),
+      );
+
+      it.effect(
+        "logs 'failed' with the underlying outcome when a live editor's resolve call itself fails",
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+              prefix: "t3code-unity-pipeline-install-resolve-log-failed-",
+            });
+            const list = (root: string) =>
+              Effect.succeed({
+                _tag: "ok" as const,
+                value: {
+                  instances: [liveMatchedInstance(root)],
+                  latestVersion: null,
+                  unparseableInstanceCount: 0,
+                },
+              });
+            const packageResolve = () =>
+              Effect.succeed({
+                _tag: "error" as const,
+                message: "Cannot connect to Unity Editor Pipeline server at 127.0.0.1:7801",
+              });
+            const spy = makeUnityPipelineClientSpy({ list, packageResolve });
+            const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+            const { messages, layer } = captureLogger();
+
+            yield* runDispatchTest(spy, makeSession([AuthPresenceCommandScope]), projection).pipe(
+              Effect.provide(layer),
+            );
+
+            const log = findPackageResolveLog(messages);
+            expect(log).toBeDefined();
+            expect(log?.packageResolve).toBe("failed");
+          }).pipe(Effect.provide(NodeServices.layer)),
+      );
+    });
   });
 
   it.effect("caps the project-title portion of the minted credential label", () =>
@@ -662,7 +821,11 @@ describe("dispatchUnityPipelineInstall", () => {
         isAlreadyPaired: () => Effect.succeed(false),
         issuePairingCredential: () => Effect.succeed({ credential: "PAIRING1234" }),
       }).pipe(Effect.provideService(FileSystem.FileSystem, recordingFileSystem));
-      const outcome = yield* handoff.prepare({ workspaceRoot, projectTitle: "Deepmind" });
+      const outcome = yield* handoff.prepare({
+        workspaceRoot,
+        projectTitle: "Deepmind",
+        forceMint: false,
+      });
       const pairingPath = path.join(
         workspaceRoot,
         "Library/com.devgame.editor-presence/pairing.json",
@@ -675,6 +838,173 @@ describe("dispatchUnityPipelineInstall", () => {
       expect(yield* fileSystem.readDirectory(path.dirname(pairingPath))).toEqual(["pairing.json"]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+
+  // Round-18 live finding (2026-08-11, evidence/qa-round18/REPORT.md + server
+  // trace): the S14 upgrade CTA rendered and the click ran —
+  // `installUnityEmbeddedSelectionPackage` succeeded, legacy swept from disk
+  // — then `prepare`'s `alreadyPaired` early-exit fired because a publisher
+  // WAS registered: the LEGACY package's own, the very one this same call
+  // just swept. No credential was minted, no pairing.json written. On
+  // Unity's next reload, that legacy publisher died with its package, the
+  // new package loaded with nothing to redeem, and the project ended up
+  // unpaired (CTA back, S10) — the one-click migration promise broken for
+  // exactly the legacy population it exists to serve.
+  describe("round-18: forceMint bypasses a stale alreadyPaired read after a legacy sweep", () => {
+    it.effect(
+      "a REGISTERED publisher mints anyway when forceMint is true — the alreadyPaired early-exit is bypassed",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pairing-force-mint-",
+          });
+          let issueCallCount = 0;
+          const handoff = yield* UnityPairingHandoff.make({
+            serverUrl: "http://127.0.0.1:3773",
+            isAlreadyPaired: () => Effect.succeed(true),
+            issuePairingCredential: () => {
+              issueCallCount += 1;
+              return Effect.succeed({ credential: "PAIRING1234" });
+            },
+          });
+          const outcome = yield* handoff.prepare({
+            workspaceRoot,
+            projectTitle: "Deepmind",
+            forceMint: true,
+          });
+
+          expect(outcome).toEqual({ _tag: "minted" });
+          expect(issueCallCount).toBe(1);
+          const pairingPath = path.join(
+            workspaceRoot,
+            "Library/com.devgame.editor-presence/pairing.json",
+          );
+          expect(yield* fileSystem.exists(pairingPath)).toBe(true);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "WITHOUT forceMint, a registered publisher still short-circuits exactly as before — the healthy-paired-project direction stays correct",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pairing-no-force-mint-",
+          });
+          let issueCallCount = 0;
+          const handoff = yield* UnityPairingHandoff.make({
+            serverUrl: "http://127.0.0.1:3773",
+            isAlreadyPaired: () => Effect.succeed(true),
+            issuePairingCredential: () => {
+              issueCallCount += 1;
+              return Effect.succeed({ credential: "PAIRING1234" });
+            },
+          });
+          const outcome = yield* handoff.prepare({
+            workspaceRoot,
+            projectTitle: "Deepmind",
+            forceMint: false,
+          });
+
+          expect(outcome).toEqual({ _tag: "alreadyPaired" });
+          expect(issueCallCount).toBe(0);
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "the ROUTE forces the mint when the legacy sweep actually removed something this same call — the exact live repro",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-repair-",
+          });
+          const legacyPackagesDirectory = path.join(
+            workspaceRoot,
+            "Packages",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(legacyPackagesDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyPackagesDirectory, "package.json"),
+            encodeJson({ name: LEGACY_UNITY_SELECTION_PACKAGE_ID, version: "0.3.1" }),
+          );
+
+          const spy = makeUnityPipelineClientSpy();
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          // The publisher registered here IS the legacy package's own —
+          // `isAlreadyPaired` reading `true` is exactly round-18's live
+          // symptom, not a fixture mistake.
+          const pairing = makeUnityPairingHandoffSpy({ alreadyPaired: true });
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+            pairing,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.selectionPackage.legacyCleanup).toEqual({
+            packagesDirectory: "removed",
+            libraryDirectory: "absent",
+          });
+          // The bug: this used to be `{ _tag: "alreadyPaired" }` with NO
+          // pairing.json ever written.
+          expect(outcome.value.pairingOutcome).toEqual({ _tag: "minted" });
+          expect(pairing.issued).toHaveLength(1);
+          const pairingFile = yield* fileSystem.readFileString(
+            path.join(workspaceRoot, "Library/com.devgame.editor-presence/pairing.json"),
+          );
+          expect(yield* decodePairingFile(pairingFile)).toEqual({
+            serverUrl: "http://127.0.0.1:3773",
+            pairingCredential: "PAIRING1234",
+          });
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+
+    it.effect(
+      "the ROUTE also forces the mint when only the stranded Library legacy directory was swept — libraryDirectory 'removed' alone counts too, not just packagesDirectory",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3code-unity-pipeline-install-legacy-library-repair-",
+          });
+          const legacyLibraryDirectory = path.join(
+            workspaceRoot,
+            "Library",
+            LEGACY_UNITY_SELECTION_PACKAGE_ID,
+          );
+          yield* fileSystem.makeDirectory(legacyLibraryDirectory, { recursive: true });
+          yield* fileSystem.writeFileString(
+            path.join(legacyLibraryDirectory, "pairing.json"),
+            "stale",
+          );
+
+          const spy = makeUnityPipelineClientSpy();
+          const projection = makeProjectionSnapshotQuerySpy(makeProject(workspaceRoot));
+          const pairing = makeUnityPairingHandoffSpy({ alreadyPaired: true });
+          const outcome = yield* runDispatchTest(
+            spy,
+            makeSession([AuthPresenceCommandScope]),
+            projection,
+            pairing,
+          );
+
+          expect(outcome._tag).toBe("ok");
+          if (outcome._tag !== "ok" || outcome.value._tag !== "ok") return;
+          expect(outcome.value.selectionPackage.legacyCleanup).toEqual({
+            packagesDirectory: "absent",
+            libraryDirectory: "removed",
+          });
+          expect(outcome.value.pairingOutcome).toEqual({ _tag: "minted" });
+        }).pipe(Effect.provide(NodeServices.layer)),
+    );
+  });
 
   it.effect("same selection-package version is a no-op success", () =>
     Effect.gen(function* () {
@@ -1228,6 +1558,11 @@ describe("dispatchUnityPipelineInstall", () => {
     );
   });
 
+  // The "no legacy present" direction of the round-18 fix above: a healthy
+  // paired project (no legacy directory on disk at all, so
+  // `legacyCleanup` reads all-"absent" and the route never sets
+  // `forceMint`) must keep this exact quiet behavior — the fix only
+  // changes what happens WHEN a legacy sweep actually occurred.
   it.effect("an already-registered selection publisher skips minting entirely", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

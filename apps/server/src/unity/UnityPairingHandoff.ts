@@ -55,6 +55,22 @@ export class UnityPairingHandoff extends Context.Service<
     readonly prepare: (input: {
       readonly workspaceRoot: string;
       readonly projectTitle: string;
+      /** Round-18 live finding (evidence/qa-round18/REPORT.md): a
+       * REGISTERED publisher does not by itself mean "already correctly
+       * paired" — it can be the LEGACY package's own publisher, the exact
+       * one a same-call legacy sweep (`UnityEmbeddedSelectionPackage.ts`'s
+       * `removeLegacySelectionPackageArtifacts`) just removed from disk.
+       * That publisher's EditorPrefs credential namespace dies with its
+       * package on Unity's next reload, so `alreadyPaired`'s usual
+       * "nothing to do" early-exit is a false comfort precisely then —
+       * `true` bypasses it and mints a fresh credential regardless of
+       * `isAlreadyPaired`'s answer. `UnityPipelineInstallRoute.ts` is the
+       * only caller that ever sets this `true`, and only when its own
+       * legacy-cleanup outcome shows something was actually swept THIS
+       * call — every other caller (including a request made with Unity
+       * simply closed, or a healthy already-paired project) passes
+       * `false`, preserving the original quiet "nothing to do" behavior. */
+      readonly forceMint: boolean;
     }) => Effect.Effect<UnityPipelinePairingOutcome>;
   }
 >()("t3/unity/UnityPairingHandoff") {}
@@ -91,7 +107,14 @@ export const make = Effect.fn("UnityPairingHandoff.make")(function* (
         reason: "Could not determine whether Unity is already paired.",
       } as const;
     }
-    if (registration.registered) {
+    // `!input.forceMint`: round-18's fix. A registered publisher normally
+    // means "nothing to do," but the caller may have positive evidence
+    // that THIS registration belongs to a package it just swept off disk
+    // (see this field's own doc comment on the service interface above) —
+    // in that specific case, treating "registered" as "already correctly
+    // paired" is exactly the bug that broke the one-click migration promise
+    // for legacy installs.
+    if (registration.registered && !input.forceMint) {
       return { _tag: "alreadyPaired" } as const;
     }
 

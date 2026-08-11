@@ -166,10 +166,26 @@ export const dispatchUnityPipelineInstall = (
     // (evidence/qa-round9/REPORT.md) was gathered under the old ordering —
     // this removes the needless race rather than relying on the poll to
     // paper over it.
+    // Round-18 live finding (evidence/qa-round18/REPORT.md + server trace):
+    // a REGISTERED publisher does not mean "already correctly paired" when
+    // it's the LEGACY package's own publisher — the exact one the sweep
+    // just above may have just removed from disk. That publisher dies with
+    // its package on Unity's next reload, so `UnityPairingHandoff.prepare`'s
+    // usual `alreadyPaired` early-exit would be a false comfort here: no
+    // credential minted, no pairing.json written, and the project ends up
+    // unpaired once the legacy publisher is gone. `forceMint` is `true`
+    // exactly when THIS call's own legacy sweep actually removed something
+    // — never a broader "any legacy id ever seen" guess.
+    const legacyCleanup = selectionPackage.legacyCleanup;
+    const forceMint =
+      legacyCleanup !== undefined &&
+      (legacyCleanup.packagesDirectory === "removed" ||
+        legacyCleanup.libraryDirectory === "removed");
     const pairingHandoff = yield* UnityPairingHandoff.UnityPairingHandoff;
     const pairingOutcome = yield* pairingHandoff.prepare({
       workspaceRoot,
       projectTitle: lookup.project.value.title,
+      forceMint,
     });
 
     // Task #130's zero-touch wire: an Auto-Refresh-OFF Editor does not
@@ -194,6 +210,16 @@ export const dispatchUnityPipelineInstall = (
           ) ?? null)
         : null;
     let packageResolve: UnityPackageResolveOutcome;
+    // Round-18 observability gap: this outcome used to be invisible for
+    // BOTH the "invoked" and "skipped_no_editor" cases (only "failed" had
+    // any log line at all), which cost real forensic time — round-18's own
+    // trace could not tell whether the nudge ran, was skipped, or failed;
+    // only Editor.log's own mtime, read minutes later, hinted the import
+    // started late. `packageResolveLogDetail` carries whatever extra
+    // context each branch can distinguish cheaply (the CLI's own outcome
+    // when failed; WHY when skipped) into the one unconditional log line
+    // below, rather than adding a second logging call per branch.
+    let packageResolveLogDetail: Record<string, unknown> = {};
     if (liveMatch !== null && liveMatch.isRunning) {
       const resolveResult = yield* client.packageResolve(workspaceRoot);
       if (resolveResult._tag === "ok") {
@@ -201,18 +227,26 @@ export const dispatchUnityPipelineInstall = (
       } else {
         // Non-fatal to the install either way — the embedded package copy
         // already succeeded; this is only a best-effort nudge so the user
-        // doesn't have to refocus Unity themselves. Logged so a real
-        // pattern of failures is visible without making the install itself
-        // report an error over a resolver nudge.
+        // doesn't have to refocus Unity themselves.
         packageResolve = "failed";
-        yield* Effect.logWarning("unity package_resolve failed after install (non-fatal)", {
-          workspaceRoot,
-          outcome: resolveResult,
-        });
+        packageResolveLogDetail = { outcome: resolveResult };
       }
     } else {
       packageResolve = "skipped_no_editor";
+      packageResolveLogDetail = {
+        skipReason:
+          listResult._tag !== "ok"
+            ? "pipeline list itself failed"
+            : liveMatch === null
+              ? "no matched instance for this project"
+              : "matched instance is not running (stale lock)",
+      };
     }
+    yield* Effect.logInfo("unity package_resolve outcome after install", {
+      workspaceRoot,
+      packageResolve,
+      ...packageResolveLogDetail,
+    });
     return {
       _tag: "ok",
       value: { ...pipeline, selectionPackage, pairingOutcome, packageResolve },
