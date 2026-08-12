@@ -1,14 +1,15 @@
 import * as Effect from "effect/Effect";
-import type {
-  PreviewAutomationOperation,
-  PreviewAutomationOpenInput,
-  PreviewAutomationRecordingArtifact,
-  PreviewAutomationRecordingStatus,
-  PreviewAutomationResizeResult,
-  PreviewAutomationSetColorSchemeResult,
-  PreviewAutomationSnapshot,
-  PreviewAutomationStatus,
-  PreviewTabId,
+import {
+  PreviewAutomationUnavailableError,
+  type PreviewAutomationOperation,
+  type PreviewAutomationOpenInput,
+  type PreviewAutomationRecordingArtifact,
+  type PreviewAutomationRecordingStatus,
+  type PreviewAutomationResizeResult,
+  type PreviewAutomationSetColorSchemeResult,
+  type PreviewAutomationSnapshot,
+  type PreviewAutomationStatus,
+  type PreviewTabId,
 } from "@t3tools/contracts";
 
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
@@ -27,7 +28,9 @@ export function normalizePreviewOpenInput(
   };
 }
 
-const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
+// Exported so its capability-error translation (task #116) can be unit
+// tested directly, without standing up the full toolkit invocation path.
+export const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   operation: PreviewAutomationOperation,
   input: unknown,
   timeoutMs?: number,
@@ -37,7 +40,24 @@ const invoke = Effect.fn("PreviewToolkit.invoke")(function* <A>(
   import("@t3tools/contracts").PreviewAutomationError,
   McpInvocationContext.McpInvocationContext | PreviewAutomationBroker.PreviewAutomationBroker
 > {
-  const scope = yield* McpInvocationContext.requireMcpCapability("preview");
+  // requireMcpCapability now fails with the fork-owned, capability-generic
+  // McpCapabilityUnavailableError (task #116). Every preview tool's declared
+  // failure is still the vendor PreviewAutomationError union, so translate
+  // back here — this is the ONE call site that requests "preview", making
+  // the translation total, not partial.
+  const scope = yield* McpInvocationContext.requireMcpCapability("preview").pipe(
+    Effect.catchTag("McpCapabilityUnavailableError", (error) =>
+      Effect.fail(
+        new PreviewAutomationUnavailableError({
+          capability: "preview",
+          environmentId: error.environmentId,
+          threadId: error.threadId,
+          providerSessionId: error.providerSessionId,
+          providerInstanceId: error.providerInstanceId,
+        }),
+      ),
+    ),
+  );
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   return yield* broker.invoke<A>({
     scope,

@@ -128,6 +128,7 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
+        // Stays preview-only pending an owner ruling — docs/v2/OWNER_DOCKET.md D2.
         capabilities: new Set(["preview"]),
         issuedAt,
       };
