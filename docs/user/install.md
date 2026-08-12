@@ -8,14 +8,9 @@ game development (Unity integration, dockable panels, editor presence). It is a 
 
 Grab the latest build from [GitHub Releases](https://github.com/piero-dev25/devgame/releases).
 
-Releases are currently an **unsigned alpha**. macOS Gatekeeper will refuse to open the app on
-first launch ("cannot be opened because Apple cannot check it for malicious software"). Work
-around it one of these ways:
-
-- Right-click `"DevGame (Alpha).app"` → **Open** → **Open** in the dialog that appears.
-- Or launch it once (it will be blocked), then go to **System Settings → Privacy & Security**
-  and click **Open Anyway** next to the DevGame (Alpha) entry.
-- Or strip the quarantine flag directly: `xattr -d com.apple.quarantine "/path/to/DevGame (Alpha).app"`
+The released macOS build is **code-signed (Developer ID) and notarized by Apple** — it opens
+like any normal download, no security warnings. Only self-built binaries are unsigned; see
+[build-from-source.md](./build-from-source.md) for the one-time right-click-Open those need.
 
 ## No Package Registry Yet
 
