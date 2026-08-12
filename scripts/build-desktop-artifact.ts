@@ -1875,10 +1875,20 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   // electron-builder is filtering out stageResourcesDir directory in the AppImage for production
   yield* fs.copy(stageResourcesDir, path.join(stageAppDir, "apps/desktop/prod-resources"));
 
+  // Fork note (DevGame): passkey entitlements are OPTIONAL for signed mac
+  // builds. Upstream couples signed===true to an Associated Domains
+  // provisioning profile for its own passkey RP domains; the fork does not
+  // serve those domains, so a signed build WITHOUT
+  // T3CODE_MACOS_PROVISIONING_PROFILE gets plain Developer ID signing +
+  // notarization and no passkey entitlements. Setting the profile env
+  // restores upstream's full behavior unchanged.
+  const repoEnvForMacSigning =
+    options.platform === "mac" && options.signed ? loadRepoEnv({ repoRoot }) : undefined;
   const configuredMacPasskeySigning =
-    options.platform === "mac" && options.signed
+    repoEnvForMacSigning !== undefined &&
+    (repoEnvForMacSigning.T3CODE_MACOS_PROVISIONING_PROFILE?.trim() ?? "").length > 0
       ? yield* Effect.try({
-          try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
+          try: () => resolveMacPasskeySigningConfiguration(repoEnvForMacSigning),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
         })
       : undefined;
