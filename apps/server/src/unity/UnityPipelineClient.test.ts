@@ -440,6 +440,36 @@ function authoringCommandEnvelope(command: string, result: unknown): string {
   });
 }
 
+/** `eval`'s REAL shape (fix round: live-found via Mafia Game, the review's
+ * earlier-REFUTED "data.result nesting" finding, proven real). Unlike
+ * `import_asset`/`set_import_settings` (whose `data.result` IS their
+ * payload directly — real captures, verified live), `eval`'s `data.result`
+ * is a SECOND, EXECUTION-level envelope Pipeline wraps every invocation
+ * in: `{ output, diagnostics, success, command, result: <the actual C#
+ * return>, executionTimeMs, message, error, errorDetails, executedAt }`.
+ * The OLD `authoringCommandEnvelope("eval", stats)` fixture below (still
+ * used by `import_asset`/`set_import_settings`) skipped this second layer
+ * entirely — exactly why the old eval test never caught the bug. */
+function evalExecutionEnvelope(input: {
+  readonly success: boolean;
+  readonly result?: unknown;
+  readonly error?: string | null;
+  readonly errorDetails?: unknown;
+}): string {
+  return authoringCommandEnvelope("eval", {
+    output: "",
+    diagnostics: [],
+    success: input.success,
+    command: "eval",
+    result: input.result ?? null,
+    executionTimeMs: 12,
+    message: input.success ? "OK" : "Error",
+    error: input.error ?? null,
+    errorDetails: input.errorDetails ?? null,
+    executedAt: "2026-08-12T05:37:44.259213Z",
+  });
+}
+
 describe("generated-asset authoring commands", () => {
   it.effect(
     "importAsset passes both required named parameters, explicit project path, and pinned cwd",
@@ -508,23 +538,75 @@ describe("generated-asset authoring commands", () => {
       }),
   );
 
-  it.effect("eval passes C# positionally and preserves the raw data.result value", () =>
-    Effect.gen(function* () {
-      const code =
-        'return new { triangles = 5996, materials = 1, asset = "Assets/DevGame/barrel/model.fbx" };';
-      const stats = { triangles: 5996, materials: 1 };
-      const seen: Array<ProcessRunner.ProcessRunInput> = [];
-      const runner = (input: ProcessRunner.ProcessRunInput) => {
-        seen.push(input);
-        return okOutput(authoringCommandEnvelope("eval", stats));
-      };
-      const result = yield* withClient(runner, (client) => client.eval(PROJECT, code));
+  it.effect(
+    "eval passes C# positionally and unwraps the DOUBLE-nested execution envelope to the C# return value",
+    () =>
+      Effect.gen(function* () {
+        const code =
+          'return new { triangles = 5996, materials = 1, asset = "Assets/DevGame/barrel/model.fbx" };';
+        const stats = { triangles: 5996, materials: 1 };
+        const seen: Array<ProcessRunner.ProcessRunInput> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seen.push(input);
+          return okOutput(evalExecutionEnvelope({ success: true, result: stats }));
+        };
+        const result = yield* withClient(runner, (client) => client.eval(PROJECT, code));
 
-      expect(result).toEqual({ _tag: "ok", value: stats });
-      expect(seen).toHaveLength(1);
-      expect(seen[0]?.args).toEqual(["command", "eval", code, "--project-path", PROJECT, "--json"]);
-      expect(seen[0]?.cwd).toBe(PROJECT);
-    }),
+        // Red-prove-by-shape: the raw execution envelope this fixture sends
+        // has `success`/`command`/`executedAt`/etc alongside `result` — if
+        // the unwrap were missing (or unwrapped the wrong level), `result`
+        // would equal the WHOLE envelope object, not just `stats`. This
+        // assertion only passes if exactly the inner `result` field made it
+        // through.
+        expect(result).toEqual({ _tag: "ok", value: stats });
+        expect(seen).toHaveLength(1);
+        expect(seen[0]?.args).toEqual([
+          "command",
+          "eval",
+          code,
+          "--project-path",
+          PROJECT,
+          "--json",
+        ]);
+        expect(seen[0]?.cwd).toBe(PROJECT);
+      }),
+  );
+
+  it.effect(
+    "eval surfaces a C# exception INSIDE the snippet as a non-ok result, even though the outer CLI call succeeded",
+    () =>
+      Effect.gen(function* () {
+        const runner = () =>
+          okOutput(
+            evalExecutionEnvelope({
+              success: false,
+              error: "NullReferenceException: Object reference not set to an instance of an object",
+            }),
+          );
+        const result = yield* withClient(runner, (client) => client.eval(PROJECT, "return 1;"));
+
+        expect(result._tag).toBe("error");
+        expect(result).toMatchObject({
+          _tag: "error",
+          message: "NullReferenceException: Object reference not set to an instance of an object",
+        });
+      }),
+  );
+
+  it.effect(
+    "eval returns a clean error (not a crash) when data.result isn't an execution envelope",
+    () =>
+      Effect.gen(function* () {
+        // Defensive path: a `data.result` that doesn't even look like the
+        // execution-envelope shape (no boolean `success` field) — same "don't
+        // guess at an unfamiliar shape" posture as this module's other
+        // parsers.
+        const runner = () =>
+          okOutput(authoringCommandEnvelope("eval", { triangles: 5996, materials: 1 }));
+        const result = yield* withClient(runner, (client) => client.eval(PROJECT, "return 1;"));
+
+        expect(result._tag).toBe("error");
+      }),
   );
 
   it.effect("all three commands preserve the existing notReady classification", () =>

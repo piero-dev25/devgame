@@ -214,6 +214,52 @@ function extractEnvelopeResult(data: unknown): unknown {
   return isRecord(data) && "result" in data ? data.result : undefined;
 }
 
+/** Fix round (Increment 2a live acceptance, Mafia Game): `eval`'s
+ * `data.result` is NOT the C# return value like every other
+ * `runEditorCommand` caller's is — it's a SECOND, EXECUTION-level envelope
+ * Pipeline wraps every eval invocation in: `{ success, result: <the real
+ * C# return>, error, errorDetails, output, diagnostics, executionTimeMs,
+ * message, executedAt }`. `extractEnvelopeResult` above already unwrapped
+ * the OUTER `data.result` step; this unwraps the SECOND, eval-specific
+ * layer underneath it — scoped to `eval` alone (verified live:
+ * `import_asset`/`set_import_settings` discard `.value` entirely,
+ * `editor_status`/`play`/`stop`/`pause` have their own single-level
+ * parsers that were never wrong).
+ *
+ * This also closes a real correctness gap, not just a shape mismatch:
+ * before this fix, only the OUTER `unity command eval` CLI invocation's
+ * own success was checked — a C# exception INSIDE the snippet (e.g.
+ * `bind_material`'s `LoadAssetAtPath` returning null and throwing a
+ * NullReferenceException) still reported `_tag: "ok"`, so a failed
+ * material bind could be silently reported as a successful import.
+ *
+ * Parses defensively, same "don't guess at an unfamiliar shape" posture
+ * as every other parser in this module: a `data.result` that isn't even
+ * shaped like an execution envelope (no boolean `success` field) becomes
+ * a generic `error`, never a crash and never a false `ok`. */
+function unwrapEvalExecutionResult(
+  result: UnityPipelineResult<unknown>,
+): UnityPipelineResult<unknown> {
+  if (result._tag !== "ok") return result;
+  const envelope = result.value;
+  if (!isRecord(envelope) || typeof envelope.success !== "boolean") {
+    return {
+      _tag: "error",
+      message: "'unity command eval' returned an unrecognised execution envelope shape",
+    };
+  }
+  if (!envelope.success) {
+    const errorMessage =
+      typeof envelope.error === "string" && envelope.error.length > 0
+        ? envelope.error
+        : envelope.errorDetails !== undefined
+          ? `eval execution failed: ${String(envelope.errorDetails)}`
+          : "eval execution failed with no error detail";
+    return { _tag: "error", message: errorMessage };
+  }
+  return { _tag: "ok", value: envelope.result };
+}
+
 const UNITY_PLAY_MODES: ReadonlySet<string> = new Set<UnityPlayMode>([
   "stopped",
   "playing",
@@ -596,7 +642,11 @@ export class UnityPipelineClient extends Context.Service<
         readonly settings: Readonly<Record<string, unknown>>;
       },
     ) => Effect.Effect<UnityPipelineResult<void>>;
-    /** Runs a harness-owned C# snippet and preserves Pipeline's raw result. */
+    /** Runs a harness-owned C# snippet and returns the snippet's OWN C#
+     * return value — unwrapped from Pipeline's execution envelope, see
+     * `unwrapEvalExecutionResult`'s doc comment. A C# exception thrown
+     * inside the snippet (not just a CLI-level failure) surfaces as a
+     * `_tag: "error"` result here, never a silent `ok`. */
     readonly eval: (
       workspaceRoot: string,
       code: string,
@@ -955,7 +1005,7 @@ export const make = Effect.gen(function* () {
     runEditorCommand("eval", workspaceRoot, {
       args: [code],
       cwd: workspaceRoot,
-    });
+    }).pipe(Effect.map(unwrapEvalExecutionResult));
 
   return UnityPipelineClient.of({
     isAvailable: () =>
