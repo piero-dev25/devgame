@@ -386,3 +386,24 @@ vertical spike" (CHARTER §49), with failure modes per step and where CHARTER
    one — CHARTER §14 already rules this out at the harness-tool-surface layer;
    noted here only to confirm Unity's own tool surface doesn't secretly offer one
    Pipeline could delegate to instead).
+
+---
+
+## Addendum (2026-08-11, orchestrator-verified live)
+
+**Unfocused Game View capture: VERIFIED WORKING.** With the Unity Editor
+fully backgrounded (terminal frontmost, no Unity focus for minutes),
+`unity command screenshot --project-path "<root>" --output /tmp/x.png`
+returned success and wrote a real rendered 1109×881 PNG (185 KB — actual
+scene content, not a blank buffer). The Q43 "unfocused?" flag is closed:
+an unattended generation→capture→agent-review loop does not need window
+focus.
+
+**Multi-editor gotcha (supersedes the cwd-pinning guidance for
+`command`):** with TWO editors running, `unity command <tool>` REFUSES
+cwd auto-detection — even when invoked from inside the project
+directory — and errors with "Multiple Unity Editor instances found";
+only `--project-path <root>` disambiguates. (`unity pipeline list`
+does honor cwd.) The generation toolkit must therefore ALWAYS pass
+`--project-path` explicitly and never rely on cwd, since a second
+editor being open is a normal end-user condition.
