@@ -136,26 +136,57 @@ describe("TripoProvider", () => {
     }).pipe(Effect.provide(layer));
   });
 
-  it.effect(
-    "fails with Model3dProviderError when no secret exists and the dev key file is absent",
-    () => {
-      const layer = Layer.effect(
-        Model3dProvider,
-        __testing.make({ devKeyPath: missingDevKeyPath }),
-      ).pipe(
+  // Merge-gate P0: the key used to be resolved EAGERLY in the layer's own
+  // build effect, so a missing/misconfigured Tripo key failed the WHOLE
+  // MCP server layer at boot — taking preview_* down too, for a user who
+  // never touched generation. The fix (`Effect.cached`, this file's own
+  // comment) defers the read to the first actual provider call. This test
+  // asserts BOTH halves of that fix, not just the failure: the layer must
+  // build cleanly with no secret and no dev key file present, and only a
+  // subsequent submitTextTo3d call may fail.
+  describe("credential resolution is lazy (merge-gate P0)", () => {
+    const makeUnconfiguredLayer = () =>
+      Layer.effect(Model3dProvider, __testing.make({ devKeyPath: missingDevKeyPath })).pipe(
         Layer.provide(
           Layer.succeed(
             HttpClient.HttpClient,
-            HttpClient.make(() => Effect.die("unreachable")),
+            HttpClient.make(() => Effect.die("unreachable — no HTTP call should happen")),
           ),
         ),
         Layer.provide(makeSecretStoreLayer()),
         Layer.provide(NodeServices.layer),
       );
-      return Effect.gen(function* () {
-        const error = yield* Effect.flip(Effect.provide(Model3dProvider, layer));
-        expect(error).toBeInstanceOf(Model3dProviderError);
-      });
-    },
-  );
+
+    it.effect("builds the provider layer successfully with no secret and no dev key file", () =>
+      Effect.gen(function* () {
+        // Merely acquiring the service is layer construction — if the key
+        // were still resolved eagerly, THIS would throw, not the call
+        // below.
+        const provider = yield* Model3dProvider;
+        expect(provider).toBeDefined();
+      }).pipe(Effect.provide(makeUnconfiguredLayer())),
+    );
+
+    it.effect(
+      "fails a submitTextTo3d call (not layer construction) with Model3dProviderError when unconfigured",
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* Model3dProvider;
+          const error = yield* Effect.flip(provider.submitTextTo3d({ prompt: "a barrel" }));
+          expect(error).toBeInstanceOf(Model3dProviderError);
+        }).pipe(Effect.provide(makeUnconfiguredLayer())),
+    );
+
+    it.effect(
+      "caches the failure across calls — a second call does not re-read the filesystem",
+      () =>
+        Effect.gen(function* () {
+          const provider = yield* Model3dProvider;
+          const first = yield* Effect.flip(provider.pollTask("task-1"));
+          const second = yield* Effect.flip(provider.pollTask("task-1"));
+          expect(first).toBeInstanceOf(Model3dProviderError);
+          expect(second).toBeInstanceOf(Model3dProviderError);
+        }).pipe(Effect.provide(makeUnconfiguredLayer())),
+    );
+  });
 });

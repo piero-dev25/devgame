@@ -1,13 +1,31 @@
 import { expect, it } from "@effect/vitest";
 import { NodeHttpServer } from "@effect/platform-node";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId, PreviewTabId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  GeneratedAssetId,
+  GenerationJobId,
+  PreviewTabId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type GeneratedAsset,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai";
-import { HttpBody, HttpClient, HttpRouter, HttpServerResponse } from "effect/unstable/http";
+import {
+  HttpBody,
+  HttpClient,
+  HttpClientResponse,
+  HttpRouter,
+  HttpServerResponse,
+} from "effect/unstable/http";
 
+import * as GenerationService from "../generation/GenerationService.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -271,4 +289,145 @@ it.effect("registers annotated tools and preserves authenticated request context
       expect(press.content).toEqual([{ type: "text", text: "null" }]);
     }),
   ).pipe(Effect.provide(TestLayer)),
+);
+
+// Merge-gate P3 #8: `registerInspectGeneration`'s own transport-layer
+// logic (image-block assembly, degrade-on-failure) has no direct coverage
+// — `inspectGeneration` (the exported handler) is unit-tested in
+// handlers.test.ts, but that never exercises the manual `server.addTool`
+// registration this file owns, which is what actually runs in the LIVE
+// acceptance. Wired against a FAKE GenerationService (not a real Tripo job
+// lifecycle — that's GenerationService.test.ts's job) so this stays a
+// focused test of the registration's own assembly logic.
+const generationProjectId = ProjectId.make("project-mcp-inspect-test");
+const generationThreadId = ThreadId.make("thread-mcp-inspect-test");
+const generationInvocation = {
+  ...invocation,
+  threadId: generationThreadId,
+  capabilities: new Set(["preview", "generation"] as const),
+};
+const succeededAssetId = GeneratedAssetId.make("asset-mcp-inspect-test");
+const succeededAsset: GeneratedAsset = {
+  id: succeededAssetId,
+  projectId: generationProjectId,
+  generationJobId: GenerationJobId.make("gen-mcp-inspect-test"),
+  modality: "model3d",
+  provider: "tripo",
+  files: { glb: "/state/generated/project-mcp-inspect-test/asset-mcp-inspect-test/model.glb" },
+  preview: { imageUrl: "https://tripo.example/render.png" },
+  metadata: { triangles: 100, materials: 1, images: 1, fileBytes: 1234 },
+  createdAt: 1,
+};
+
+const fakeGenerationService: GenerationService.GenerationServiceShape = {
+  createJob: () => Effect.die("unexpected createJob call"),
+  getJob: () => Effect.die("unexpected getJob call"),
+  listJobs: () => Effect.die("unexpected listJobs call"),
+  getAsset: (id) =>
+    Effect.succeed(id === succeededAssetId ? Option.some(succeededAsset) : Option.none()),
+  getAssetByJobId: () => Effect.die("unexpected getAssetByJobId call"),
+};
+
+const fakeProjectionSnapshotQuery: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"] = {
+  getCommandReadModel: () => Effect.die("unexpected getCommandReadModel call"),
+  getSnapshot: () => Effect.die("unexpected getSnapshot call"),
+  getShellSnapshot: () => Effect.die("unexpected getShellSnapshot call"),
+  getArchivedShellSnapshot: () => Effect.die("unexpected getArchivedShellSnapshot call"),
+  searchThreads: () => Effect.die("unexpected searchThreads call"),
+  getSnapshotSequence: () => Effect.die("unexpected getSnapshotSequence call"),
+  getCounts: () => Effect.die("unexpected getCounts call"),
+  getActiveProjectByWorkspaceRoot: () =>
+    Effect.die("unexpected getActiveProjectByWorkspaceRoot call"),
+  getProjectShellById: () => Effect.die("unexpected getProjectShellById call"),
+  getFirstActiveThreadIdByProjectId: () =>
+    Effect.die("unexpected getFirstActiveThreadIdByProjectId call"),
+  getActiveSpacesForProject: () => Effect.die("unexpected getActiveSpacesForProject call"),
+  getSpaceProjectId: () => Effect.die("unexpected getSpaceProjectId call"),
+  getThreadCheckpointContext: () => Effect.die("unexpected getThreadCheckpointContext call"),
+  getFullThreadDiffContext: () => Effect.die("unexpected getFullThreadDiffContext call"),
+  getThreadShellById: (threadId) =>
+    Effect.succeed(
+      threadId === generationThreadId
+        ? Option.some({ id: threadId, projectId: generationProjectId } as never)
+        : Option.none(),
+    ),
+  getThreadDetailById: () => Effect.die("unexpected getThreadDetailById call"),
+  getThreadDetailSnapshot: () => Effect.die("unexpected getThreadDetailSnapshot call"),
+};
+
+const makeGenerationInspectTestLayer = (imageHandler: Parameters<typeof HttpClient.make>[0]) =>
+  McpHttpServer.GenerationInspectRegistrationLive.pipe(
+    Layer.provide(Layer.succeed(GenerationService.GenerationService, fakeGenerationService)),
+    Layer.provide(
+      Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, fakeProjectionSnapshotQuery),
+    ),
+    Layer.provide(Layer.succeed(HttpClient.HttpClient, HttpClient.make(imageHandler))),
+    Layer.provideMerge(McpServer.McpServer.layer),
+  );
+
+it.effect(
+  "assembles an image content block alongside structured content when the preview image fetches cleanly",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const result = yield* server
+          .callTool({ name: "inspect_generation", arguments: { assetId: succeededAssetId } })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, generationInvocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+
+        expect(result.isError).toBe(false);
+        expect(result.structuredContent).toMatchObject({
+          id: succeededAssetId,
+          // absolute stateDir path never crosses the wire — merge-gate P2 #6+9
+          files: { glb: "generated/project-mcp-inspect-test/asset-mcp-inspect-test/model.glb" },
+        });
+        const imageBlock = result.content.find((c) => c.type === "image");
+        expect(imageBlock).toMatchObject({ type: "image", mimeType: "image/webp" });
+      }),
+    ).pipe(
+      Effect.provide(
+        makeGenerationInspectTestLayer((request) =>
+          Effect.sync(() =>
+            HttpClientResponse.fromWeb(
+              request,
+              new Response(new Uint8Array([1, 2, 3, 4]), {
+                status: 200,
+                headers: { "content-type": "image/webp" },
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "degrades to structured-content-only (no image block, isError:false) when the preview image fetch fails",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const result = yield* server
+          .callTool({ name: "inspect_generation", arguments: { assetId: succeededAssetId } })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, generationInvocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+
+        expect(result.isError).toBe(false);
+        expect(result.content.some((c) => c.type === "image")).toBe(false);
+        expect(result.structuredContent).toMatchObject({ id: succeededAssetId });
+      }),
+    ).pipe(
+      Effect.provide(
+        makeGenerationInspectTestLayer((request) =>
+          Effect.sync(() =>
+            HttpClientResponse.fromWeb(request, new Response("gone", { status: 500 })),
+          ),
+        ),
+      ),
+    ),
 );

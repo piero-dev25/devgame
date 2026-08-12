@@ -41,17 +41,10 @@ describe("inspectGlb", () => {
     expect(() => inspectGlb(bad)).toThrowError(GlbInspectionError);
   });
 
-  it("counts triangles via the POSITION fallback when a primitive has no indices", () => {
-    const document = {
-      accessors: [{ count: 9 }],
-      meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
-      materials: [],
-      images: [],
-    };
+  // Shared by the synthetic-document tests below — inline in each of them
+  // was starting to drown the actual assertion in header-packing ceremony.
+  function buildGlb(document: unknown): Uint8Array {
     const json = new TextEncoder().encode(JSON.stringify(document));
-    // Pad JSON to a 4-byte boundary the way a real glTF exporter would;
-    // inspectGlb does not require padding, but this keeps the fixture
-    // structurally realistic.
     const header = new Uint8Array(12);
     const view = new DataView(header.buffer);
     view.setUint32(0, 0x46546c67, true);
@@ -65,7 +58,66 @@ describe("inspectGlb", () => {
     glb.set(header, 0);
     glb.set(chunkHeader, header.length);
     glb.set(json, header.length + chunkHeader.length);
+    return glb;
+  }
 
+  it("counts triangles via the POSITION fallback when a primitive has no indices", () => {
+    const glb = buildGlb({
+      accessors: [{ count: 9 }],
+      meshes: [{ primitives: [{ attributes: { POSITION: 0 } }] }],
+      materials: [],
+      images: [],
+    });
     expect(inspectGlb(glb)).toEqual({ triangles: 3, materials: 0, images: 0 });
+  });
+
+  // Merge-gate P3 #13: `metadata.triangles` is client-facing ADVISORY
+  // data, not correctness-critical — a corrupt/hostile accessor.count
+  // (negative, non-integer, or absurdly large) must clamp to a harmless
+  // 0 contribution, never crash or overflow into a nonsense value.
+  describe("sanity-bounds absurd accessor counts (merge-gate P3 #13)", () => {
+    it("treats a negative accessor.count as a zero contribution", () => {
+      const glb = buildGlb({
+        accessors: [{ count: -6 }],
+        meshes: [{ primitives: [{ indices: 0 }] }],
+        materials: [],
+        images: [],
+      });
+      expect(inspectGlb(glb).triangles).toBe(0);
+    });
+
+    it("treats a non-integer accessor.count as a zero contribution", () => {
+      const glb = buildGlb({
+        accessors: [{ count: 9.5 }],
+        meshes: [{ primitives: [{ indices: 0 }] }],
+        materials: [],
+        images: [],
+      });
+      expect(inspectGlb(glb).triangles).toBe(0);
+    });
+
+    it("treats an accessor.count above the sanity ceiling as a zero contribution", () => {
+      const glb = buildGlb({
+        accessors: [{ count: Number.MAX_SAFE_INTEGER }],
+        meshes: [{ primitives: [{ indices: 0 }] }],
+        materials: [],
+        images: [],
+      });
+      expect(inspectGlb(glb).triangles).toBe(0);
+    });
+
+    it("still counts a sane accessor.count in the SAME document as an insane one", () => {
+      const glb = buildGlb({
+        accessors: [{ count: -1 }, { count: 9 }],
+        meshes: [
+          {
+            primitives: [{ indices: 0 }, { indices: 1 }],
+          },
+        ],
+        materials: [],
+        images: [],
+      });
+      expect(inspectGlb(glb).triangles).toBe(3);
+    });
   });
 });

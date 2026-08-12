@@ -4,6 +4,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
@@ -20,6 +21,7 @@ import {
 import packageJson from "../../package.json" with { type: "json" };
 import * as GenerationService from "../generation/GenerationService.ts";
 import * as TripoProvider from "../generation/providers/TripoProvider.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
@@ -268,22 +270,59 @@ const inspectGenerationFailure = <E>(cause: Cause.Cause<E>) => {
   }).pipe(Effect.as(result));
 };
 
-/** Best-effort: a missing/unfetchable preview image degrades the result to
- * text + structured content only, it never fails the whole tool call — the
- * technical facts (`inspect_generation`'s actual point, per spike 0) are
- * still useful without a picture. */
+/** Merge-gate P1 #4: same cap as the GLB download (GenerationService.ts),
+ * sized for a render, not a model — Tripo preview renders are small PNGs
+ * in practice; 20MB is generous headroom, not a target. */
+const MAX_PREVIEW_IMAGE_BYTES = 20 * 1_024 * 1_024;
+
+class PreviewImageTooLargeError extends Schema.TaggedErrorClass<PreviewImageTooLargeError>()(
+  "PreviewImageTooLargeError",
+  { byteLength: Schema.Number },
+) {
+  override get message(): string {
+    return `Preview image is ${this.byteLength} bytes, exceeding the ${MAX_PREVIEW_IMAGE_BYTES}-byte cap.`;
+  }
+}
+
+/** Best-effort: a missing/unfetchable/oversized preview image degrades the
+ * result to text + structured content only, it never fails the whole tool
+ * call — the technical facts (`inspect_generation`'s actual point, per
+ * spike 0) are still useful without a picture. */
 const fetchPreviewImageBlock = (httpClient: HttpClient.HttpClient, imageUrl: string | null) =>
   imageUrl === null
     ? Effect.succeed(null)
     : HttpClientRequest.get(imageUrl).pipe(
         httpClient.execute,
         Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap((response) => response.arrayBuffer),
-        Effect.map((buffer) => ({
-          type: "image" as const,
-          data: new Uint8Array(buffer),
-          mimeType: "image/png",
+        // Cap BEFORE buffering where declared — merge-gate P1 #4. Kept as
+        // its own step (not folded into the mimeType-derivation step
+        // below) so each step returns a single uniform Effect shape —
+        // mixing an `Effect.fail` branch into the same callback that also
+        // returns `response.arrayBuffer` defeated TypeScript's inference
+        // across the whole chain (the same issue GenerationService.ts's
+        // GLB download hit).
+        Effect.flatMap((response) => {
+          const declaredLength = Number(response.headers["content-length"]);
+          return Number.isFinite(declaredLength) && declaredLength > MAX_PREVIEW_IMAGE_BYTES
+            ? Effect.fail(new PreviewImageTooLargeError({ byteLength: declaredLength }))
+            : Effect.succeed(response);
+        }),
+        Effect.map((response) => ({
+          response,
+          // Merge-gate P3 #11: derive from the response instead of
+          // hardcoding — Tripo's docs do not guarantee PNG.
+          mimeType:
+            (response.headers["content-type"] ?? "image/png").split(";")[0]?.trim() || "image/png",
         })),
+        Effect.flatMap(({ response, mimeType }) =>
+          Effect.map(response.arrayBuffer, (buffer) => ({ buffer, mimeType })),
+        ),
+        Effect.flatMap(({ buffer, mimeType }) => {
+          const data = new Uint8Array(buffer);
+          return data.length > MAX_PREVIEW_IMAGE_BYTES
+            ? Effect.fail(new PreviewImageTooLargeError({ byteLength: data.length }))
+            : Effect.succeed({ type: "image" as const, data, mimeType });
+        }),
         Effect.orElseSucceed(() => null),
       );
 
@@ -291,6 +330,7 @@ const registerInspectGeneration = Effect.fn("McpHttpServer.registerInspectGenera
   function* () {
     const server = yield* McpServer.McpServer;
     const generationService = yield* GenerationService.GenerationService;
+    const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const httpClient = yield* HttpClient.HttpClient;
     const tool = InspectGenerationTool;
     yield* server.addTool({
@@ -319,6 +359,10 @@ const registerInspectGeneration = Effect.fn("McpHttpServer.registerInspectGenera
           return inspectGeneration(payload as InspectGenerationInput).pipe(
             Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
             Effect.provideService(GenerationService.GenerationService, generationService),
+            Effect.provideService(
+              ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+              projectionSnapshotQuery,
+            ),
             Effect.matchCauseEffect({
               onFailure: inspectGenerationFailure,
               onSuccess: (asset) =>
@@ -348,7 +392,11 @@ const GenerationStandardToolkitRegistrationLive = McpServer.toolkit(GenerationSt
   Layer.provide(GenerationStandardToolkitHandlersLive),
 );
 
-const GenerationInspectRegistrationLive = Layer.effectDiscard(registerInspectGeneration());
+/** Exported (not just used by `GenerationToolkitRegistrationLive` below) so
+ * `registerInspectGeneration`'s own image-block-assembly/degrade-on-failure
+ * behavior is directly testable against a fake `GenerationService`, without
+ * needing a real Tripo job lifecycle — merge-gate P3 #8. */
+export const GenerationInspectRegistrationLive = Layer.effectDiscard(registerInspectGeneration());
 
 export const GenerationToolkitRegistrationLive = Layer.mergeAll(
   GenerationStandardToolkitRegistrationLive,

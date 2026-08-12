@@ -2,11 +2,14 @@ import { expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   GenerationCapabilityUnavailableError,
+  GenerationJobNotFoundError,
   GenerationProjectResolutionError,
   GeneratedAssetNotFoundError,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
+  type GeneratedAsset,
+  type GenerationJob,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -15,7 +18,12 @@ import { describe } from "vite-plus/test";
 import { PersistenceSqlError } from "../../../persistence/Errors.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import { inspectGeneration, requireGenerationScope, resolveProjectContext } from "./handlers.ts";
+import {
+  generationStatus,
+  inspectGeneration,
+  requireGenerationScope,
+  resolveProjectContext,
+} from "./handlers.ts";
 import * as GenerationService from "../../../generation/GenerationService.ts";
 
 const grantedScope: McpInvocationContext.McpInvocationScope = {
@@ -149,9 +157,16 @@ const unreachableGenerationService: GenerationService.GenerationServiceShape = {
 describe("inspectGeneration", () => {
   it.effect("refuses without the generation capability", () =>
     Effect.gen(function* () {
+      // requireGenerationScope() fails BEFORE resolveProjectContext ever
+      // runs, so ProjectionSnapshotQuery stays fully unreachable here —
+      // same reasoning as unreachableGenerationService below.
       const error = yield* inspectGeneration({ jobId: undefined, assetId: undefined }).pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, deniedScope),
         Effect.provideService(GenerationService.GenerationService, unreachableGenerationService),
+        Effect.provideService(
+          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+          unreachableProjectionSnapshotQuery({}),
+        ),
         Effect.flip,
       );
       expect(error).toBeInstanceOf(GenerationCapabilityUnavailableError);
@@ -162,6 +177,7 @@ describe("inspectGeneration", () => {
     "fails cleanly with GeneratedAssetNotFoundError when the job has not succeeded yet",
     () =>
       Effect.gen(function* () {
+        const projectId = ProjectId.make("project-inspect-not-done");
         const service: GenerationService.GenerationServiceShape = {
           createJob: () => Effect.die("unexpected createJob call"),
           getJob: () => Effect.die("unexpected getJob call"),
@@ -169,15 +185,113 @@ describe("inspectGeneration", () => {
           getAsset: () => Effect.die("unexpected getAsset call"),
           getAssetByJobId: () => Effect.succeed(Option.none()),
         };
+        const snapshotQuery = unreachableProjectionSnapshotQuery({
+          getThreadShellById: (threadId) =>
+            Effect.succeed(Option.some({ id: threadId, projectId } as never)),
+        });
         const error = yield* inspectGeneration({
           jobId: "gen_not-done-yet" as never,
           assetId: undefined,
         }).pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, grantedScope),
           Effect.provideService(GenerationService.GenerationService, service),
+          Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, snapshotQuery),
           Effect.flip,
         );
         expect(error).toBeInstanceOf(GeneratedAssetNotFoundError);
       }),
+  );
+});
+
+// Merge-gate P1 #2: the cross-project leak class (same shape as #71's
+// editor-presence chips). Red-proof: before this fix, generationStatus and
+// inspectGeneration returned whatever getJob/getAsset gave back with NO
+// projectId comparison at all — a session scoped to project B could read
+// project A's job/asset just by knowing its id. These tests build a job/
+// asset that genuinely belongs to project A and a caller scoped (via the
+// stubbed threadId lookup) to project B, and assert the SAME NotFoundError
+// a truly-unknown id gets, not the real record.
+describe("cross-project scoping (merge-gate P1 #2)", () => {
+  const projectA = ProjectId.make("project-a");
+  const projectB = ProjectId.make("project-b");
+  const scopeForProjectB: McpInvocationContext.McpInvocationScope = grantedScope;
+  const snapshotQueryResolvingProjectB = unreachableProjectionSnapshotQuery({
+    getThreadShellById: (threadId) =>
+      Effect.succeed(Option.some({ id: threadId, projectId: projectB } as never)),
+  });
+
+  it.effect("generation_status: a job belonging to another project reads as not-found", () =>
+    Effect.gen(function* () {
+      const jobFromProjectA: GenerationJob = {
+        id: "gen_owned-by-a" as never,
+        projectId: projectA,
+        threadId: "thread-a" as never,
+        modality: "model3d",
+        provider: "tripo",
+        providerTaskId: null,
+        status: "succeeded",
+        progress: 100,
+        prompt: "a barrel",
+        parameters: {},
+        assetId: null,
+        error: null,
+        createdAt: 1,
+        startedAt: 1,
+        completedAt: 2,
+      };
+      const service: GenerationService.GenerationServiceShape = {
+        createJob: () => Effect.die("unexpected createJob call"),
+        getJob: () => Effect.succeed(Option.some(jobFromProjectA)),
+        listJobs: () => Effect.die("unexpected listJobs call"),
+        getAsset: () => Effect.die("unexpected getAsset call"),
+        getAssetByJobId: () => Effect.die("unexpected getAssetByJobId call"),
+      };
+      const error = yield* generationStatus({ jobId: jobFromProjectA.id }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scopeForProjectB),
+        Effect.provideService(GenerationService.GenerationService, service),
+        Effect.provideService(
+          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+          snapshotQueryResolvingProjectB,
+        ),
+        Effect.flip,
+      );
+      expect(error).toBeInstanceOf(GenerationJobNotFoundError);
+    }),
+  );
+
+  it.effect("inspect_generation: an asset belonging to another project reads as not-found", () =>
+    Effect.gen(function* () {
+      const assetFromProjectA: GeneratedAsset = {
+        id: "asset_owned-by-a" as never,
+        projectId: projectA,
+        generationJobId: "gen_owned-by-a" as never,
+        modality: "model3d",
+        provider: "tripo",
+        files: { glb: "/state/generated/project-a/asset_owned-by-a/model.glb" },
+        preview: { imageUrl: null },
+        metadata: { triangles: 1, materials: 1, images: 0, fileBytes: 1 },
+        createdAt: 1,
+      };
+      const service: GenerationService.GenerationServiceShape = {
+        createJob: () => Effect.die("unexpected createJob call"),
+        getJob: () => Effect.die("unexpected getJob call"),
+        listJobs: () => Effect.die("unexpected listJobs call"),
+        getAsset: () => Effect.succeed(Option.some(assetFromProjectA)),
+        getAssetByJobId: () => Effect.die("unexpected getAssetByJobId call"),
+      };
+      const error = yield* inspectGeneration({
+        assetId: assetFromProjectA.id,
+        jobId: undefined,
+      }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scopeForProjectB),
+        Effect.provideService(GenerationService.GenerationService, service),
+        Effect.provideService(
+          ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+          snapshotQueryResolvingProjectB,
+        ),
+        Effect.flip,
+      );
+      expect(error).toBeInstanceOf(GeneratedAssetNotFoundError);
+    }),
   );
 });

@@ -13,6 +13,9 @@
  *  - GeneratedAsset records for the current server session, including the
  *    GLB download + server-side glTF inspection (no Unity — spike 0)
  */
+import * as NodeOS from "node:os";
+
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -24,7 +27,9 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 import {
   GeneratedAssetId as GeneratedAssetIdSchema,
@@ -72,9 +77,55 @@ export interface GenerationServiceOptions {
    * forked poll loop does not advance under `it.effect`'s virtual TestClock,
    * per this repo's own testing doctrine). */
   readonly pollIntervalMs?: number;
+  /** Merge-gate P1 #3a: overall wall-clock budget for one job's poll loop.
+   * Without this a provider task stuck "running" polls forever — a leaked
+   * fiber (and socket) for the server's life. Spike 0 measured ~158s
+   * end-to-end; the default is generous headroom above that, not a tight
+   * SLA. */
+  readonly pollDeadlineMs?: number;
+  /** Merge-gate P1 #3b: max simultaneously in-flight generations.
+   * `createJob` forks unbounded fibers against a PAID API otherwise. Jobs
+   * beyond the cap QUEUE (the semaphore permit wait happens inside the
+   * forked fiber, invisible to `createJob`'s own <1s return) — they are
+   * never rejected. */
+  readonly maxConcurrentGenerations?: number;
+  /** Merge-gate P1 #4: cap the in-memory GLB buffer. Overridable purely so
+   * tests can trigger the cap deterministically without allocating a
+   * 100MB+ buffer. */
+  readonly maxGlbBytes?: number;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
+const DEFAULT_POLL_DEADLINE_MS = 20 * 60 * 1_000; // 20 minutes
+const DEFAULT_MAX_CONCURRENT_GENERATIONS = 4;
+/** Checked against a declared `content-length` before the body is read
+ * where the header is present, and against the actual buffered size
+ * regardless (a header can be absent or understate the truth). */
+const DEFAULT_maxGlbBytes = 100 * 1_024 * 1_024; // 100MB
+
+class GenerationInternalError extends Schema.TaggedErrorClass<GenerationInternalError>()(
+  "GenerationInternalError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
+/** Merge-gate P2 #6+9 (the #76 "scrub at the funnel" pattern): a
+ * PlatformError from `makeDirectory`/`writeFile` embeds the FULL absolute
+ * path it operated on — which starts with this machine's home directory.
+ * `job.error` is client-facing (returned by `generation_status`), so it
+ * must never carry that. Replaces every occurrence of the given roots with
+ * an opaque placeholder; never throws on unexpected input. */
+const scrubAbsolutePaths = (message: string, roots: ReadonlyArray<string>): string => {
+  let scrubbed = message;
+  for (const root of roots) {
+    if (root.length === 0) continue;
+    scrubbed = scrubbed.split(root).join("<redacted>");
+  }
+  return scrubbed;
+};
 
 interface RegistryState {
   readonly jobs: ReadonlyMap<GenerationJobId, GenerationJob>;
@@ -91,6 +142,17 @@ export const makeWithOptions = Effect.fn("GenerationService.make")(function* (
   const serverConfig = yield* ServerConfig.ServerConfig;
   const crypto = yield* Crypto.Crypto;
   const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+  const pollDeadlineMs = options.pollDeadlineMs ?? DEFAULT_POLL_DEADLINE_MS;
+  const maxGlbBytes = options.maxGlbBytes ?? DEFAULT_maxGlbBytes;
+  const generationSemaphore = yield* Semaphore.make(
+    options.maxConcurrentGenerations ?? DEFAULT_MAX_CONCURRENT_GENERATIONS,
+  );
+  // Absolute-path roots to redact from any client-facing job.error (P2 #6+9,
+  // the #76 pattern) — stateDir first (the tighter, more specific root; a
+  // PlatformError message embeds the full path it operated on, which is
+  // always under stateDir), homedir second as a broader net for anything
+  // that leaks a bare home-relative path some other way.
+  const redactedPathRoots = [serverConfig.stateDir, NodeOS.homedir()];
 
   const stateRef = yield* Ref.make<RegistryState>({ jobs: new Map(), assets: new Map() });
 
@@ -144,7 +206,20 @@ export const makeWithOptions = Effect.fn("GenerationService.make")(function* (
           yield* updateJob(job.id, (current) => ({ ...current, progress: state.progress }));
           yield* Effect.sleep(Duration.millis(pollIntervalMs));
         }
-      });
+      }).pipe(
+        // Merge-gate P1 #3a: a provider task stuck "running" would
+        // otherwise poll — and hold this fiber's socket — forever. On
+        // timeout, feed the SAME "failed" branch below rather than
+        // inventing a parallel code path.
+        Effect.timeoutOrElse({
+          duration: Duration.millis(pollDeadlineMs),
+          orElse: () =>
+            Effect.succeed({
+              status: "failed" as const,
+              detail: `Generation timed out after ${pollDeadlineMs}ms polling the provider.`,
+            }),
+        }),
+      );
 
       const completedAt = yield* Clock.currentTimeMillis;
 
@@ -170,8 +245,36 @@ export const makeWithOptions = Effect.fn("GenerationService.make")(function* (
       const glbBytes = yield* HttpClientRequest.get(finalState.modelUrl).pipe(
         httpClient.execute,
         Effect.flatMap(HttpClientResponse.filterStatusOk),
+        // Merge-gate P1 #4: cap BEFORE buffering where the server tells us
+        // the size — a hostile/misbehaving response could otherwise OOM
+        // the process. Split into its own step (rather than folded into
+        // the `.arrayBuffer` flatMap below) so each step returns a single
+        // uniform Effect shape — mixing a `Effect.fail` branch into the
+        // SAME callback that also returns `response.arrayBuffer` defeated
+        // TypeScript's inference across the whole chain.
+        Effect.flatMap((response) => {
+          const declaredLength = Number(response.headers["content-length"]);
+          return Number.isFinite(declaredLength) && declaredLength > maxGlbBytes
+            ? Effect.fail(
+                new GenerationInternalError({
+                  detail: `Generated GLB declared ${declaredLength} bytes, exceeding the ${maxGlbBytes}-byte cap.`,
+                }),
+              )
+            : Effect.succeed(response);
+        }),
         Effect.flatMap((response) => response.arrayBuffer),
         Effect.map((buffer) => new Uint8Array(buffer)),
+        // `content-length` is advisory (may be absent or understate the
+        // truth), so the actual buffer size is checked too.
+        Effect.flatMap((bytes) =>
+          bytes.length > maxGlbBytes
+            ? Effect.fail(
+                new GenerationInternalError({
+                  detail: `Generated GLB was ${bytes.length} bytes, exceeding the ${maxGlbBytes}-byte cap.`,
+                }),
+              )
+            : Effect.succeed(bytes),
+        ),
       );
       const glbPath = path.join(assetDir, "model.glb");
       yield* fileSystem.writeFile(glbPath, glbBytes);
@@ -212,17 +315,29 @@ export const makeWithOptions = Effect.fn("GenerationService.make")(function* (
         completedAt,
       }));
     }).pipe(
-      Effect.catch((error: unknown) =>
+      // Merge-gate P2 #6+9: run job.error through scrubAbsolutePaths before
+      // it is ever stored — generation_status returns it to an MCP client
+      // verbatim, so this IS the funnel, not a formality.
+      //
+      // Merge-gate P1 #3c (folded finding #7): `Effect.catchCause`, not
+      // `Effect.catch` — the latter only sees the typed E channel and lets
+      // a DEFECT (e.g. an `orDie`'d crypto/secret-store failure) fall
+      // through uncaught, leaving the job "running" with error:null
+      // forever. `Cause.squash` unwraps failures AND defects alike to one
+      // representative value.
+      Effect.catchCause((cause) =>
         Effect.gen(function* () {
           const completedAt = yield* Clock.currentTimeMillis;
+          const detail = scrubAbsolutePaths(String(Cause.squash(cause)), redactedPathRoots);
           yield* updateJob(job.id, (current) => ({
             ...current,
             status: "failed",
-            error: String(error),
+            error: detail,
             completedAt,
           }));
         }),
       ),
+      generationSemaphore.withPermit,
     );
 
   const createJob: GenerationServiceShape["createJob"] = (input) =>

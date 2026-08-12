@@ -51,11 +51,21 @@ export const GenerationStatus = Schema.Literals([
 ]);
 export type GenerationStatus = typeof GenerationStatus.Type;
 
+/** Merge-gate P3 #12: bounded to a sane positive range (same
+ * `Schema.Int.check(Schema.isBetween(...))` idiom `PortSchema` uses in
+ * baseSchemas.ts) — 0/negative is nonsensical, and spike 0's own unbounded
+ * default (501,146 triangles) is the concrete evidence for why an
+ * unvalidated number here is worth guarding, not just theoretical. The
+ * upper bound is a sanity ceiling, not a Tripo business rule — real jobs
+ * use figures in the thousands (spike 1 used 6,000). */
+export const FaceLimit = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1_000_000 }));
+export type FaceLimit = typeof FaceLimit.Type;
+
 /** Provider-specific knobs, kept intentionally small — spec: `{ faceLimit?:
  * number; ... }`. Promote to a real type only when a second field is
  * needed (GENERATION_ARCHITECTURE.md §5's GameAssetSpec reasoning). */
 export const GenerationParameters = Schema.Struct({
-  faceLimit: Schema.optional(Schema.Int),
+  faceLimit: Schema.optional(FaceLimit),
 });
 export type GenerationParameters = typeof GenerationParameters.Type;
 
@@ -113,7 +123,7 @@ export type GeneratedAsset = typeof GeneratedAsset.Type;
 
 export const Generate3dInput = Schema.Struct({
   prompt: TrimmedNonEmptyString,
-  faceLimit: Schema.optional(Schema.Int),
+  faceLimit: Schema.optional(FaceLimit),
 });
 export type Generate3dInput = typeof Generate3dInput.Type;
 

@@ -60,17 +60,15 @@ export const resolveProjectContext = Effect.fn("GenerationToolkit.resolveProject
     ProjectionSnapshotQuery.ProjectionSnapshotQuery
   > {
     const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-    const thread = yield* snapshotQuery
-      .getThreadShellById(threadId)
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new GenerationProjectResolutionError({
-              threadId,
-              detail: `lookup failed: ${String(cause)}`,
-            }),
-        ),
-      );
+    const thread = yield* snapshotQuery.getThreadShellById(threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new GenerationProjectResolutionError({
+            threadId,
+            detail: `lookup failed: ${String(cause)}`,
+          }),
+      ),
+    );
     if (Option.isNone(thread)) {
       return yield* new GenerationProjectResolutionError({ threadId, detail: "thread not found" });
     }
@@ -92,12 +90,23 @@ const generate3d = (input: Generate3dInput) =>
     return { jobId: job.id, status: "running" as const };
   });
 
-const generationStatus = (input: GenerationStatusInput) =>
+/** Exported (unlike its generate3d/listGenerations siblings) so the
+ * cross-project scoping fix (merge-gate P1 #2) is directly unit-testable
+ * without standing up the declarative toolkit — same reasoning
+ * `inspectGeneration` is exported for below. */
+export const generationStatus = (input: GenerationStatusInput) =>
   Effect.gen(function* () {
-    yield* requireGenerationScope();
+    const scope = yield* requireGenerationScope();
+    const { projectId } = yield* resolveProjectContext(scope.threadId);
     const service = yield* GenerationService.GenerationService;
     const job = yield* service.getJob(input.jobId);
-    if (Option.isNone(job)) {
+    // Merge-gate P1 #2: a job id from ANOTHER project must read as
+    // not-found, not as that project's job — the same cross-project leak
+    // class as #71 (editor-presence chips). Collapsing "wrong project" into
+    // the identical NotFoundError a genuinely unknown id gets is
+    // deliberate: it tells a caller nothing about whether the id exists
+    // somewhere else.
+    if (Option.isNone(job) || job.value.projectId !== projectId) {
       return yield* new GenerationJobNotFoundError({ jobId: input.jobId });
     }
     return job.value;
@@ -128,26 +137,56 @@ export const GenerationStandardToolkitHandlersLive = GenerationStandardToolkit.t
  * behavior is unit-testable without standing up the full MCP transport,
  * same reasoning `PreviewToolkit.invoke`'s own doc comment gives.
  */
+/**
+ * Merge-gate P2 #6+9 (the #76 "scrub at the single funnel" pattern):
+ * `GeneratedAsset.files.glb` is an ABSOLUTE server path (spec: "absolute
+ * path under the generated dir") — real, and needed internally for actual
+ * file I/O, but never meant to cross the MCP wire to a client. This is
+ * the ONE place a `GeneratedAsset` leaves the process (both the exported
+ * handler below and `McpHttpServer.ts`'s manual registration return
+ * exactly this value), so redacting here is the funnel, not a
+ * per-call-site patch some future call site could forget. Keeps the
+ * `generated/<projectId>/<assetId>/model.glb` structure (still a useful,
+ * opaque reference) and drops everything above it — in particular the
+ * absolute `stateDir` prefix, which is rooted under this machine's home
+ * directory.
+ */
+const toClientSafeGeneratedAsset = (asset: GeneratedAsset): GeneratedAsset => {
+  const marker = "generated/";
+  const markerIndex = asset.files.glb.lastIndexOf(marker);
+  const glb =
+    markerIndex === -1
+      ? (asset.files.glb.split(/[/\\]/).pop() ?? asset.files.glb)
+      : asset.files.glb.slice(markerIndex);
+  return { ...asset, files: { ...asset.files, glb } };
+};
+
 export const inspectGeneration = Effect.fn("GenerationToolkit.inspectGeneration")(function* (
   input: InspectGenerationInput,
 ): Effect.fn.Return<
   GeneratedAsset,
   | InstanceType<typeof GenerationCapabilityUnavailableError>
-  | InstanceType<typeof GeneratedAssetNotFoundError>,
-  McpInvocationContext.McpInvocationContext | GenerationService.GenerationService
+  | InstanceType<typeof GeneratedAssetNotFoundError>
+  | InstanceType<typeof GenerationProjectResolutionError>,
+  | McpInvocationContext.McpInvocationContext
+  | GenerationService.GenerationService
+  | ProjectionSnapshotQuery.ProjectionSnapshotQuery
 > {
-  yield* requireGenerationScope();
+  const scope = yield* requireGenerationScope();
+  const { projectId } = yield* resolveProjectContext(scope.threadId);
   const service = yield* GenerationService.GenerationService;
   const asset = yield* input.assetId !== undefined
     ? service.getAsset(input.assetId)
     : input.jobId !== undefined
       ? service.getAssetByJobId(input.jobId)
       : Effect.succeed(Option.none<GeneratedAsset>());
-  if (Option.isNone(asset)) {
+  // Merge-gate P1 #2: same cross-project leak class as generation_status —
+  // an asset id from another project must read as not-found.
+  if (Option.isNone(asset) || asset.value.projectId !== projectId) {
     return yield* new GeneratedAssetNotFoundError({
       ...(input.jobId === undefined ? {} : { jobId: input.jobId }),
       ...(input.assetId === undefined ? {} : { assetId: input.assetId }),
     });
   }
-  return asset.value;
+  return toClientSafeGeneratedAsset(asset.value);
 });

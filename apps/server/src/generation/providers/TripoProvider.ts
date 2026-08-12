@@ -8,9 +8,14 @@
  * `generation-provider-tripo` (frozen spec's "Credentials" section), seeded
  * from `~/.config/devgame/tripo-api-key` on first run if absent — dev
  * convenience only; production is the provider-env pattern (seams note
- * §3.4). The key is read from the secret store ONCE at layer construction
- * and cached for the process lifetime — never re-read per call, never
- * logged, never returned to a client.
+ * §3.4). Resolved LAZILY (`Effect.cached`, the `NodePtyAdapter.ts`
+ * precedent) — merge-gate P0: resolving it eagerly at layer construction
+ * used to fail the WHOLE MCP server layer (preview included) for any user
+ * who never configured Tripo. The key is read at most once per process —
+ * the first `submitTextTo3d`/`pollTask`/`deriveFbx` call triggers the read
+ * and every call after that (success or failure) replays the cached
+ * outcome — never re-read per call, never logged, never returned to a
+ * client.
  */
 import * as NodeOS from "node:os";
 
@@ -136,53 +141,77 @@ const makeWithOptions = Effect.fn("TripoProvider.make")(function* (
   options: TripoProviderOptions = {},
 ) {
   const httpClient = yield* HttpClient.HttpClient;
-  const apiKey = yield* resolveApiKey(options.devKeyPath);
+  const secretStore = yield* ServerSecretStore.ServerSecretStore;
+  const fileSystem = yield* FileSystem.FileSystem;
+  // `resolveApiKey` itself needs FileSystem + ServerSecretStore — provide
+  // THOSE (already resolved above) right here, before wrapping in
+  // `Effect.cached`, so the cached effect's own type has no requirements
+  // left (`Effect<string, Model3dProviderError>`, R = never). Do NOT
+  // confuse "provide the services" with "run the effect": `Effect.cached`
+  // still does not RUN `resolveApiKey` until something below `yield*`s
+  // `cachedApiKey` — layer construction (server boot, "is generation
+  // configured" checks) never touches the secret store or the dev key
+  // file; only the first real provider call does.
+  const cachedApiKey = yield* Effect.cached(
+    resolveApiKey(options.devKeyPath).pipe(
+      Effect.provideService(ServerSecretStore.ServerSecretStore, secretStore),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+    ),
+  );
 
   const submitTextTo3d: Model3dProviderShape["submitTextTo3d"] = (input) =>
-    HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
-      HttpClientRequest.bearerToken(apiKey),
-      HttpClientRequest.bodyJson({
-        type: "text_to_model",
-        prompt: input.prompt,
-        model_version: TRIPO_MODEL_VERSION,
-        ...(input.faceLimit === undefined ? {} : { face_limit: input.faceLimit }),
-        texture: true,
-        pbr: true,
-      }),
-      Effect.flatMap(httpClient.execute),
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoSubmitResponse)),
-      Effect.map((response) => ({ providerTaskId: response.data.task_id })),
-      Effect.mapError(toProviderError("submit")),
-      Effect.withSpan("TripoProvider.submitTextTo3d"),
-    );
+    Effect.gen(function* () {
+      const apiKey = yield* cachedApiKey;
+      return yield* HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
+        HttpClientRequest.bearerToken(apiKey),
+        HttpClientRequest.bodyJson({
+          type: "text_to_model",
+          prompt: input.prompt,
+          model_version: TRIPO_MODEL_VERSION,
+          ...(input.faceLimit === undefined ? {} : { face_limit: input.faceLimit }),
+          texture: true,
+          pbr: true,
+        }),
+        Effect.flatMap(httpClient.execute),
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoSubmitResponse)),
+        Effect.map((response) => ({ providerTaskId: response.data.task_id })),
+        Effect.mapError(toProviderError("submit")),
+      );
+    }).pipe(Effect.withSpan("TripoProvider.submitTextTo3d"));
 
   const pollTask: Model3dProviderShape["pollTask"] = (providerTaskId) =>
-    HttpClientRequest.get(`${TRIPO_API_BASE}/task/${encodeURIComponent(providerTaskId)}`).pipe(
-      HttpClientRequest.bearerToken(apiKey),
-      httpClient.execute,
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoPollResponse)),
-      Effect.map((response) => mapTaskState(response.data)),
-      Effect.mapError(toProviderError("poll")),
-      Effect.withSpan("TripoProvider.pollTask"),
-    );
+    Effect.gen(function* () {
+      const apiKey = yield* cachedApiKey;
+      return yield* HttpClientRequest.get(
+        `${TRIPO_API_BASE}/task/${encodeURIComponent(providerTaskId)}`,
+      ).pipe(
+        HttpClientRequest.bearerToken(apiKey),
+        httpClient.execute,
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoPollResponse)),
+        Effect.map((response) => mapTaskState(response.data)),
+        Effect.mapError(toProviderError("poll")),
+      );
+    }).pipe(Effect.withSpan("TripoProvider.pollTask"));
 
   const deriveFbx: Model3dProviderShape["deriveFbx"] = (originalProviderTaskId) =>
-    HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
-      HttpClientRequest.bearerToken(apiKey),
-      HttpClientRequest.bodyJson({
-        type: "convert_model",
-        original_model_task_id: originalProviderTaskId,
-        format: "FBX",
-      }),
-      Effect.flatMap(httpClient.execute),
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoSubmitResponse)),
-      Effect.map((response) => ({ providerTaskId: response.data.task_id })),
-      Effect.mapError(toProviderError("convert_model")),
-      Effect.withSpan("TripoProvider.deriveFbx"),
-    );
+    Effect.gen(function* () {
+      const apiKey = yield* cachedApiKey;
+      return yield* HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
+        HttpClientRequest.bearerToken(apiKey),
+        HttpClientRequest.bodyJson({
+          type: "convert_model",
+          original_model_task_id: originalProviderTaskId,
+          format: "FBX",
+        }),
+        Effect.flatMap(httpClient.execute),
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoSubmitResponse)),
+        Effect.map((response) => ({ providerTaskId: response.data.task_id })),
+        Effect.mapError(toProviderError("convert_model")),
+      );
+    }).pipe(Effect.withSpan("TripoProvider.deriveFbx"));
 
   return Model3dProvider.of({ submitTextTo3d, pollTask, deriveFbx });
 });

@@ -57,6 +57,17 @@ const readUint32LE = (bytes: Uint8Array, offset: number): number =>
   (bytes[offset + 2]! << 16) |
   (bytes[offset + 3]! << 24);
 
+/** Merge-gate P3 #13: this is client-facing ADVISORY metadata, not a
+ * correctness-critical value — a corrupt or hostile JSON chunk (a negative
+ * count, a float, `Number.MAX_SAFE_INTEGER`) should clamp to a harmless
+ * contribution rather than produce garbage or an overflowed sum. Set well
+ * above any plausible real mesh (spike 0's own worst case was ~501,146
+ * triangles from a SINGLE mesh — three orders of magnitude below this). */
+const MAX_SANE_ACCESSOR_COUNT = 100_000_000;
+
+const isSaneAccessorCount = (count: number): boolean =>
+  Number.isInteger(count) && count >= 0 && count <= MAX_SANE_ACCESSOR_COUNT;
+
 /** Sum of `accessors[primitive.indices].count / 3` over every mesh
  * primitive (the indexed-triangle-list case Tripo's exports always use,
  * per SPIKE_RESULTS.md). Falls back to `POSITION` accessor count / 3 for
@@ -70,7 +81,7 @@ function countTriangles(document: GltfDocument): number {
       const accessorIndex = primitive.indices ?? primitive.attributes?.POSITION;
       if (accessorIndex === undefined) continue;
       const accessor = accessors[accessorIndex];
-      if (accessor === undefined) continue;
+      if (accessor === undefined || !isSaneAccessorCount(accessor.count)) continue;
       total += Math.floor(accessor.count / 3);
     }
   }
