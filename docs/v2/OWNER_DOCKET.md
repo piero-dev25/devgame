@@ -1,0 +1,84 @@
+# V2 Owner Docket — decisions only you can make
+
+Compiled 2026-08-11 from research waves 1–2 (evidence in `notes/` and the
+draft architecture docs). Ordered by how hard they block the vertical
+spike.
+
+## D1 — Re-admit `eval` for technical inspection? (BLOCKS inspect_generation)
+
+The live 140-tool enumeration proved the vertical spike is covered by
+named Pipeline tools **except** technical inspection: no named tool
+returns computed mesh facts (triangles, materials, texture sizes,
+bounds, rig). Only `eval` (real C#) can — and `eval` is excluded from
+`UnityPipelineClient` by your explicit earlier ruling (it is unconfined
+by `set_authoring_root`).
+
+Options: (a) re-admit `eval` **narrowly** — harness-authored, allowlisted,
+read-only inspection snippets only, never agent-composed C#; (b) defer
+automated technical review until Unity ships a named inspection tool
+(charter §63's "major product moat" waits); (c) inspect the GLB
+**before** import with our own parser (no Unity involved — partial
+coverage, no scene context). **Recommendation: (a) with hard rails.**
+
+## D2 — Is `generation` an MCP capability every session gets?
+
+Today every MCP credential is minted with `capabilities: {"preview"}`
+unconditionally. If charter §47's "Allow paid cloud generation → ask" is
+to have teeth, `generation` cannot be unconditional. Options: grant
+always (simplest, no paid-gate at this layer), gate per-thread/project
+(where the §47 permission model lives), or grant always but gate PAID
+providers inside GenerationService. The capability _type_ widening is
+already in flight (#116); the _grant_ stays preview-only until you rule.
+
+## D3 — Tripo account + API key (5-minute owner action, decides the 3D spike)
+
+Research verdict: **Tripo over Meshy** (single-step task API vs mandatory
+two-stage; Meshy's free tier has NO API access at all). The one unknown:
+whether Tripo's 300 free credits apply to its API. Action: create a
+Tripo account + API key, check the credit balance against an API call.
+If free credits don't cover API use, the spike needs a small paid
+top-up on one of the two (your call which).
+
+## D4 — Where do generated files get written: worktree or canonical root?
+
+Unity routes deliberately resolve the **canonical** root (the Editor
+binds there); the Diff panel deliberately prefers `worktreePath ??
+workspaceRoot`. A generated .glb must land where the Editor sees it
+(canonical Assets/) — but that bypasses worktree isolation for agent
+runs. The file write and the Editor import may legitimately need
+different answers; needs your ruling before the import step is built.
+
+## D5 — Serving generated media to remote clients
+
+Extend the vendor `AssetResource` union (smaller code, permanent merge
+surface in packages/contracts) vs a fork-owned signed asset route
+(more code, zero vendor edits). Doctrine leans fork-owned; the seams
+note documents both costs.
+
+## D6 — `AssetImport`: separate record vs nested `engineImport` field
+
+Cheap to decide, expensive to re-decide after the first migration.
+Separate record matches "one asset, many imports" (re-import after
+regeneration; multiple engines later).
+
+## D7 — Approval-timeout default for a paused agent turn
+
+When an agent waits on your §47 approval and you don't answer: Unsloth
+defaults to 1h then denies (their own code flags this as questionable).
+Options: deny-on-timeout (safe, agent turn continues degraded), park the
+turn indefinitely, or configurable-with-a-default.
+
+## Owner actions checklist (not decisions)
+
+- [ ] D3: Tripo account + API key (+ note whether free credits work on the API)
+- [ ] Optional: ElevenLabs key if the audio spike should follow immediately
+      (free tier forbids commercial use — fine for a spike)
+
+## Already ruled / no action needed
+
+- Windows not promoted on the website (ruled 2026-08-11, applied).
+- The canonical tool server question (§17): moot — already shipped.
+- Async model: job-handle + server-owned polling (forced by OpenCode's
+  verified 65s timeout; Codex's assumed 60s did NOT reproduce).
+- First local image backend hypothesis: ComfyUI over Unsloth (Unsloth
+  has no programmatic image API).
