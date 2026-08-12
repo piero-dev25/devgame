@@ -37,13 +37,17 @@ coverage, no scene context). **Recommendation: (a) with hard rails.**
 
 ## D2 — Is `generation` an MCP capability every session gets?
 
-Today every MCP credential is minted with `capabilities: {"preview"}`
-unconditionally. If charter §47's "Allow paid cloud generation → ask" is
-to have teeth, `generation` cannot be unconditional. Options: grant
-always (simplest, no paid-gate at this layer), gate per-thread/project
-(where the §47 permission model lives), or grant always but gate PAID
-providers inside GenerationService. The capability _type_ widening is
-already in flight (#116); the _grant_ stays preview-only until you rule.
+**IMPLEMENTED in Increment 1** (spike-scope default from the RESOLVED block
+above): `McpSessionRegistry.ts:issue` now mints `capabilities: new
+Set(["preview", "generation"])` unconditionally. The capability _type_
+widening (#116) is closed; the _grant_ is now broad, matching D2's
+spike-scope default. Charter §47's "Allow paid cloud generation → ask" has
+NO teeth at this capability layer as shipped — PAID-provider gating is
+enforced inside GenerationService/TripoProvider (a valid credential is
+required to submit any job at all; there is no cost cap or per-request
+approval prompt). Revisit before a multi-user or untrusted-agent
+deployment: gate per-thread/project (where the §47 permission model
+belongs) is still the option to reach for if this needs teeth later.
 
 ## D3 — Tripo account + API key (5-minute owner action, decides the 3D spike)
 

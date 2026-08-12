@@ -1,3 +1,4 @@
+import type { InspectGenerationInput } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -7,12 +8,26 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
 import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
-import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
+import {
+  HttpClient,
+  HttpClientRequest,
+  HttpClientResponse,
+  HttpRouter,
+  HttpServerRequest,
+  HttpServerResponse,
+} from "effect/unstable/http";
 
 import packageJson from "../../package.json" with { type: "json" };
+import * as GenerationService from "../generation/GenerationService.ts";
+import * as TripoProvider from "../generation/providers/TripoProvider.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import {
+  GenerationStandardToolkitHandlersLive,
+  inspectGeneration,
+} from "./toolkits/generation/handlers.ts";
+import { GenerationStandardToolkit, InspectGenerationTool } from "./toolkits/generation/tools.ts";
 import {
   PreviewSnapshotToolkitHandlersLive,
   PreviewStandardToolkitHandlersLive,
@@ -216,6 +231,130 @@ export const PreviewToolkitRegistrationLive = Layer.mergeAll(
   PreviewSnapshotRegistrationLive,
 );
 
+// V2 Increment 1 — generation half (docs/v2/specs/increment-1-generation-service.md).
+// `inspect_generation` is registered manually (this file's `registerPreviewSnapshot`
+// idiom) because it hands back a preview image content block alongside
+// structured JSON, same reason `preview_snapshot` is. The other three
+// generation tools are declarative, same as the rest of the preview
+// toolkit.
+const inspectGenerationFailure = <E>(cause: Cause.Cause<E>) => {
+  if (Cause.hasInterrupts(cause) || cause.reasons.some(Cause.isDieReason)) {
+    return Effect.failCause(cause).pipe(Effect.orDie);
+  }
+  const failures = cause.reasons.filter(Cause.isFailReason);
+  const firstFailure = failures[0]?.error;
+  const errorTag =
+    typeof firstFailure === "object" &&
+    firstFailure !== null &&
+    "_tag" in firstFailure &&
+    typeof firstFailure._tag === "string"
+      ? firstFailure._tag
+      : "GenerationToolError";
+  const result = new McpSchema.CallToolResult({
+    isError: true,
+    structuredContent: {
+      error: {
+        _tag: errorTag,
+        operation: "inspect_generation",
+        failureCount: failures.length,
+      },
+    },
+    content: [{ type: "text", text: "inspect_generation failed." }],
+  });
+  return Effect.logWarning("inspect_generation failed", {
+    operation: "inspect_generation",
+    errorTag,
+    failureCount: failures.length,
+  }).pipe(Effect.as(result));
+};
+
+/** Best-effort: a missing/unfetchable preview image degrades the result to
+ * text + structured content only, it never fails the whole tool call — the
+ * technical facts (`inspect_generation`'s actual point, per spike 0) are
+ * still useful without a picture. */
+const fetchPreviewImageBlock = (httpClient: HttpClient.HttpClient, imageUrl: string | null) =>
+  imageUrl === null
+    ? Effect.succeed(null)
+    : HttpClientRequest.get(imageUrl).pipe(
+        httpClient.execute,
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
+        Effect.flatMap((response) => response.arrayBuffer),
+        Effect.map((buffer) => ({
+          type: "image" as const,
+          data: new Uint8Array(buffer),
+          mimeType: "image/png",
+        })),
+        Effect.orElseSucceed(() => null),
+      );
+
+const registerInspectGeneration = Effect.fn("McpHttpServer.registerInspectGeneration")(
+  function* () {
+    const server = yield* McpServer.McpServer;
+    const generationService = yield* GenerationService.GenerationService;
+    const httpClient = yield* HttpClient.HttpClient;
+    const tool = InspectGenerationTool;
+    yield* server.addTool({
+      tool: new McpSchema.Tool({
+        name: tool.name,
+        description: Tool.getDescription(tool),
+        inputSchema: Tool.getJsonSchema(tool),
+        annotations: {
+          ...Context.getOption(tool.annotations, Tool.Title).pipe(
+            Option.map((title) => ({ title })),
+            Option.getOrUndefined,
+          ),
+          readOnlyHint: Context.get(tool.annotations, Tool.Readonly),
+          destructiveHint: Context.get(tool.annotations, Tool.Destructive),
+          idempotentHint: Context.get(tool.annotations, Tool.Idempotent),
+          openWorldHint: Context.get(tool.annotations, Tool.OpenWorld),
+        },
+      }),
+      annotations: tool.annotations,
+      handle: (payload) =>
+        Effect.withFiber((fiber) => {
+          const invocation = Context.getUnsafe(
+            fiber.context,
+            McpInvocationContext.McpInvocationContext,
+          );
+          return inspectGeneration(payload as InspectGenerationInput).pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(GenerationService.GenerationService, generationService),
+            Effect.matchCauseEffect({
+              onFailure: inspectGenerationFailure,
+              onSuccess: (asset) =>
+                fetchPreviewImageBlock(httpClient, asset.preview.imageUrl).pipe(
+                  Effect.map(
+                    (imageBlock) =>
+                      new McpSchema.CallToolResult({
+                        isError: false,
+                        structuredContent: asset,
+                        content: [
+                          { type: "text", text: JSON.stringify(asset) },
+                          ...(imageBlock === null ? [] : [imageBlock]),
+                        ],
+                      }),
+                  ),
+                ),
+            }),
+          );
+        }),
+    });
+  },
+);
+
+const GenerationServiceLive = GenerationService.layer().pipe(Layer.provide(TripoProvider.layer));
+
+const GenerationStandardToolkitRegistrationLive = McpServer.toolkit(GenerationStandardToolkit).pipe(
+  Layer.provide(GenerationStandardToolkitHandlersLive),
+);
+
+const GenerationInspectRegistrationLive = Layer.effectDiscard(registerInspectGeneration());
+
+export const GenerationToolkitRegistrationLive = Layer.mergeAll(
+  GenerationStandardToolkitRegistrationLive,
+  GenerationInspectRegistrationLive,
+).pipe(Layer.provide(GenerationServiceLive));
+
 const McpTransportLive = McpServer.layerHttp({
   name: "DevGame",
   version: packageJson.version,
@@ -223,4 +362,7 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = PreviewToolkitRegistrationLive.pipe(Layer.provideMerge(McpTransportLive));
+export const layer = Layer.mergeAll(
+  PreviewToolkitRegistrationLive,
+  GenerationToolkitRegistrationLive,
+).pipe(Layer.provideMerge(McpTransportLive));

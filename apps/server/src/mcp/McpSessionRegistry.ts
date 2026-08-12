@@ -128,8 +128,12 @@ const makeWithOptions = Effect.fn("McpSessionRegistry.make")(function* (
         threadId: ThreadId.make(request.threadId),
         providerSessionId,
         providerInstanceId: ProviderInstanceId.make(request.providerInstanceId),
-        // Stays preview-only pending an owner ruling — docs/v2/OWNER_DOCKET.md D2.
-        capabilities: new Set(["preview"]),
+        // D2 RESOLVED (docs/v2/OWNER_DOCKET.md, spike-scope default carried
+        // into Increment 1): grant `generation` broadly alongside `preview`
+        // for the single-user product. PAID-provider gating is enforced
+        // inside GenerationService, not at this capability layer — see
+        // OWNER_DOCKET.md D2's own reasoning.
+        capabilities: new Set(["preview", "generation"]),
         issuedAt,
       };
       yield* SynchronizedRef.update(state, ({ records }) => {

@@ -54,6 +54,26 @@ it.effect("stores only a token hash, resolves the bearer token, and revokes by t
   }),
 );
 
+// V2 Increment 1 / OWNER_DOCKET.md D2: every issued credential grants BOTH
+// "preview" and "generation" — before this increment, `issue` hardcoded
+// `capabilities: new Set(["preview"])`, so a real session's scope looked
+// exactly like the `deniedScope` fixture in
+// mcp/toolkits/generation/handlers.test.ts and every generation tool call
+// would have failed `requireGenerationScope` unconditionally.
+it.effect("grants both preview and generation capabilities to every issued credential", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    const issued = yield* registry.issue({
+      threadId: ThreadId.make("thread-generation-grant"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    });
+    const token = issued.config.authorizationHeader.replace(/^Bearer\s+/, "");
+    const resolved = yield* registry.resolve(token);
+    expect(resolved?.capabilities.has("preview")).toBe(true);
+    expect(resolved?.capabilities.has("generation")).toBe(true);
+  }),
+);
+
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
     const cases = [
