@@ -7,6 +7,14 @@ spike.
 > **RESOLVED 2026-08-12:**
 > **D1 → APPROVED (option a).** Re-admit `eval` narrowly: harness-authored,
 > allowlisted, read-only inspection snippets only, never agent-composed C#.
+> **D1-write → APPROVED 2026-08-12 (extends D1 for Increment 2a).** The
+> material bind (glTF→URP) has no named-tool path, so it needs a harness-
+> authored FIXED WRITE eval. Owner ruling: write-evals are fine "if that's
+> something Unity is supporting and how people write custom code for the
+> agent↔pipeline" — both hold: `eval` is a first-class Unity pipeline command
+> (live 140-tool surface), the idiomatic custom-authoring seam. D1 now reads:
+> harness-authored, allowlisted, FIXED snippets — read OR write — NEVER
+> agent-composed C#, NEVER interpolating tool/agent input into the snippet.
 > **D3 → RESOLVED, no payment needed.** Tripo key "DevGame Generation"
 > created + stored 0600 at `~/.config/devgame/tripo-api-key`; the claimable
 > **free trial wallet (600 credits, valid to 2026-08-26) IS API-usable** —
