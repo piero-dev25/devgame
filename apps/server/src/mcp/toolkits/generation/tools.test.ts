@@ -7,14 +7,21 @@ import {
   Generate3dTool,
   GenerationStatusTool,
   GenerationToolkit,
+  ImportGeneratedAssetTool,
   InspectGenerationTool,
   ListGenerationsTool,
 } from "./tools.ts";
 
 describe("GenerationToolkit", () => {
-  it("exports exactly the four tools the frozen spec names", () => {
+  it("exports exactly the five tools the frozen specs name (increments 1 + 2a)", () => {
     expect(Object.keys(GenerationToolkit.tools).sort()).toEqual(
-      ["generate_3d", "generation_status", "inspect_generation", "list_generations"].sort(),
+      [
+        "generate_3d",
+        "generation_status",
+        "import_generated_asset",
+        "inspect_generation",
+        "list_generations",
+      ].sort(),
     );
   });
 
@@ -28,7 +35,7 @@ describe("GenerationToolkit", () => {
       // list_generations takes no parameters — Schema.Struct({})'s generated
       // JSON schema omits `type` entirely rather than emitting an
       // essentially-vacuous `{type:"object",properties:{}}`, so it is
-      // exempted from the "must declare object" check the other three
+      // exempted from the "must declare object" check the other four
       // (real-parameter) tools get.
       if (tool.name === "list_generations") continue;
       expect(schema.type, `${tool.name} must export a top-level object schema`).toBe("object");
@@ -39,6 +46,13 @@ describe("GenerationToolkit", () => {
     expect(Context.get(Generate3dTool.annotations, Tool.Readonly)).toBe(false);
     expect(Context.get(Generate3dTool.annotations, Tool.Idempotent)).toBe(false);
     expect(Context.get(Generate3dTool.annotations, Tool.OpenWorld)).toBe(true);
+  });
+
+  it("marks import_generated_asset as non-readonly, non-idempotent, open-world (it mutates the caller's Unity project)", () => {
+    expect(Context.get(ImportGeneratedAssetTool.annotations, Tool.Readonly)).toBe(false);
+    expect(Context.get(ImportGeneratedAssetTool.annotations, Tool.Idempotent)).toBe(false);
+    expect(Context.get(ImportGeneratedAssetTool.annotations, Tool.Destructive)).toBe(false);
+    expect(Context.get(ImportGeneratedAssetTool.annotations, Tool.OpenWorld)).toBe(true);
   });
 
   it("marks the three read tools as readonly and idempotent", () => {

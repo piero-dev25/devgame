@@ -36,9 +36,12 @@
  * reason, matching the verified assertion shape ("read editor state, don't
  * trust the command's own return code").
  *
- * SCOPE, deliberately narrow: play / stop / pause / status / CLI-presence
- * only. No `eval`/`eval_file` (arbitrary C# execution, not bounded by
- * `set_authoring_root` — explicitly out per the owner's ruling). No
+ * SCOPE, deliberately narrow: play / stop / pause / status / CLI-presence,
+ * plus the three authoring commands required by the frozen Increment 2a
+ * generated-asset import flow. `eval` is exposed for harness-authored,
+ * allowlisted, fixed snippets only (owner-approved 2026-08-12); this client
+ * transports the snippet and the generation toolkit owns that allowlist. No
+ * `eval_file` or generic command passthrough. No
  * `editor_step` — Pipeline has no frame-step command at all, and the rebuilt
  * selection-only package intentionally implements no commands, so Unity has
  * no scriptable frame-step path through this codebase anymore, unlike the
@@ -578,6 +581,26 @@ export class UnityPipelineClient extends Context.Service<
      * treats ANY outcome here as non-fatal to the install either way — see
      * `UnityPipelineInstallRoute.ts`. */
     readonly packageResolve: (workspaceRoot: string) => Effect.Effect<UnityPipelineResult<void>>;
+    /** Imports one external file into the project. Pipeline requires both
+     * the absolute external `source` and the project-relative `path`. */
+    readonly importAsset: (
+      workspaceRoot: string,
+      input: { readonly source: string; readonly path: string },
+    ) => Effect.Effect<UnityPipelineResult<void>>;
+    /** Updates one imported asset. Pipeline names the target flag `--asset`
+     * (not `--path`) and accepts the settings object as JSON. */
+    readonly setImportSettings: (
+      workspaceRoot: string,
+      input: {
+        readonly asset: string;
+        readonly settings: Readonly<Record<string, unknown>>;
+      },
+    ) => Effect.Effect<UnityPipelineResult<void>>;
+    /** Runs a harness-owned C# snippet and preserves Pipeline's raw result. */
+    readonly eval: (
+      workspaceRoot: string,
+      code: string,
+    ) => Effect.Effect<UnityPipelineResult<unknown>>;
   }
 >()("t3/unity/UnityPipelineClient") {}
 
@@ -607,10 +630,11 @@ export const make = Effect.gen(function* () {
    * folds it into a `UnityPipelineResult`, WITHOUT parsing the extracted
    * `data.result` yet — callers that need a typed result (status) parse it
    * themselves; callers that only need pass/fail (the action commands,
-   * before their own confirming status re-read; `packageResolve`, which has
-   * no confirming re-read at all) use this as-is.
+   * before their own confirming status re-read; `packageResolve` and the
+   * generated-asset mutation commands, which have no confirming re-read at
+   * this layer) use this as-is.
    *
-   * `cwd`, added for `packageResolve` (task #130): OPTIONAL and unused by
+   * `options.cwd`, added for `packageResolve` (task #130): OPTIONAL and unused by
    * every existing caller (`editor_play`/`editor_stop`/`editor_pause`/
    * `editor_status` all still omit it, unchanged) — `package_resolve` opts
    * in defensively, borrowing `install`/`list`'s posture of also pinning
@@ -620,11 +644,25 @@ export const make = Effect.gen(function* () {
    * `package_resolve` specifically; not extended to the four existing
    * callers, which have no such live-observed need. */
   const runEditorCommand = (
-    action: "editor_play" | "editor_stop" | "editor_pause" | "editor_status" | "package_resolve",
+    action:
+      | "editor_play"
+      | "editor_stop"
+      | "editor_pause"
+      | "editor_status"
+      | "package_resolve"
+      | "import_asset"
+      | "set_import_settings"
+      | "eval",
     workspaceRoot: string,
-    cwd?: string,
+    options?: {
+      readonly args?: ReadonlyArray<string>;
+      readonly cwd?: string;
+    },
   ): Effect.Effect<UnityPipelineResult<unknown>> =>
-    runUnityCommand(["command", action, "--project-path", workspaceRoot], cwd).pipe(
+    runUnityCommand(
+      ["command", action, ...(options?.args ?? []), "--project-path", workspaceRoot],
+      options?.cwd,
+    ).pipe(
       Effect.map((envelope): UnityPipelineResult<unknown> => {
         if (envelope === null) {
           return {
@@ -881,12 +919,43 @@ export const make = Effect.gen(function* () {
    * read from it anyway — only the pass/fail/notReady/error TAG matters to
    * `UnityPipelineInstallRoute.ts`. */
   const packageResolve: UnityPipelineClient["Service"]["packageResolve"] = (workspaceRoot) =>
-    runEditorCommand("package_resolve", workspaceRoot, workspaceRoot).pipe(
+    runEditorCommand("package_resolve", workspaceRoot, { cwd: workspaceRoot }).pipe(
       Effect.map(
         (result): UnityPipelineResult<void> =>
           result._tag === "ok" ? { _tag: "ok", value: undefined } : result,
       ),
     );
+
+  const importAsset: UnityPipelineClient["Service"]["importAsset"] = (workspaceRoot, input) =>
+    runEditorCommand("import_asset", workspaceRoot, {
+      args: ["--source", input.source, "--path", input.path],
+      cwd: workspaceRoot,
+    }).pipe(
+      Effect.map(
+        (result): UnityPipelineResult<void> =>
+          result._tag === "ok" ? { _tag: "ok", value: undefined } : result,
+      ),
+    );
+
+  const setImportSettings: UnityPipelineClient["Service"]["setImportSettings"] = (
+    workspaceRoot,
+    input,
+  ) =>
+    runEditorCommand("set_import_settings", workspaceRoot, {
+      args: ["--asset", input.asset, "--settings", JSON.stringify(input.settings)],
+      cwd: workspaceRoot,
+    }).pipe(
+      Effect.map(
+        (result): UnityPipelineResult<void> =>
+          result._tag === "ok" ? { _tag: "ok", value: undefined } : result,
+      ),
+    );
+
+  const evaluate: UnityPipelineClient["Service"]["eval"] = (workspaceRoot, code) =>
+    runEditorCommand("eval", workspaceRoot, {
+      args: [code],
+      cwd: workspaceRoot,
+    });
 
   return UnityPipelineClient.of({
     isAvailable: () =>
@@ -903,6 +972,9 @@ export const make = Effect.gen(function* () {
     install,
     open,
     packageResolve,
+    importAsset,
+    setImportSettings,
+    eval: evaluate,
   });
 });
 

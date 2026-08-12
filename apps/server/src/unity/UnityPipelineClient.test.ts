@@ -424,6 +424,134 @@ describe("packageResolve — task #130's zero-touch wire, no confirming status r
   );
 });
 
+function authoringCommandEnvelope(command: string, result: unknown): string {
+  return encodeJson({
+    success: true,
+    command: `command ${command}`,
+    data: {
+      command,
+      parameters: { json: true },
+      result,
+      target: { host: "127.0.0.1", port: 7801, projectPath: PROJECT },
+      success: true,
+    },
+    errors: [],
+    warnings: [],
+  });
+}
+
+describe("generated-asset authoring commands", () => {
+  it.effect(
+    "importAsset passes both required named parameters, explicit project path, and pinned cwd",
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ProcessRunner.ProcessRunInput> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seen.push(input);
+          return okOutput(authoringCommandEnvelope("import_asset", "Imported"));
+        };
+        const result = yield* withClient(runner, (client) =>
+          client.importAsset(PROJECT, {
+            source: "/tmp/generations/barrel/model.fbx",
+            path: "Assets/DevGame/barrel/model.fbx",
+          }),
+        );
+
+        expect(result).toEqual({ _tag: "ok", value: undefined });
+        expect(seen).toHaveLength(1);
+        expect(seen[0]?.args).toEqual([
+          "command",
+          "import_asset",
+          "--source",
+          "/tmp/generations/barrel/model.fbx",
+          "--path",
+          "Assets/DevGame/barrel/model.fbx",
+          "--project-path",
+          PROJECT,
+          "--json",
+        ]);
+        expect(seen[0]?.cwd).toBe(PROJECT);
+      }),
+  );
+
+  it.effect(
+    "setImportSettings uses --asset, serializes settings as one argument, and scopes the command",
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ProcessRunner.ProcessRunInput> = [];
+        const runner = (input: ProcessRunner.ProcessRunInput) => {
+          seen.push(input);
+          return okOutput(authoringCommandEnvelope("set_import_settings", "Updated"));
+        };
+        const result = yield* withClient(runner, (client) =>
+          client.setImportSettings(PROJECT, {
+            asset: "Assets/DevGame/barrel/normal.jpg",
+            settings: { textureType: "NormalMap" },
+          }),
+        );
+
+        expect(result).toEqual({ _tag: "ok", value: undefined });
+        expect(seen).toHaveLength(1);
+        expect(seen[0]?.args).toEqual([
+          "command",
+          "set_import_settings",
+          "--asset",
+          "Assets/DevGame/barrel/normal.jpg",
+          "--settings",
+          '{"textureType":"NormalMap"}',
+          "--project-path",
+          PROJECT,
+          "--json",
+        ]);
+        expect(seen[0]?.args).not.toContain("--path");
+        expect(seen[0]?.cwd).toBe(PROJECT);
+      }),
+  );
+
+  it.effect("eval passes C# positionally and preserves the raw data.result value", () =>
+    Effect.gen(function* () {
+      const code =
+        'return new { triangles = 5996, materials = 1, asset = "Assets/DevGame/barrel/model.fbx" };';
+      const stats = { triangles: 5996, materials: 1 };
+      const seen: Array<ProcessRunner.ProcessRunInput> = [];
+      const runner = (input: ProcessRunner.ProcessRunInput) => {
+        seen.push(input);
+        return okOutput(authoringCommandEnvelope("eval", stats));
+      };
+      const result = yield* withClient(runner, (client) => client.eval(PROJECT, code));
+
+      expect(result).toEqual({ _tag: "ok", value: stats });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.args).toEqual(["command", "eval", code, "--project-path", PROJECT, "--json"]);
+      expect(seen[0]?.cwd).toBe(PROJECT);
+    }),
+  );
+
+  it.effect("all three commands preserve the existing notReady classification", () =>
+    Effect.gen(function* () {
+      const notReady = commandFailedEnvelope(
+        "import_asset",
+        `No Pipeline instance found for project: ${PROJECT}. Make sure Unity Editor is running with the Pipeline package installed.`,
+      );
+      const run = callCountingRunner([notReady]).run;
+      const results = yield* Effect.all([
+        withClient(run, (client) =>
+          client.importAsset(PROJECT, { source: "/tmp/model.fbx", path: "Assets/model.fbx" }),
+        ),
+        withClient(run, (client) =>
+          client.setImportSettings(PROJECT, {
+            asset: "Assets/normal.jpg",
+            settings: { textureType: "NormalMap" },
+          }),
+        ),
+        withClient(run, (client) => client.eval(PROJECT, "return 1;")),
+      ]);
+
+      expect(results).toEqual([{ _tag: "notReady" }, { _tag: "notReady" }, { _tag: "notReady" }]);
+    }),
+  );
+});
+
 // `unity pipeline list --json`'s envelope is now VERIFIED against a real
 // captured sample (2026-08-04, from `Mafia Game`, a live Unity Editor with
 // no Pipeline package installed — supplied by team-lead, captured on the

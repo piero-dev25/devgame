@@ -19,6 +19,7 @@
  */
 import * as NodeOS from "node:os";
 
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -37,6 +38,16 @@ import {
 export const TRIPO_SECRET_NAME = "generation-provider-tripo";
 const TRIPO_API_BASE = "https://api.tripo3d.ai/v2/openapi";
 const TRIPO_MODEL_VERSION = "v2.5-20250123";
+const DEFAULT_DERIVE_POLL_INTERVAL_MS = 5_000;
+/** Fix round finding #1: `deriveFbx` runs SYNCHRONOUSLY inside the MCP
+ * request Effect for `import_generated_asset` — unlike
+ * `submitTextTo3d`/`pollTask`'s own poll loop, which `GenerationService.ts`
+ * backgrounds via `Effect.forkIn` and BOUNDS with `pollDeadlineMs`
+ * (its "Merge-gate P1 #3a" comment). Without an identical bound here, a
+ * `convert_model` task stuck "running"/"queued" polls — and holds the whole
+ * import tool call's fiber — forever. Convert is spike-measured at ~6s, so
+ * 5 minutes is generous headroom, not a tight SLA. */
+const DEFAULT_DERIVE_DEADLINE_MS = 5 * 60 * 1_000;
 
 const TripoSubmitResponse = Schema.Struct({
   code: Schema.Int,
@@ -135,6 +146,15 @@ const mapTaskState = (data: typeof TripoPollResponse.Type.data): Model3dTaskStat
 
 export interface TripoProviderOptions {
   readonly devKeyPath?: string;
+  /** Tripo conversion tasks normally finish in ~6 seconds. Tests override
+   * this so a real-clock `it.live` can exercise a nonterminal poll without
+   * waiting for the production cadence. */
+  readonly derivePollIntervalMs?: number;
+  /** Overall wall-clock budget for `deriveFbx`'s poll loop — see
+   * `DEFAULT_DERIVE_DEADLINE_MS`'s own doc comment. Tests override this to
+   * a tiny value (alongside a mock provider whose poll never reaches a
+   * terminal status) to exercise the timeout path in bounded real time. */
+  readonly deriveDeadlineMs?: number;
 }
 
 const makeWithOptions = Effect.fn("TripoProvider.make")(function* (
@@ -143,6 +163,8 @@ const makeWithOptions = Effect.fn("TripoProvider.make")(function* (
   const httpClient = yield* HttpClient.HttpClient;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const fileSystem = yield* FileSystem.FileSystem;
+  const derivePollIntervalMs = options.derivePollIntervalMs ?? DEFAULT_DERIVE_POLL_INTERVAL_MS;
+  const deriveDeadlineMs = options.deriveDeadlineMs ?? DEFAULT_DERIVE_DEADLINE_MS;
   // `resolveApiKey` itself needs FileSystem + ServerSecretStore — provide
   // THOSE (already resolved above) right here, before wrapping in
   // `Effect.cached`, so the cached effect's own type has no requirements
@@ -198,7 +220,7 @@ const makeWithOptions = Effect.fn("TripoProvider.make")(function* (
   const deriveFbx: Model3dProviderShape["deriveFbx"] = (originalProviderTaskId) =>
     Effect.gen(function* () {
       const apiKey = yield* cachedApiKey;
-      return yield* HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
+      const submitted = yield* HttpClientRequest.post(`${TRIPO_API_BASE}/task`).pipe(
         HttpClientRequest.bearerToken(apiKey),
         HttpClientRequest.bodyJson({
           type: "convert_model",
@@ -208,9 +230,43 @@ const makeWithOptions = Effect.fn("TripoProvider.make")(function* (
         Effect.flatMap(httpClient.execute),
         Effect.flatMap(HttpClientResponse.filterStatusOk),
         Effect.flatMap(HttpClientResponse.schemaBodyJson(TripoSubmitResponse)),
-        Effect.map((response) => ({ providerTaskId: response.data.task_id })),
         Effect.mapError(toProviderError("convert_model")),
       );
+
+      // Fix round finding #1: bounded the same way GenerationService.ts's
+      // own poll loop is (its "Merge-gate P1 #3a" comment) — on timeout,
+      // feed the SAME "failed" branch below rather than inventing a
+      // parallel code path.
+      const finalState = yield* Effect.gen(function* () {
+        while (true) {
+          const state = yield* pollTask(submitted.data.task_id);
+          if (state.status === "success" || state.status === "failed") {
+            return state;
+          }
+          yield* Effect.sleep(Duration.millis(derivePollIntervalMs));
+        }
+      }).pipe(
+        Effect.timeoutOrElse({
+          duration: Duration.millis(deriveDeadlineMs),
+          orElse: () =>
+            Effect.succeed({
+              status: "failed" as const,
+              detail: `Tripo convert_model timed out after ${deriveDeadlineMs}ms polling the provider.`,
+            }),
+        }),
+      );
+
+      if (finalState.status === "failed") {
+        return yield* new Model3dProviderError({
+          detail: `Tripo convert_model failed: ${finalState.detail}`,
+        });
+      }
+      if (finalState.modelUrl.length === 0) {
+        return yield* new Model3dProviderError({
+          detail: "Tripo convert_model succeeded without an FBX URL",
+        });
+      }
+      return { fbxUrl: finalState.modelUrl };
     }).pipe(Effect.withSpan("TripoProvider.deriveFbx"));
 
   return Model3dProvider.of({ submitTextTo3d, pollTask, deriveFbx });

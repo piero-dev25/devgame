@@ -200,6 +200,12 @@ function makeUnityPipelineClientSpy(
           options.packageResolve?.(workspaceRoot) ?? Effect.succeed(defaultPackageResolveResult)
         );
       },
+      // Never exercised by this file's own tests — see UnityCommandRoute.test.ts's
+      // identical comment on the same latent "full interface" gap, now
+      // also covering Increment 2a's three new authoring commands.
+      importAsset: () => Effect.die("unexpected importAsset call"),
+      setImportSettings: () => Effect.die("unexpected setImportSettings call"),
+      eval: () => Effect.die("unexpected eval call"),
     }),
   );
   return { layer, calls };

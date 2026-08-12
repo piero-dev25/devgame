@@ -9,7 +9,7 @@ import { describe } from "vite-plus/test";
 import * as ServerSecretStore from "../../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../../config.ts";
 import { Model3dProvider, Model3dProviderError } from "./Model3dProvider.ts";
-import { __testing, TRIPO_SECRET_NAME } from "./TripoProvider.ts";
+import { __testing, TRIPO_SECRET_NAME, type TripoProviderOptions } from "./TripoProvider.ts";
 
 const encodeJsonBody = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -30,7 +30,9 @@ const missingDevKeyPath = "/nonexistent/t3-tripo-provider-test/tripo-api-key";
 
 const recordedRequests: Array<{
   readonly url: string;
+  readonly method: string;
   readonly authorization: string | undefined;
+  readonly body: unknown;
 }> = [];
 
 const jsonResponse = (
@@ -39,7 +41,14 @@ const jsonResponse = (
   status = 200,
 ) =>
   Effect.sync(() => {
-    recordedRequests.push({ url: request.url, authorization: request.headers.authorization });
+    const rawBody = (request.body as { readonly body?: Uint8Array }).body;
+    recordedRequests.push({
+      url: request.url,
+      method: request.method,
+      authorization: request.headers.authorization,
+      // @effect-diagnostics-next-line preferSchemaOverJson:off
+      body: rawBody === undefined ? undefined : JSON.parse(new TextDecoder().decode(rawBody)),
+    });
     return HttpClientResponse.fromWeb(
       request,
       new Response(encodeJsonBody(body), {
@@ -53,13 +62,18 @@ const makeTripoLayerWithSeededKey = (
   handle: (
     request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
   ) => ReturnType<typeof jsonResponse>,
+  // Fix round finding #1: forwarded to `__testing.make` so the timeout test
+  // below can override `derivePollIntervalMs`/`deriveDeadlineMs` to tiny
+  // values, exercising `deriveFbx`'s bounded poll loop in bounded real
+  // time under `it.live`.
+  options: Pick<TripoProviderOptions, "derivePollIntervalMs" | "deriveDeadlineMs"> = {},
 ) =>
   Layer.effect(
     Model3dProvider,
     Effect.gen(function* () {
       const secretStore = yield* ServerSecretStore.ServerSecretStore;
       yield* secretStore.set(TRIPO_SECRET_NAME, new TextEncoder().encode("tripo-test-key"));
-      return yield* __testing.make();
+      return yield* __testing.make(options);
     }),
   ).pipe(
     Layer.provide(Layer.succeed(HttpClient.HttpClient, HttpClient.make(handle))),
@@ -135,6 +149,93 @@ describe("TripoProvider", () => {
       assert.deepEqual(state, { status: "failed", detail: "Tripo task failed" });
     }).pipe(Effect.provide(layer));
   });
+
+  it.live(
+    "submits convert_model, polls through running to success, and returns the FBX URL",
+    () => {
+      recordedRequests.length = 0;
+      let pollCount = 0;
+      const layer = makeTripoLayerWithSeededKey((request) => {
+        if (request.method === "POST") {
+          return jsonResponse(request, { code: 0, data: { task_id: "convert-task-456" } });
+        }
+        pollCount += 1;
+        return pollCount === 1
+          ? jsonResponse(request, {
+              code: 0,
+              data: { status: "running", progress: 60 },
+            })
+          : jsonResponse(request, {
+              code: 0,
+              data: {
+                status: "success",
+                progress: 100,
+                output: { model: "https://tripo.example/barrel.fbx" },
+              },
+            });
+      });
+
+      return Effect.gen(function* () {
+        const provider = yield* Model3dProvider;
+        const result = yield* provider.deriveFbx("original-task-123");
+
+        expect(result).toEqual({ fbxUrl: "https://tripo.example/barrel.fbx" });
+        expect(recordedRequests).toEqual([
+          {
+            url: "https://api.tripo3d.ai/v2/openapi/task",
+            method: "POST",
+            authorization: "Bearer tripo-test-key",
+            body: {
+              type: "convert_model",
+              original_model_task_id: "original-task-123",
+              format: "FBX",
+            },
+          },
+          {
+            url: "https://api.tripo3d.ai/v2/openapi/task/convert-task-456",
+            method: "GET",
+            authorization: "Bearer tripo-test-key",
+            body: undefined,
+          },
+          {
+            url: "https://api.tripo3d.ai/v2/openapi/task/convert-task-456",
+            method: "GET",
+            authorization: "Bearer tripo-test-key",
+            body: undefined,
+          },
+        ]);
+      }).pipe(Effect.provide(layer));
+    },
+  );
+
+  // Fix round finding #1: without a bound, a convert_model task stuck
+  // "running" polls — and holds the calling fiber — forever, hanging
+  // import_generated_asset's whole MCP request Effect (deriveFbx runs
+  // synchronously there, unlike GenerationService.ts's backgrounded poll
+  // loop). `pollTask` here ALWAYS reports "running", never a terminal
+  // status, so the ONLY way this test can pass is via the timeout path.
+  it.live(
+    "deriveFbx fails (does not hang) when convert_model never reaches a terminal status",
+    () => {
+      recordedRequests.length = 0;
+      const layer = makeTripoLayerWithSeededKey(
+        (request) => {
+          if (request.method === "POST") {
+            return jsonResponse(request, { code: 0, data: { task_id: "convert-task-stuck" } });
+          }
+          return jsonResponse(request, { code: 0, data: { status: "running", progress: 10 } });
+        },
+        { derivePollIntervalMs: 5, deriveDeadlineMs: 30 },
+      );
+
+      return Effect.gen(function* () {
+        const provider = yield* Model3dProvider;
+        const error = yield* provider.deriveFbx("original-task-stuck").pipe(Effect.flip);
+        expect(error).toBeInstanceOf(Model3dProviderError);
+        expect(error.detail).toContain("timed out after 30ms");
+      }).pipe(Effect.provide(layer));
+    },
+  );
 
   // Merge-gate P0: the key used to be resolved EAGERLY in the layer's own
   // build effect, so a missing/misconfigured Tripo key failed the WHOLE

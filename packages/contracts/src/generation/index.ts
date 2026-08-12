@@ -157,6 +157,53 @@ export const InspectGenerationInput = Schema.Struct({
 export type InspectGenerationInput = typeof InspectGenerationInput.Type;
 
 // ---------------------------------------------------------------------------
+// `import_generated_asset` — Increment 2a
+// (docs/v2/specs/increment-2a-import-generated-asset.md). Lands a succeeded
+// GeneratedAsset in the caller's Unity project as FBX geometry + a URP
+// material wired from the GLB's PBR textures. `assetPath`/`materialPath`/
+// `textures[role]` are UNITY-SIDE `Assets/...`-relative paths (never
+// server-state filesystem paths) — deliberately not the redaction-needing
+// shape `GeneratedAsset.files.glb` is (see handlers.ts's
+// `toClientSafeGeneratedAsset`); a Unity asset path is meant to be read by
+// the caller, not scrubbed.
+// ---------------------------------------------------------------------------
+
+export const ImportGeneratedAssetInput = Schema.Struct({
+  assetId: GeneratedAssetId,
+});
+export type ImportGeneratedAssetInput = typeof ImportGeneratedAssetInput.Type;
+
+export const ImportGeneratedAssetTextures = Schema.Struct({
+  baseColor: Schema.String,
+  metallicRoughness: Schema.String,
+  normal: Schema.String,
+});
+export type ImportGeneratedAssetTextures = typeof ImportGeneratedAssetTextures.Type;
+
+/** Read post-import, from Unity's own perspective (via the D1 read-only
+ * eval) — deliberately NOT copied from `GeneratedAsset.metadata`, which is
+ * the server's own glTF-level count computed BEFORE the FBX conversion and
+ * Unity import; the two are expected to be close but are not guaranteed
+ * identical. */
+export const ImportGeneratedAssetUnityStats = Schema.Struct({
+  triangles: NonNegativeInt,
+  materials: NonNegativeInt,
+});
+export type ImportGeneratedAssetUnityStats = typeof ImportGeneratedAssetUnityStats.Type;
+
+export const ImportGeneratedAssetResult = Schema.Struct({
+  assetPath: Schema.String,
+  materialPath: Schema.String,
+  textures: ImportGeneratedAssetTextures,
+  unityStats: ImportGeneratedAssetUnityStats,
+  /** Literal `true` — this increment always binds real PBR textures (never
+   * a bare/untextured import); see the spec's Scope (OUT) for why a
+   * texture-less import path isn't offered. */
+  texturesCarried: Schema.Literal(true),
+});
+export type ImportGeneratedAssetResult = typeof ImportGeneratedAssetResult.Type;
+
+// ---------------------------------------------------------------------------
 // Errors — fork-owned, entirely new (never widens the vendor
 // `PreviewAutomationError` union; see McpInvocationContext.ts's own comment
 // on why a future generation toolkit does its own translation).
@@ -208,10 +255,62 @@ export class GenerationProjectResolutionError extends Schema.TaggedErrorClass<Ge
   }
 }
 
+/** `import_generated_asset`'s projectId → workspaceRoot resolution
+ * failure — the `getProjectShellById` counterpart to
+ * `GenerationProjectResolutionError`'s `getThreadShellById` (different
+ * lookup, different key), never reused for a threadId failure and vice
+ * versa so a client can always tell which id was the problem. */
+export class UnityWorkspaceResolutionError extends Schema.TaggedErrorClass<UnityWorkspaceResolutionError>()(
+  "UnityWorkspaceResolutionError",
+  { projectId: ProjectId, detail: Schema.String },
+) {
+  override get message(): string {
+    return `Could not resolve a Unity project workspace for ${this.projectId}: ${this.detail}`;
+  }
+}
+
+/** Spec's "Require a LIVE matched Unity editor for the project... No editor
+ * → clean typed error telling the user to open Unity (do NOT cold-start)."
+ * Folds `notReady`/`cliUnavailable`/a pre-sequence `error` from
+ * `UnityPipelineClient.status` into one client-facing shape — from the
+ * caller's perspective all three mean the same thing: nothing to import
+ * into yet, go make Unity ready. `reason` carries the underlying
+ * classification for debugging, never surfaced as a distinct error type. */
+export class UnityEditorNotReadyError extends Schema.TaggedErrorClass<UnityEditorNotReadyError>()(
+  "UnityEditorNotReadyError",
+  { projectId: ProjectId, reason: Schema.String },
+) {
+  override get message(): string {
+    return `No live Unity Editor is open for this project. Open Unity with this project, then try again. (${this.reason})`;
+  }
+}
+
+/** Anything that goes wrong AFTER the editor-liveness precondition already
+ * passed: an FBX derive/texture-extraction failure, or any one of the
+ * `import_asset`/`set_import_settings`/`eval` commands in the drive
+ * sequence failing or returning an unrecognised shape. `step` names which
+ * stage failed (`derive_fbx`, `extract_textures`, `import_model`,
+ * `import_base_color`, `import_metallic_roughness`, `import_normal`,
+ * `set_normal_import_type`, `bind_material`, `read_stats`) — one error
+ * shape for the whole sequence rather than one class per step, since a
+ * caller's useful response ("something in the Unity import failed, here's
+ * where and why") is the same regardless of which step it was. */
+export class UnityImportFailedError extends Schema.TaggedErrorClass<UnityImportFailedError>()(
+  "UnityImportFailedError",
+  { assetId: GeneratedAssetId, step: Schema.String, detail: Schema.String },
+) {
+  override get message(): string {
+    return `Unity import failed at step "${this.step}": ${this.detail}`;
+  }
+}
+
 export const GenerationToolError = Schema.Union([
   GenerationCapabilityUnavailableError,
   GenerationJobNotFoundError,
   GeneratedAssetNotFoundError,
   GenerationProjectResolutionError,
+  UnityWorkspaceResolutionError,
+  UnityEditorNotReadyError,
+  UnityImportFailedError,
 ]);
 export type GenerationToolError = typeof GenerationToolError.Type;

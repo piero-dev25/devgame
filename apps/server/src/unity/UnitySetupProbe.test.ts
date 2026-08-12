@@ -73,8 +73,13 @@ function stubPipelineClient(
       // without a concrete base value here, the `...overrides` spread below
       // (typed `Partial<...>`) makes the MERGED object's `packageResolve`
       // inferred optional, which does not satisfy `.of(...)`'s required
-      // member.
+      // member. Same reasoning again for `importAsset`/`setImportSettings`/
+      // `eval`, required members since Increment 2a — this suite never
+      // authors into a project.
       packageResolve: () => Effect.die("unexpected packageResolve call"),
+      importAsset: () => Effect.die("unexpected importAsset call"),
+      setImportSettings: () => Effect.die("unexpected setImportSettings call"),
+      eval: () => Effect.die("unexpected eval call"),
       ...overrides,
     }),
   );

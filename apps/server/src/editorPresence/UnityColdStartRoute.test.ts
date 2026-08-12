@@ -92,8 +92,13 @@ function makeUnityPipelineClientSpy(input: {
       // because `UnityPipelineClient.of({...})`'s object literal is checked
       // against the FULL service interface, same latent-gap pattern this
       // file's own `install`/`open` fields close. `packageResolve` became a
-      // required member when task #130 landed.
+      // required member when task #130 landed; `importAsset`/
+      // `setImportSettings`/`eval` became required members when
+      // Increment 2a landed.
       packageResolve: () => Effect.die("unexpected packageResolve call"),
+      importAsset: () => Effect.die("unexpected importAsset call"),
+      setImportSettings: () => Effect.die("unexpected setImportSettings call"),
+      eval: () => Effect.die("unexpected eval call"),
     }),
   );
   return { layer, calls };

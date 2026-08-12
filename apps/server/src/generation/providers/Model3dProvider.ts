@@ -45,14 +45,19 @@ export interface Model3dProviderShape {
     providerTaskId: string,
   ) => Effect.Effect<Model3dTaskState, Model3dProviderError>;
   /**
-   * Increment 2 consumes this (Unity needs FBX, not raw GLB — spike 1
-   * finding: raw `.glb` imports as `DefaultAsset`, 0 meshes). A minimal
-   * submit-only implementation is sufficient for this increment per the
-   * frozen spec; nothing here polls it to completion.
+   * Increment 2a consumes this (Unity needs FBX, not raw GLB — spike 1
+   * finding: raw `.glb` imports as `DefaultAsset`, 0 meshes). Submits a
+   * `convert_model` task AND polls it through to completion, returning the
+   * finished FBX's URL — see `TripoProvider.ts`'s `deriveFbx`. Corrected
+   * from this increment's original stub shape (`{ providerTaskId }`,
+   * copy-pasted from `submitTextTo3d` before increment 2a's real
+   * implementation existed to check it against) — the spec's "Complete
+   * `deriveFbx`" step is explicit that this returns "the FBX url", not a
+   * providerTaskId a caller would then have to poll separately.
    */
   readonly deriveFbx: (
     originalProviderTaskId: string,
-  ) => Effect.Effect<{ readonly providerTaskId: string }, Model3dProviderError>;
+  ) => Effect.Effect<{ readonly fbxUrl: string }, Model3dProviderError>;
 }
 
 export class Model3dProvider extends Context.Service<Model3dProvider, Model3dProviderShape>()(
