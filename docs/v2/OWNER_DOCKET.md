@@ -4,6 +4,21 @@ Compiled 2026-08-11 from research waves 1–2 (evidence in `notes/` and the
 draft architecture docs). Ordered by how hard they block the vertical
 spike.
 
+> **RESOLVED 2026-08-12:**
+> **D1 → APPROVED (option a).** Re-admit `eval` narrowly: harness-authored,
+> allowlisted, read-only inspection snippets only, never agent-composed C#.
+> **D3 → RESOLVED, no payment needed.** Tripo key "DevGame Generation"
+> created + stored 0600 at `~/.config/devgame/tripo-api-key`; the claimable
+> **free trial wallet (600 credits, valid to 2026-08-26) IS API-usable** —
+> live-verified `balance:600`. ⚠️ Build against **API v3** — v2 retires
+> 2026-10-01 (full shutdown 11-01).
+> **Spike-scope defaults taken** (flagged for a production ruling later):
+> D2 → grant `generation` capability for the single-user spike; gate PAID
+> providers inside GenerationService. D4 → write generated files to the
+> **canonical** Assets/ (only place the Editor sees them). D6 → nested
+> `engineImport` field for the first migration; promote to a separate
+> record if re-import demand appears. D5/D7 → not reached by the spike.
+
 ## D1 — Re-admit `eval` for technical inspection? (BLOCKS inspect_generation)
 
 The live 140-tool enumeration proved the vertical spike is covered by
