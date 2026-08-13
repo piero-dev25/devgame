@@ -789,8 +789,15 @@ export const GenerationStandardToolkitHandlersLive = GenerationStandardToolkit.t
  * opaque reference) and drops everything above it — in particular the
  * absolute `stateDir` prefix, which is rooted under this machine's home
  * directory.
+ *
+ * Exported (Increment 2b.1, docs/v2/specs/increment-2b1-generation-panel.md)
+ * so the read-only web `GenerationListRoute.ts` reuses this SAME redaction
+ * for the panel's browser-facing response instead of re-implementing it —
+ * the spec's own explicit instruction, and the same "one funnel, not a
+ * second copy that could drift" reasoning this comment already gives for
+ * `inspectGeneration` below.
  */
-const toClientSafeGeneratedAsset = (asset: GeneratedAsset): GeneratedAsset => {
+export const toClientSafeGeneratedAsset = (asset: GeneratedAsset): GeneratedAsset => {
   const marker = "generated/";
   const markerIndex = asset.files.glb.lastIndexOf(marker);
   const glb =

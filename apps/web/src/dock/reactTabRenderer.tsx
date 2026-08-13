@@ -9,6 +9,7 @@ import {
   Globe2,
   MessageSquare,
   PanelLeft,
+  Sparkles,
   TerminalSquare,
   X,
   type LucideIcon,
@@ -47,8 +48,9 @@ import { createRoot, type Root } from "react-dom/client";
  * Keyed by panel id, which a tab CAN read (`params.api.id`) without app
  * context — so this stays inside the boundary documented above rather than
  * forcing the portal refactor. `sidebar`/`chat` come from ChatDock.tsx;
- * `diff`/`files` from chatDockHandle.ts; the rest are the surfaces still
- * queued to migrate.
+ * `diff`/`files` from chatDockHandle.ts; `generation` from ChatDock.tsx's
+ * own local `GENERATION_PANEL_ID` (Increment 2b.1); the rest are the
+ * surfaces still queued to migrate.
  *
  * An unrecognised id renders NO icon rather than a placeholder one. A missing
  * icon is merely plain; a wrong icon actively misinforms.
@@ -67,6 +69,7 @@ const PANEL_TAB_ICONS: Readonly<Record<string, LucideIcon>> = {
   terminal: TerminalSquare,
   preview: Globe2,
   plan: ClipboardList,
+  generation: Sparkles,
 };
 
 interface TabContentProps {

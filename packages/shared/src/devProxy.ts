@@ -24,6 +24,14 @@ export const DEV_PROXIED_PATH_PREFIXES = [
   // the request in the first place — an older gap the newer fix exposed,
   // same shape as #87's proxy race hiding behind a fabricated 500.
   "/unity",
+  // `GENERATION_LIST_PATH` (`/generation/list`) — Increment 2b.1's own read
+  // route lives outside `/api`, same non-`/api` shape as `/unity` above, so
+  // it needs the identical prefix entry or it hits #115's exact failure
+  // mode in single-origin `pnpm dev:web`. Added proactively this time
+  // rather than found live after the fact. (`GET
+  // /api/generation-assets/*`, the signed media route, already falls under
+  // the pre-existing `/api` prefix and needs no entry of its own.)
+  "/generation",
 ] as const;
 
 /**

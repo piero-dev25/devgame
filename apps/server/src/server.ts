@@ -34,6 +34,10 @@ import { unityRaiseRouteLayer } from "./unity/UnityRaiseRoute.ts";
 import * as UnitySetupProbe from "./unity/UnitySetupProbe.ts";
 import * as EditorPresenceRegistry from "./editorPresence/EditorPresenceRegistry.ts";
 import { unityColdStartRouteLayer } from "./editorPresence/UnityColdStartRoute.ts";
+import * as GenerationService from "./generation/GenerationService.ts";
+import { generationAssetRouteLayer } from "./generation/GenerationAssetRoute.ts";
+import { generationListRouteLayer } from "./generation/GenerationListRoute.ts";
+import * as TripoProvider from "./generation/providers/TripoProvider.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -404,6 +408,33 @@ const UnitySetupProbeLayerLive = UnitySetupProbe.layer.pipe(
   Layer.provide(PlatformServicesLive),
 );
 
+/**
+ * Hoisted here for the identical reason `EditorPresenceRegistry.layer` just
+ * above is: `GenerationServiceLive` used to be a PRIVATE const inside
+ * `McpHttpServer.ts`, reachable only by the MCP tools
+ * (`generate_3d`/`generation_status`/`list_generations`/
+ * `import_generated_asset`/`inspect_generation`). Increment 2b.1's read-only
+ * web Generation panel (docs/v2/specs/increment-2b1-generation-panel.md)
+ * needs to read that SAME in-memory job/asset registry — a second
+ * `GenerationService.layer()` call in a new route would memoize its OWN
+ * separate, permanently-empty instance (Effect memoizes per LAYER
+ * REFERENCE, not per underlying service), and the panel would show nothing
+ * forever with no error to explain why. This ONE const is passed as the
+ * SAME reference into `McpHttpServer.layer(...)` below,
+ * `generationListRouteLayer`/`generationAssetRouteLayer`'s own
+ * `HttpRouter.provideRequest` at the route-registration site further down,
+ * AND (fix round — same reference is NOT automatically sufficient; see
+ * `makeRoutesLayer`'s own closing `.pipe(Layer.provide(GenerationServiceLive))`
+ * for why) as a genuine ANCESTOR `Layer.provide` wrapping the whole merged
+ * routes+MCP graph. See `GenerationServiceRegistrySharing.test.ts` for the
+ * empirical proof (including the real, build-order-race failure mode this
+ * ancestor provide fixes). No options are passed (matching McpHttpServer.ts's
+ * own former call site exactly — it never customized `pollIntervalMs`/
+ * `pollDeadlineMs`/`maxConcurrentGenerations`/`maxGlbBytes` either, so this
+ * hoist changes WHERE the call happens, not what it does).
+ */
+const GenerationServiceLive = GenerationService.layer().pipe(Layer.provide(TripoProvider.layer));
+
 const TerminalLayerLive = TerminalManager.layer.pipe(
   Layer.provide(PtyAdapterLive),
   Layer.provide(PortScannerLayerLive),
@@ -579,14 +610,64 @@ export const makeRoutesLayer = Layer.mergeAll(
     unityRaiseRouteLayer.pipe(HttpRouter.provideRequest(UnityPipelineClientLayerLive)),
     unitySetupProbeRouteLayer.pipe(HttpRouter.provideRequest(UnitySetupProbeLayerLive)),
     spaceEventsRouteLayer,
+    // Increment 2b.1: the shared `GenerationServiceLive` reference above,
+    // discharged the SAME way every other route-owned dependency in this
+    // merge is (`HttpRouter.provideRequest`, never `.pipe(Layer.provide)` —
+    // the standing ~290-error cascade the `UnityPipelineClientLayerLive`
+    // comment further up documents). `HttpRouter.provideRequest` is
+    // MANDATORY here (a route's own requirement is wrapped in a branded
+    // `Request.From<"Requires", X>` marker only this combinator can
+    // discharge) — but see the ANCESTOR `Layer.provide(GenerationServiceLive)`
+    // in this layer's own closing `.pipe(...)` below for why
+    // `provideRequest` ALONE is not sufficient for a singleton shared with
+    // an ORDINARY (non-route) consumer.
+    generationListRouteLayer.pipe(HttpRouter.provideRequest(GenerationServiceLive)),
+    generationAssetRouteLayer.pipe(HttpRouter.provideRequest(GenerationServiceLive)),
   ),
-  McpHttpServer.layer.pipe(Layer.provide(McpSessionRegistry.layer)),
+  McpHttpServer.layer(GenerationServiceLive).pipe(Layer.provide(McpSessionRegistry.layer)),
 ).pipe(
   Layer.provide(PreviewAutomationBroker.layer),
   Layer.provide(ServerSelfUpdate.layer),
   Layer.provide(commandReadinessLayer),
   Layer.provide(browserApiCorsLayer),
   Layer.provide(httpCompressionLayer),
+  // FIX ROUND (adversarial review, verified against effect source —
+  // `GenerationServiceRegistrySharing.test.ts`'s "REAL topology" describe
+  // block has the full trace): `HttpRouter.provideRequest(layer)`'s
+  // internal `yield* Layer.build(layer)` UNCONDITIONALLY forks a CHILD memo
+  // map (`Layer.ts`'s `CurrentMemoMap.forkOrCreate`) off whatever map is
+  // building the surrounding graph. A forked child's build-on-miss writes
+  // ONLY into its own map, never back into the parent — so the TWO
+  // `generationListRouteLayer`/`generationAssetRouteLayer` sites above,
+  // each independently forking, are NOT guaranteed to see whatever
+  // `McpHttpServer.layer(GenerationServiceLive)`'s own ORDINARY structural
+  // `Layer.provide` builds elsewhere in this SAME `Layer.mergeAll` — that
+  // mergeAll builds all its members CONCURRENTLY
+  // (`Effect.forEach(..., {concurrency: layers.length})`), so which side
+  // registers `GenerationServiceLive` into the shared map first is a real
+  // build-order race. Empirically confirmed broken (5/5 deterministic runs,
+  // not flaky) via `GenerationServiceRegistrySharing.test.ts`'s own
+  // "MUTATION GUARD: ...do NOT reliably share" test, which reproduces this
+  // exact shape.
+  //
+  // The fix: provide `GenerationServiceLive` ONCE MORE here, as a TRUE
+  // ANCESTOR wrapping this entire merged graph, via ORDINARY `Layer.provide`
+  // (never `HttpRouter.provideRequest` — this is not discharging a route's
+  // own branded requirement, it's an ambient dependency every consumer
+  // inherits). `Layer.provide`'s own implementation (`Layer.ts`'s
+  // `provideWith`) sequences via `Effect.flatMap`: the provided layer
+  // (`GenerationServiceLive`) is built to COMPLETION FIRST — directly under
+  // the SAME (non-forked) memo map — before this whole `self` graph's build
+  // even starts. By the time either route's `provideRequest`-forked child
+  // looks up `GenerationServiceLive`, the ancestor's entry is ALREADY
+  // registered in the parent map: a deterministic read-through, not a race.
+  // `McpHttpServer.layer(GenerationServiceLive)`'s own internal
+  // `Layer.provide(generationServiceLive)` is UNCHANGED and harmless here —
+  // same reference, same (now already-populated) memo map, so it just
+  // reuses the ancestor's already-built instance rather than building a
+  // second one. Verified: `GenerationServiceRegistrySharing.test.ts`'s "FIX
+  // VERIFIED" test reproduces this EXACT shape and is green, deterministically.
+  Layer.provide(GenerationServiceLive),
 );
 
 export const makeServerLayer = Layer.unwrap(

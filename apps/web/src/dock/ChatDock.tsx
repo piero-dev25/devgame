@@ -39,7 +39,15 @@ import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
 import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
-import { FileDiff, Files, Globe2, MessageCircle, PanelLeft, TerminalSquare } from "lucide-react";
+import {
+  FileDiff,
+  Files,
+  Globe2,
+  MessageCircle,
+  PanelLeft,
+  Sparkles,
+  TerminalSquare,
+} from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import {
@@ -55,6 +63,7 @@ import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./C
 import DiffDockPanel from "./DiffDockPanel";
 import { DockviewLayout, type DockviewLayoutHandle } from "./DockviewLayout";
 import FilesDockPanel from "./FilesDockPanel";
+import GenerationDockPanel from "./GenerationDockPanel";
 import TerminalDockPanel from "./TerminalDockPanel";
 import {
   createPanelRegistry,
@@ -73,6 +82,19 @@ const DIFF_GROUP_ID = "group-diff";
 const FILES_GROUP_ID = "group-files";
 const TERMINAL_GROUP_ID = "group-terminal";
 const BROWSER_GROUP_ID = "group-browser";
+const GENERATION_GROUP_ID = "group-generation";
+
+/**
+ * Increment 2b.1's own panel id — kept LOCAL to this file (this fork's usual
+ * place for a panel id constant, `chatDockHandle.ts`'s own comment on why
+ * that module is only for ids a DESCENDANT needs to reach across the
+ * dock-reachability boundary) rather than added to `chatDockHandle.ts`:
+ * nothing calls `openChatDockPanel("generation")` from `ChatView.tsx` in
+ * this increment — the panel is default-visible via the preset below, not
+ * opened programmatically — so there is no cross-boundary need `diff`/
+ * `files`/`terminal`/`browser` each have that this id would share.
+ */
+const GENERATION_PANEL_ID = "generation";
 
 const CHAT_DOCK_PRESET_ID = "chat-dock-default";
 /**
@@ -350,12 +372,35 @@ chatDockPanelRegistry.register({
 });
 
 /**
+ * Increment 2b.1 (docs/v2/specs/increment-2b1-generation-panel.md): the
+ * read-only Generation panel — the human half of the generation loop, so
+ * "the loop is the product" (charter §69) means this panel should be
+ * PRESENT, not hidden behind Add-tab. Default-visible via the preset below,
+ * same as every other panel in this file.
+ *
+ * `singleton: true`: one project's generation list has no case for two
+ * simultaneous instances, same reasoning every other panel here gives.
+ *
+ * `closeable: true` (the default, no override): a view of jobs+assets is
+ * never destructive to close, same as Diff/Files/Terminal/Browser.
+ */
+chatDockPanelRegistry.register({
+  id: GENERATION_PANEL_ID,
+  title: "Generation",
+  icon: Sparkles,
+  component: GenerationDockPanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
- * Terminal and Browser further right — the same third-column slot Files
- * occupied before Part A deleted our own version of it, now occupied by
- * T3's own Diff, Files, Terminal AND Browser surfaces instead of a
- * re-filled stand-in. This preset now covers every surface
- * spec-surfaces-as-dock-panels.md set out to promote.
+ * Terminal, Browser and Generation further right — the same third-column
+ * slot Files occupied before Part A deleted our own version of it, now
+ * occupied by T3's own Diff, Files, Terminal, Browser surfaces plus this
+ * fork's own Generation panel instead of a re-filled stand-in. This preset
+ * now covers every surface spec-surfaces-as-dock-panels.md set out to
+ * promote, plus Increment 2b.1's own addition.
  *
  * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
  * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
@@ -411,8 +456,15 @@ function buildChatDockPreset(): SerializedDockview {
   const FILES_WIDTH = 400;
   const TERMINAL_WIDTH = 400;
   const BROWSER_WIDTH = 400;
+  const GENERATION_WIDTH = 400;
   const CONTAINER_WIDTH =
-    SIDEBAR_WIDTH + CHAT_WIDTH + DIFF_WIDTH + FILES_WIDTH + TERMINAL_WIDTH + BROWSER_WIDTH;
+    SIDEBAR_WIDTH +
+    CHAT_WIDTH +
+    DIFF_WIDTH +
+    FILES_WIDTH +
+    TERMINAL_WIDTH +
+    BROWSER_WIDTH +
+    GENERATION_WIDTH;
 
   return {
     grid: {
@@ -461,6 +513,15 @@ function buildChatDockPreset(): SerializedDockview {
               activeView: BROWSER_PANEL_ID,
             },
           },
+          {
+            type: "leaf",
+            size: GENERATION_WIDTH,
+            data: {
+              id: GENERATION_GROUP_ID,
+              views: [GENERATION_PANEL_ID],
+              activeView: GENERATION_PANEL_ID,
+            },
+          },
         ],
       },
     },
@@ -471,6 +532,7 @@ function buildChatDockPreset(): SerializedDockview {
       [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
       [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),
       [BROWSER_PANEL_ID]: presetPanelEntry(BROWSER_PANEL_ID, "Browser"),
+      [GENERATION_PANEL_ID]: presetPanelEntry(GENERATION_PANEL_ID, "Generation"),
     },
     activeGroup: CHAT_GROUP_ID,
   };

@@ -20,7 +20,6 @@ import {
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as GenerationService from "../generation/GenerationService.ts";
-import * as TripoProvider from "../generation/providers/TripoProvider.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -386,8 +385,6 @@ const registerInspectGeneration = Effect.fn("McpHttpServer.registerInspectGenera
   },
 );
 
-const GenerationServiceLive = GenerationService.layer().pipe(Layer.provide(TripoProvider.layer));
-
 const GenerationStandardToolkitRegistrationLive = McpServer.toolkit(GenerationStandardToolkit).pipe(
   Layer.provide(GenerationStandardToolkitHandlersLive),
 );
@@ -398,10 +395,29 @@ const GenerationStandardToolkitRegistrationLive = McpServer.toolkit(GenerationSt
  * needing a real Tripo job lifecycle — merge-gate P3 #8. */
 export const GenerationInspectRegistrationLive = Layer.effectDiscard(registerInspectGeneration());
 
-export const GenerationToolkitRegistrationLive = Layer.mergeAll(
-  GenerationStandardToolkitRegistrationLive,
-  GenerationInspectRegistrationLive,
-).pipe(Layer.provide(GenerationServiceLive));
+/**
+ * `generationServiceLive` is a PARAMETER (Increment 2b.1,
+ * docs/v2/specs/increment-2b1-generation-panel.md) — this used to build its
+ * OWN private `GenerationServiceLive = GenerationService.layer().pipe(
+ * Layer.provide(TripoProvider.layer))` right here. That was fine while the
+ * MCP tools were the only consumer of `GenerationService`; once a web route
+ * (`GenerationListRoute.ts`) needs to read the SAME in-memory job/asset
+ * registry, TWO independent `GenerationService.layer()` calls would each
+ * memoize their OWN separate instance (Effect memoizes per LAYER
+ * REFERENCE, not per underlying service) — the panel would show nothing
+ * forever, no error. `server.ts` now hoists ONE `GenerationServiceLive`
+ * const (mirroring how `EditorPresenceRegistry.layer` is hoisted there
+ * already) and passes that SAME reference in here AND into the new routes'
+ * own `HttpRouter.provideRequest` — this function threading it through
+ * (rather than importing `TripoProvider`/building its own instance) is
+ * what makes that sharing real instead of just plausible-looking.
+ */
+const GenerationToolkitRegistrationLive = <R>(
+  generationServiceLive: Layer.Layer<GenerationService.GenerationService, never, R>,
+) =>
+  Layer.mergeAll(GenerationStandardToolkitRegistrationLive, GenerationInspectRegistrationLive).pipe(
+    Layer.provide(generationServiceLive),
+  );
 
 const McpTransportLive = McpServer.layerHttp({
   name: "DevGame",
@@ -410,7 +426,10 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
-export const layer = Layer.mergeAll(
-  PreviewToolkitRegistrationLive,
-  GenerationToolkitRegistrationLive,
-).pipe(Layer.provideMerge(McpTransportLive));
+export const layer = <R>(
+  generationServiceLive: Layer.Layer<GenerationService.GenerationService, never, R>,
+) =>
+  Layer.mergeAll(
+    PreviewToolkitRegistrationLive,
+    GenerationToolkitRegistrationLive(generationServiceLive),
+  ).pipe(Layer.provideMerge(McpTransportLive));

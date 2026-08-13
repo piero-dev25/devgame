@@ -314,3 +314,59 @@ export const GenerationToolError = Schema.Union([
   UnityImportFailedError,
 ]);
 export type GenerationToolError = typeof GenerationToolError.Type;
+
+// ---------------------------------------------------------------------------
+// `GET /generation/list` — Increment 2b.1
+// (docs/v2/specs/increment-2b1-generation-panel.md). The HUMAN half of the
+// generation loop: a browser-facing, read-only, project-scoped list of jobs
+// + their finished assets, mirroring `unitySetup.ts`'s own
+// `UnitySetupProbeInput`/`Result`/`_PATH` trio shape (opaque `projectId` in,
+// a success-or-typed-error union out, the path constant kept alongside the
+// schemas it belongs to).
+// ---------------------------------------------------------------------------
+
+/** The client supplies only the opaque, server-issued project id it already
+ * holds — same posture as `UnitySetupProbeInput`. */
+export const GenerationListInput = Schema.Struct({ projectId: ProjectId });
+export type GenerationListInput = typeof GenerationListInput.Type;
+
+/** One row the panel renders: a job, plus its asset once one exists.
+ * `asset`/`previewMediaUrl` are both `null` together until the job succeeds
+ * — never independently, since a `previewMediaUrl` with no `asset` would be
+ * meaningless and an `asset` with no `previewMediaUrl` just means Tripo
+ * returned no preview image (`GeneratedAsset.preview.imageUrl` was already
+ * `null` before this route ever ran). `asset` is `GeneratedAsset` as
+ * returned by `toClientSafeGeneratedAsset` (handlers.ts) — `files.glb` is
+ * already the redacted relative form, never the absolute server path — the
+ * SAME redaction the `inspect_generation` MCP tool applies, reused rather
+ * than reimplemented. `previewMediaUrl` is a signed, time-limited URL onto
+ * `GET /api/generation-assets/*` (`GenerationAssetRoute.ts`) — this
+ * increment's panel renders only the thumbnail; a `glbMediaUrl` sibling is
+ * deliberately NOT included here (nothing in scope renders a GLB — the
+ * viewer is a 2b.2+ slice per the spec's Scope (OUT)), even though the
+ * underlying signed-URL route itself supports a `"glb"` kind generically for
+ * that later slice. */
+export const GenerationListEntry = Schema.Struct({
+  job: GenerationJob,
+  asset: Schema.NullOr(GeneratedAsset),
+  previewMediaUrl: Schema.NullOr(Schema.String),
+});
+export type GenerationListEntry = typeof GenerationListEntry.Type;
+
+export const GenerationListSuccess = Schema.Struct({
+  entries: Schema.Array(GenerationListEntry),
+});
+export type GenerationListSuccess = typeof GenerationListSuccess.Type;
+
+/** A successful list, or an honest typed failure to resolve the opaque
+ * project id — same union shape as `UnitySetupProbeResult`. */
+export const GenerationListResult = Schema.Union([
+  GenerationListSuccess,
+  Schema.TaggedStruct("error", { message: Schema.String }),
+]);
+export type GenerationListResult = typeof GenerationListResult.Type;
+
+/** Kept alongside the schema so the one client call site and the one server
+ * route definition both import a single literal — same convention as
+ * `UNITY_SETUP_PROBE_PATH`. */
+export const GENERATION_LIST_PATH = "/generation/list";
