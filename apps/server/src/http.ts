@@ -42,7 +42,16 @@ import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./ht
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"];
+// The DevGame desktop renderer is served from a custom protocol origin
+// (`getDesktopOrigin` in apps/desktop ElectronProtocol.ts: `devgame://app`
+// packaged, `devgame-dev://app` in dev), so its credentialed fetches to the
+// backend are cross-origin and MUST be allow-listed here or CORS blocks every
+// response (the renderer sees "no response received" while curl — which sends
+// no Origin — still gets 200). The fork rename (t3code → devgame) changed the
+// scheme; these strings mirror ElectronProtocol's DESKTOP_*_SCHEME constants.
+// apps/server cannot import that Electron-only module, so keep this in sync
+// with it (server.test.ts asserts the current dev origin is allowed).
+const DESKTOP_RENDERER_ORIGINS = ["devgame://app", "devgame-dev://app"];
 export const httpCompressionLayer = HttpRouter.middleware(HttpMiddleware.compression(), {
   global: true,
 });

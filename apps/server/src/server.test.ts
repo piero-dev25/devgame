@@ -3521,7 +3521,12 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  for (const desktopOrigin of ["t3code://app", "t3code-dev://app"]) {
+  // The DevGame desktop renderer origins (fork rename: t3code -> devgame). This
+  // must track apps/server/src/http.ts DESKTOP_RENDERER_ORIGINS + ElectronProtocol's
+  // DESKTOP_*_SCHEME; if it drifts, the desktop renderer's credentialed backend
+  // fetch is CORS-blocked and the app dies on "fetch-session-state (no response
+  // received)" — which is exactly what a stale allowlist did before this test caught it.
+  for (const desktopOrigin of ["devgame://app", "devgame-dev://app"]) {
     it.effect(`allows credentialed preflights from ${desktopOrigin} in development`, () =>
       Effect.gen(function* () {
         yield* buildAppUnderTest({
