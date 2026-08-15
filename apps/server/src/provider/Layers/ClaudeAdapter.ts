@@ -4212,6 +4212,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         // happens not to inject a harness server.
         strictMcpConfig: true,
         env: { ...claudeEnvironment, ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
+        // #155 diagnostic (env-gated, inert unless T3CODE_CLAUDE_DEBUG_FILE is set):
+        // capture the spawned CLI's verbose debug — including its MCP client's
+        // tools/list result + tool registration — to a file, so we can see whether
+        // the devgame server's tools reach the CLI's tool registry over a handshake
+        // the server logs as successful. No behavior change when the env is unset.
+        ...(process.env["T3CODE_CLAUDE_DEBUG_FILE"]
+          ? { debug: true, debugFile: process.env["T3CODE_CLAUDE_DEBUG_FILE"] }
+          : {}),
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
