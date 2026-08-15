@@ -4195,11 +4195,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(newSessionId ? { sessionId: newSessionId } : {}),
         includePartialMessages: true,
         canUseTool,
-        env: claudeEnvironment,
+        // #155: isolate EVERY in-app Claude turn from the operator's ambient MCP
+        // config, independent of whether the devgame harness is injected this turn.
+        // settingSources stays [user,project,local] (needed for workspace commands /
+        // CLAUDE.md) but that ALSO merges the machine's ~/.claude.json + project
+        // .mcp.json MCP servers, and connected claude.ai servers merge in separately.
+        // Without this the operator's personal MCP servers (Gmail/Drive/Strava/etc.)
+        // surface to in-app agents AND crowd out the harness's injected `devgame`
+        // tools. Mirror the capability probe's isolation
+        // (ClaudeProvider.ts:buildClaudeCapabilitiesProbeQueryOptions; commit
+        // aa5ec8036/#4015 only wired it to the probe, never this real per-turn path):
+        // strictMcpConfig makes the SDK use ONLY the explicit `mcpServers` map (empty
+        // here unless devgame is injected below), and ENABLE_CLAUDEAI_MCP_SERVERS=false
+        // drops connected claude.ai servers. Kept UNCONDITIONAL (not gated on
+        // mcpSession) so the privacy boundary can't silently reopen on a turn that
+        // happens not to inject a harness server.
+        strictMcpConfig: true,
+        env: { ...claudeEnvironment, ENABLE_CLAUDEAI_MCP_SERVERS: "false" },
         ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
           ? {
+              // The injected harness /mcp server is the SOLE MCP source (strictMcpConfig
+              // above). `alwaysLoad: true` forces its tools into the turn-1 prompt
+              // (blocks until connected, capped ~5s) rather than deferring them behind
+              // tool-search, so preview + generation tools reliably reach the agent.
               mcpServers: {
                 devgame: {
                   type: "http",
@@ -4207,6 +4227,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   headers: {
                     Authorization: mcpSession.authorizationHeader,
                   },
+                  alwaysLoad: true,
                 },
               },
             }

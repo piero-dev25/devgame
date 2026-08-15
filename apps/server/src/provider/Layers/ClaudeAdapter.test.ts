@@ -14,6 +14,7 @@ import type {
 import {
   ApprovalRequestId,
   ClaudeSettings,
+  EnvironmentId,
   ProviderDriverKind,
   ProviderItemId,
   ProviderRuntimeEvent,
@@ -34,6 +35,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import { attachmentRelativePath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
@@ -271,6 +273,7 @@ async function readFirstPromptMessage(
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
 const RESUME_THREAD_ID = ThreadId.make("thread-claude-resume");
+const MCP_ISOLATION_THREAD_ID = ThreadId.make("thread-claude-mcp-isolation");
 
 describe("ClaudeAdapterLive", () => {
   it.effect("returns validation error for non-claude provider on startSession", () => {
@@ -399,6 +402,74 @@ describe("ClaudeAdapterLive", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect(
+    "isolates in-app agent turns from the operator's ambient MCP config when an mcpSession is present (#155)",
+    () => {
+      const harness = makeHarness();
+      const endpoint = "http://127.0.0.1:0/mcp";
+      const authorizationHeader = "Bearer test-mcp-session-token";
+      McpProviderSession.setMcpProviderSession({
+        environmentId: EnvironmentId.make("env-mcp-isolation"),
+        threadId: MCP_ISOLATION_THREAD_ID,
+        providerSessionId: "provider-session-mcp-isolation",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint,
+        authorizationHeader,
+      });
+
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: MCP_ISOLATION_THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+
+        const createInput = harness.getLastCreateQueryInput();
+        assert.equal(createInput?.options.strictMcpConfig, true);
+        assert.equal(createInput?.options.env?.["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert.deepEqual(Object.keys(createInput?.options.mcpServers ?? {}), ["devgame"]);
+        const devgameServer = createInput?.options.mcpServers?.["devgame"];
+        assert.deepEqual(devgameServer, {
+          type: "http",
+          url: endpoint,
+          headers: { Authorization: authorizationHeader },
+          alwaysLoad: true,
+        });
+        assert.equal(devgameServer?.type === "http" ? devgameServer.alwaysLoad : undefined, true);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+        Effect.ensuring(
+          Effect.sync(() => McpProviderSession.clearMcpProviderSession(MCP_ISOLATION_THREAD_ID)),
+        ),
+      );
+    },
+  );
+
+  it.effect(
+    "isolates in-app turns from ambient MCP even with NO mcpSession — privacy independent of harness injection (#155)",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "approval-required",
+        });
+
+        const createInput = harness.getLastCreateQueryInput();
+        assert.equal(createInput?.options.strictMcpConfig, true);
+        assert.equal(createInput?.options.env?.["ENABLE_CLAUDEAI_MCP_SERVERS"], "false");
+        assert.equal(createInput?.options.mcpServers, undefined);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    },
+  );
 
   it.effect("uses bypass permissions for full-access claude sessions", () => {
     const harness = makeHarness();
