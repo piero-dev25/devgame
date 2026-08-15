@@ -219,9 +219,19 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
   });
 });
 
-const PreviewStandardToolkitRegistrationLive = McpServer.toolkit(PreviewStandardToolkit).pipe(
-  Layer.provide(PreviewStandardToolkitHandlersLive),
-);
+// Use `McpServer.registerToolkit` (leaves `McpServer` an OUTER requirement,
+// discharged from the transport's served instance via `Layer.provideMerge(
+// McpTransportLive)` below) — NOT `McpServer.toolkit`, which self-provides its
+// OWN `McpServer.layer` (effect McpServer.ts:951: `toolkit = t =>
+// effectDiscard(registerToolkit(t)).pipe(provide(McpServer.layer))`). With
+// `toolkit`, the tools register into a throwaway McpServer instance that the
+// HTTP transport never serves, so `/mcp` returns an EMPTY tools/list and NO
+// harness tool (preview or generation) reaches any agent. Matches the manual
+// `registerPreviewSnapshot`/`registerInspectGeneration` registrations, which
+// already correctly require the outer McpServer.
+const PreviewStandardToolkitRegistrationLive = Layer.effectDiscard(
+  McpServer.registerToolkit(PreviewStandardToolkit),
+).pipe(Layer.provide(PreviewStandardToolkitHandlersLive));
 
 const PreviewSnapshotRegistrationLive = Layer.effectDiscard(registerPreviewSnapshot()).pipe(
   Layer.provide(PreviewSnapshotToolkitHandlersLive),
@@ -385,9 +395,11 @@ const registerInspectGeneration = Effect.fn("McpHttpServer.registerInspectGenera
   },
 );
 
-const GenerationStandardToolkitRegistrationLive = McpServer.toolkit(GenerationStandardToolkit).pipe(
-  Layer.provide(GenerationStandardToolkitHandlersLive),
-);
+// registerToolkit (outer McpServer), NOT McpServer.toolkit (self-provides a
+// throwaway instance) — see PreviewStandardToolkitRegistrationLive's comment.
+const GenerationStandardToolkitRegistrationLive = Layer.effectDiscard(
+  McpServer.registerToolkit(GenerationStandardToolkit),
+).pipe(Layer.provide(GenerationStandardToolkitHandlersLive));
 
 /** Exported (not just used by `GenerationToolkitRegistrationLive` below) so
  * `registerInspectGeneration`'s own image-block-assembly/degrade-on-failure
