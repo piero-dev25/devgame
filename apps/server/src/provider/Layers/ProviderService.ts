@@ -214,8 +214,24 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+  // #155 A1 (docs/v2/specs/increment-155-A1-instrumentation.md): does the
+  // harness config actually get injected for this thread at all, or is that
+  // where the loop is silently breaking? Authorization header is logged as
+  // presence+length only, never the value.
   const prepareMcpSession = (threadId: ThreadId, providerInstanceId: ProviderInstanceId) =>
     McpSessionRegistry.issueActiveMcpCredential({ threadId, providerInstanceId }).pipe(
+      Effect.tap((credential) =>
+        Effect.logInfo("[mcp-diag] mcp session set", {
+          threadId,
+          providerInstanceId,
+          endpoint: credential?.config.endpoint ?? null,
+          hasConfig: credential !== undefined,
+          authorizationHeader: {
+            present: credential !== undefined,
+            length: credential?.config.authorizationHeader.length ?? 0,
+          },
+        }),
+      ),
       Effect.tap((credential) =>
         credential
           ? Effect.sync(() => McpProviderSession.setMcpProviderSession(credential.config))
@@ -224,6 +240,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   const clearMcpSession = (threadId: ThreadId) =>
     McpSessionRegistry.revokeActiveMcpThread(threadId).pipe(
+      Effect.tap(() =>
+        // No `providerInstanceId`/`endpoint` at this call site (`clearMcpSession`
+        // only ever receives `threadId` — see all call sites below); `hasConfig`
+        // is always false because clearing always removes whatever was there.
+        Effect.logInfo("[mcp-diag] mcp session clear", {
+          threadId,
+          hasConfig: false,
+        }),
+      ),
       Effect.tap(() => Effect.sync(() => McpProviderSession.clearMcpProviderSession(threadId))),
     );
 

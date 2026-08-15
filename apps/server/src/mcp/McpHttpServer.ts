@@ -90,12 +90,29 @@ const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
             ? authorization.slice("Bearer ".length).trim()
             : "";
         const invocation = yield* registry.resolve(token);
+        const rejectionReason = invocation
+          ? undefined
+          : token.length === 0
+            ? "missing_bearer_token"
+            : "unknown_or_expired_token";
+        // #155 A1 (docs/v2/specs/increment-155-A1-instrumentation.md): does the
+        // agent's initialize/tools/list request even ARRIVE at /mcp and
+        // authenticate? Bearer is logged as presence+length only, never the
+        // value.
+        yield* Effect.logInfo("[mcp-diag] mcp request", {
+          method: request.method,
+          path: request.url,
+          sessionId: invocation?.providerSessionId ?? null,
+          outcome: invocation ? "ok" : "rejected",
+          ...(rejectionReason ? { reason: rejectionReason } : {}),
+          bearer: { present: token.length > 0, length: token.length },
+        });
         if (!invocation) {
           // Without this the only symptom of a dead credential is the agent
           // quietly losing the whole `devgame` toolkit for the rest of its
           // session, with nothing on the server to explain why.
           yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-            reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
+            reason: rejectionReason,
           });
           return unauthorized;
         }
@@ -438,10 +455,43 @@ const McpTransportLive = McpServer.layerHttp({
   protocols: [McpProtocol.v2025_06_18],
 }).pipe(Layer.provide(McpAuthMiddlewareLive));
 
+// #155 A1 (docs/v2/specs/increment-155-A1-instrumentation.md) — THE decisive
+// diagnostic: what tools does the SERVED McpServer actually have once /mcp
+// finishes building? Requires the bare `McpServer.McpServer` tag, same as
+// `registerPreviewSnapshot`/`registerInspectGeneration` above, so it is
+// discharged by the SAME `Layer.provideMerge(McpTransportLive)` `layer`
+// already uses below — never a fresh `McpServer.McpServer.layer` ancestor,
+// which would read a different memoized instance the HTTP transport never
+// serves (the exact self-provide trap documented on
+// `PreviewStandardToolkitRegistrationLive` above).
+const McpDiagStartupLive = Layer.effectDiscard(
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    yield* Effect.logInfo("[mcp-diag] served McpServer tools", {
+      count: server.tools.length,
+      names: server.tools.map(({ tool }) => tool.name),
+    });
+  }),
+);
+
 export const layer = <R>(
   generationServiceLive: Layer.Layer<GenerationService.GenerationService, never, R>,
-) =>
-  Layer.mergeAll(
+) => {
+  const toolkitRegistrationsLive = Layer.mergeAll(
     PreviewToolkitRegistrationLive,
     GenerationToolkitRegistrationLive(generationServiceLive),
+  );
+  // `McpDiagStartupLive` is sequenced via `Layer.provide(toolkitRegistrationsLive)`
+  // rather than merged in as a third sibling: `Layer.mergeAll` builds its
+  // members CONCURRENTLY (effect Layer.js's `mergeAllEffect`), so a bare
+  // sibling could race ahead of tool registration and log a truncated list —
+  // a false negative for exactly the question this log exists to answer.
+  // `Layer.provide` builds its argument to completion before building `self`
+  // (effect Layer.js's `provideWith`), and `toolkitRegistrationsLive` is the
+  // same layer reference used below, so Effect's by-reference memoization
+  // builds it once and shares that single build with both usages.
+  return Layer.mergeAll(
+    toolkitRegistrationsLive,
+    McpDiagStartupLive.pipe(Layer.provide(toolkitRegistrationsLive)),
   ).pipe(Layer.provideMerge(McpTransportLive));
+};
