@@ -522,3 +522,28 @@ it.effect(
       }),
     ).pipe(Effect.provide(ProductionMcpServerLayer)),
 );
+
+// #155-B (docs/v2/specs/increment-155-B-empty-schema-fix.md): the `claude`
+// CLI's tools/list validator rejects the ENTIRE array if even ONE served
+// tool's inputSchema lacks a top-level `type:"object"` — a bare
+// `Schema.Struct({})` (list_generations, before the fix) hits Effect's
+// "vacuous empty object" JSON Schema branch and emits
+// `{anyOf:[{type:"object"},{type:"array"}]}` with no top-level `type`. This
+// reuses the SAME `ProductionMcpServerLayer` (real `McpHttpServer.layer`,
+// real `McpServer.McpServer.tools`) the topology test above proves is the
+// production-serving instance — a test that would have caught this exact
+// bug, since the old suite never inspected `inputSchema` at all.
+it.effect(
+  "PRODUCTION topology: every served tool's inputSchema has a top-level type:\"object\" (#155-B)",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        expect(server.tools.length).toBe(19);
+        const offenders = server.tools
+          .filter(({ tool }) => (tool.inputSchema as { readonly type?: unknown })?.type !== "object")
+          .map(({ tool }) => tool.name);
+        expect(offenders, `tool(s) with a malformed inputSchema: ${offenders.join(", ")}`).toEqual([]);
+      }),
+    ).pipe(Effect.provide(ProductionMcpServerLayer)),
+);

@@ -471,6 +471,34 @@ const McpDiagStartupLive = Layer.effectDiscard(
       count: server.tools.length,
       names: server.tools.map(({ tool }) => tool.name),
     });
+    // #155-B DEFENSIVE GUARD (docs/v2/specs/increment-155-B-empty-schema-fix.md):
+    // the `claude` CLI's tools/list validator rejects the ENTIRE array if even
+    // ONE served tool's inputSchema lacks a top-level `type:"object"` — the
+    // ROOT CAUSE of #155 (a bare `Schema.Struct({})` for `list_generations`
+    // silently took all 19 tools dark). Checked here, not earlier, because
+    // this is the same post-registration point `server.tools` above already
+    // reads — the full served list, after every declarative toolkit AND
+    // manual (`registerPreviewSnapshot`/`registerInspectGeneration`)
+    // registration has completed. Fail LOUD at server startup, naming every
+    // offender, instead of silently repairing a malformed schema: a repair
+    // could paper over a genuinely different future schema bug (e.g. a tool
+    // whose real params legitimately serialize to `type:"array"`), where a
+    // crash with an actionable message cannot.
+    const invalidToolSchemas = server.tools
+      .filter(({ tool }) => (tool.inputSchema as { readonly type?: unknown })?.type !== "object")
+      .map(({ tool }) => tool.name);
+    if (invalidToolSchemas.length > 0) {
+      return yield* Effect.die(
+        new Error(
+          `MCP tool(s) [${invalidToolSchemas.join(", ")}] have an inputSchema without a ` +
+            `top-level "type":"object" — the claude CLI's tools/list validator rejects the ` +
+            `ENTIRE tool array when even one is malformed (see #155-B). A bare ` +
+            `Schema.Struct({}) is the known trap (see ListGenerationsInput's own comment ` +
+            `for the Effect-idiomatic fix: Schema.StructWithRest(Struct({}), ` +
+            `[Record(String, Never)])).`,
+        ),
+      );
+    }
   }),
 );
 

@@ -32,12 +32,13 @@ describe("GenerationToolkit", () => {
         `${tool.name} should have a useful description`,
       ).toBeGreaterThan(40);
       const schema = Tool.getJsonSchema(tool) as { readonly type?: unknown };
-      // list_generations takes no parameters — Schema.Struct({})'s generated
-      // JSON schema omits `type` entirely rather than emitting an
-      // essentially-vacuous `{type:"object",properties:{}}`, so it is
-      // exempted from the "must declare object" check the other four
-      // (real-parameter) tools get.
-      if (tool.name === "list_generations") continue;
+      // #155-B: list_generations used to be exempted here — a bare
+      // `Schema.Struct({})`'s generated JSON schema omitted `type` entirely
+      // (this is the exact root cause that took down the whole MCP toolkit,
+      // see docs/v2/specs/increment-155-B-empty-schema-fix.md). Its
+      // `ListGenerationsInput` is now `StructWithRest(Struct({}), [Record(
+      // String, Never)])`, which emits a real `type:"object"`, so it gets
+      // the same check as every other tool.
       expect(schema.type, `${tool.name} must export a top-level object schema`).toBe("object");
     }
   });

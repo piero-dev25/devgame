@@ -142,7 +142,26 @@ export const GenerationStatusInput = Schema.Struct({
 });
 export type GenerationStatusInput = typeof GenerationStatusInput.Type;
 
-export const ListGenerationsInput = Schema.Struct({});
+/** #155-B: a bare `Schema.Struct({})` (zero property signatures, zero index
+ * signatures) hits Effect's "vacuous empty object" branch in its JSON Schema
+ * converter (`toJsonSchemaDocument.ts`'s `Objects` case), which emits
+ * `{anyOf:[{type:"object"},{type:"array"}]}` — no top-level `type` at all.
+ * The `claude` CLI's MCP client validates `tools/list` results with a
+ * schema requiring literal `inputSchema.type === "object"`, so that one
+ * malformed schema (tools.16, this tool — the ONLY bare-empty struct among
+ * the 19 devgame tools) fails the ENTIRE array and the CLI registers ZERO
+ * tools (see docs/v2/specs/increment-155-B-empty-schema-fix.md).
+ *
+ * `StructWithRest` + a `Record(String, Never)` sibling gives the AST a
+ * (vacuous) index signature, so the converter instead takes its normal
+ * "Objects" branch and emits `{type:"object",additionalProperties:false}` —
+ * a real MCP object schema. The `Record<string, never>` intersected member
+ * accepts no keys, so decode/encode behavior (and the tool's genuinely
+ * no-arg contract — no fake user-facing parameter for the model to fill) is
+ * unchanged: `{}` still decodes, any stray key is still rejected. */
+export const ListGenerationsInput = Schema.StructWithRest(Schema.Struct({}), [
+  Schema.Record(Schema.String, Schema.Never),
+]);
 export type ListGenerationsInput = typeof ListGenerationsInput.Type;
 
 export const ListGenerationsResult = Schema.Struct({
