@@ -28,6 +28,7 @@ import * as GenerationService from "../generation/GenerationService.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
@@ -430,4 +431,94 @@ it.effect(
         ),
       ),
     ),
+);
+
+// Increment #155 (docs/v2/specs/increment-155-mcp-toolkit-registration.md):
+// PRODUCTION-topology guard. Every test ABOVE this point builds an ANCESTOR
+// `McpServer.McpServer.layer` topology (`TestLayer`, `makeGenerationInspectTestLayer`
+// both do `Layer.provideMerge(McpServer.McpServer.layer)`) — the SAME bare
+// `McpServer.layer` reference effect's own `McpServer.toolkit(x)` self-provides
+// (effect McpServer.js:951: `toolkit = t => effectDiscard(registerToolkit(t)).
+// pipe(provide(McpServer.layer))`). Effect memoizes a layer by REFERENCE, so
+// those tests' registrations land in the SAME instance as any `toolkit(x)`
+// self-provide would — tools appear whether the registration used the BROKEN
+// `McpServer.toolkit` or the FIXED `McpServer.registerToolkit`. That is
+// precisely why the existing suite did not catch the bug: it is structurally
+// blind to this class of failure.
+//
+// This test instead builds the REAL exported `McpHttpServer.layer`, whose
+// `McpTransportLive = McpServer.layerHttp(...)` is built via
+// `layerWithProtocolState` — a DIFFERENT construction from the bare
+// `McpServer.layer` (effect McpServer.js:591 vs :590) — wrapped exactly the
+// way `server.ts` wraps it for the real HTTP server (`HttpRouter.serve`, see
+// server.ts's own `routesLayer`). A registration that self-provides its own
+// throwaway `McpServer` instance therefore serves an EMPTY tools/list here,
+// not a false green. `HttpRouter.serve`'s `Layer.provideMerge(appLayer)`
+// (HttpRouter.js:627) merges `McpHttpServer.layer`'s own output — which
+// includes the served `McpServer.McpServer` (via `layerWithProtocolState`'s
+// own `Layer.provideMerge(McpServer.layer)`, McpServer.js:594) — straight
+// into this test's ambient context, so `yield* McpServer.McpServer` below
+// reads the SAME instance the HTTP transport would actually serve.
+const fakeMcpSessionRegistry: McpSessionRegistry.McpSessionRegistryShape = {
+  issue: () => Effect.die("unexpected issue call"),
+  resolve: () => Effect.die("unexpected resolve call"),
+  touch: () => Effect.die("unexpected touch call"),
+  revokeProviderSession: () => Effect.die("unexpected revokeProviderSession call"),
+  revokeThread: () => Effect.die("unexpected revokeThread call"),
+  revokeAll: Effect.die("unexpected revokeAll call"),
+};
+
+// Only what building the REAL `McpHttpServer.layer` graph actually needs at
+// LAYER-BUILD time: `McpSessionRegistry` (the auth middleware closure reads
+// it once, at construction — `McpHttpServer.ts`'s `makeMcpAuthMiddleware`),
+// and `GenerationService`/`ProjectionSnapshotQuery`/`HttpClient` for the two
+// MANUAL registrations (`registerPreviewSnapshot`, `registerInspectGeneration`)
+// which read their services directly in their own registration bodies —
+// same reasoning `makeGenerationInspectTestLayer` above already documents.
+// The DECLARATIVE toolkit handlers' own bare deps (`McpInvocationContext`,
+// `FileSystem`/`Path`/`ChildProcessSpawner`/`ServerSecretStore`/`ServerConfig`
+// for `import_generated_asset`) are never resolved here, deliberately: per
+// `Toolkit.toLayer`'s own signature (`RX` defaults to `never` for a plain
+// handler-function object, not an `Effect<Handlers, EX, RX>` — effect's
+// Toolkit.ts:98-103), those handlers' requirements are embedded in the
+// stored closures' OWN types, discharged only when a tool is actually
+// CALLED, never at registration/build time — this test never calls a tool,
+// only reads the registered tool LIST, so it never needs them.
+const ProductionMcpDeps = Layer.mergeAll(
+  Layer.succeed(McpSessionRegistry.McpSessionRegistry, fakeMcpSessionRegistry),
+  Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, fakeProjectionSnapshotQuery),
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make(() => Effect.die("unexpected HTTP call in production-topology test")),
+  ),
+  PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer)),
+);
+
+const ProductionMcpServerLayer = HttpRouter.serve(
+  McpHttpServer.layer(
+    Layer.succeed(GenerationService.GenerationService, fakeGenerationService),
+  ).pipe(Layer.provide(ProductionMcpDeps)),
+  { disableListenLog: true, disableLogger: true },
+).pipe(Layer.provide(NodeHttpServer.layerTest));
+
+it.effect(
+  "PRODUCTION topology: the real McpHttpServer.layer (McpTransportLive/layerHttp, not an ancestor McpServer.layer) serves every generation + preview tool",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const names = server.tools.map(({ tool }) => tool.name);
+        expect(names).toEqual(
+          expect.arrayContaining([
+            "generate_3d",
+            "generation_status",
+            "list_generations",
+            "import_generated_asset",
+            "inspect_generation",
+            "preview_status",
+            "preview_snapshot",
+          ]),
+        );
+      }),
+    ).pipe(Effect.provide(ProductionMcpServerLayer)),
 );
