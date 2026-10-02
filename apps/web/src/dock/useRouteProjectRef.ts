@@ -31,6 +31,27 @@ const NO_THREAD_SHELL_ATOM = Atom.make<EnvironmentThreadShell | null>(null).pipe
 const selectShellProjectId = (shell: EnvironmentThreadShell | null): ProjectId | null =>
   shell?.projectId ?? null;
 
+const selectShellWorktreePath = (shell: EnvironmentThreadShell | null): string | null =>
+  shell?.worktreePath ?? null;
+
+/**
+ * The git worktree a server thread runs in, or null for a draft, a thread on
+ * the project root, or a shell that has not loaded yet. The Files panel reads
+ * from this path when it is set (`resolveFilesDockPanelView`). Subscribes to
+ * the one string only, like `useRouteProjectRef`.
+ */
+export function useRouteThreadWorktreePath(source: RouteProjectSource): string | null {
+  return useAtomValue(
+    source?.routeKind === "server"
+      ? environmentThreadShells.threadShellAtom({
+          environmentId: source.environmentId,
+          threadId: source.threadId,
+        })
+      : NO_THREAD_SHELL_ATOM,
+    selectShellWorktreePath,
+  );
+}
+
 /**
  * The project a dock route belongs to, for a server thread (its shell) or a
  * draft (its draft session). Subscribes to primitives only, so a thread's

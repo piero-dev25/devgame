@@ -16,7 +16,7 @@ import { type ReactNode, useContext } from "react";
 import { openFileInDock } from "~/components/ChatMarkdown";
 import { ThreadRouteContext } from "~/dock/ChatPanel";
 import type { PanelProps } from "~/dock/lib/types";
-import { useRouteProjectRef } from "~/dock/useRouteProjectRef";
+import { useRouteProjectRef, useRouteThreadWorktreePath } from "~/dock/useRouteProjectRef";
 import { cn } from "~/lib/utils";
 import { useProject } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
@@ -158,9 +158,10 @@ function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void })
           : (relativePath: string) => openFileInDock(threadRef, relativePath);
       return (
         <div className="flex min-h-0 flex-1 flex-col">
-          {view.issues.length > 0 || view.openBlockedReason ? (
+          {view.issues.length > 0 || view.openBlockedReason || view.openNotice ? (
             <div className="flex shrink-0 flex-col gap-1 border-b border-border/60 bg-warning/5 px-3 py-2 text-2xs text-muted-foreground">
               {view.openBlockedReason ? <p>{view.openBlockedReason}</p> : null}
+              {view.openNotice ? <p>{view.openNotice}</p> : null}
               {view.issues.map((issue) => (
                 <p key={issue} className="flex items-start gap-1.5">
                   <AlertTriangle className="mt-0.5 size-3 shrink-0 text-warning" />
@@ -192,18 +193,23 @@ function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void })
 export default function WorkspacePanel(_props: PanelProps) {
   const route = useContext(ThreadRouteContext);
   const projectRef = useRouteProjectRef(route);
+  const worktreePath = useRouteThreadWorktreePath(route);
   const project = useProject(projectRef);
   const query = useEnvironmentQuery(projectRef === null ? null : projectWorkspaceAtom(projectRef));
   const view = resolveWorkspacePanelView({
     target:
-      route === null || projectRef === null
+      route === null
         ? null
-        : route.routeKind === "server"
-          ? {
-              kind: "server",
-              threadRef: { environmentId: route.environmentId, threadId: route.threadId },
-            }
-          : { kind: "draft" },
+        : projectRef === null
+          ? { kind: "pending" }
+          : route.routeKind === "server"
+            ? {
+                kind: "server",
+                threadRef: { environmentId: route.environmentId, threadId: route.threadId },
+                worktreePath,
+                projectRoot: project?.workspaceRoot ?? null,
+              }
+            : { kind: "draft" },
     query: { data: query.data, error: query.error },
   });
 

@@ -59,12 +59,21 @@ export type WorkspacePanelView =
       readonly issues: ReadonlyArray<string>;
       /** Set on drafts: why no step can be opened yet. */
       readonly openBlockedReason: string | null;
+      /**
+       * Set when the thread runs in a git worktree: steps open in the Files
+       * panel from that worktree, while the cards and their "File not found"
+       * badges describe the project root.
+       */
+      readonly openNotice: string | null;
       /** The thread the Files panel opens steps for; null on drafts. */
       readonly threadRef: ScopedThreadRef | null;
     };
 
 const DRAFT_OPEN_BLOCKED_REASON =
   "Send the first message to open workspace files. A draft thread has no files panel yet.";
+
+const WORKTREE_OPEN_NOTICE =
+  "This thread runs in a git worktree. Steps open from the worktree, so a file that only exists at the project root, or differs there, may not match its card.";
 
 const STEP_PROBLEMS: Readonly<Record<WorkspaceStepIssue, string>> = {
   missing: "File not found",
@@ -124,10 +133,22 @@ function toCards(
 }
 
 export function resolveWorkspacePanelView(input: {
-  /** null when there is no route thread or its project is not known. */
+  /**
+   * null when there is no route thread. `pending` when there is one but its
+   * project is not resolved yet (a cold load or deep link before the thread
+   * shell arrives, or a draft with no project yet).
+   */
   readonly target:
-    | { readonly kind: "server"; readonly threadRef: ScopedThreadRef }
+    | {
+        readonly kind: "server";
+        readonly threadRef: ScopedThreadRef;
+        /** The thread's git worktree, or null when it runs on the project root. */
+        readonly worktreePath: string | null;
+        /** The project root the registry was read from, or null while unknown. */
+        readonly projectRoot: string | null;
+      }
     | { readonly kind: "draft" }
+    | { readonly kind: "pending" }
     | null;
   /** `useEnvironmentQuery` output. `data` keeps the last success after a failure. */
   readonly query: {
@@ -137,6 +158,7 @@ export function resolveWorkspacePanelView(input: {
 }): WorkspacePanelView {
   const { target, query } = input;
   if (target === null) return { kind: "no-project" };
+  if (target.kind === "pending") return { kind: "loading" };
   const canOpen = target.kind === "server";
 
   // Error first: after a failure `data` still holds the previous success.
@@ -166,6 +188,12 @@ export function resolveWorkspacePanelView(input: {
       ),
     ],
     openBlockedReason: canOpen ? null : DRAFT_OPEN_BLOCKED_REASON,
+    openNotice:
+      target.kind === "server" &&
+      target.worktreePath !== null &&
+      target.worktreePath !== target.projectRoot
+        ? WORKTREE_OPEN_NOTICE
+        : null,
     threadRef: target.kind === "server" ? target.threadRef : null,
   };
 }

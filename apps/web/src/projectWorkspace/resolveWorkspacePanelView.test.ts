@@ -13,7 +13,12 @@ const threadRef: ScopedThreadRef = {
   environmentId: EnvironmentId.make("env-1"),
   threadId: ThreadId.make("thread-1"),
 };
-const server = { kind: "server" as const, threadRef };
+const server = {
+  kind: "server" as const,
+  threadRef,
+  worktreePath: null,
+  projectRoot: "/repo/game",
+};
 const draft = { kind: "draft" as const };
 
 const entity = (
@@ -71,6 +76,13 @@ describe("resolveWorkspacePanelView", () => {
     ).toBe("no-project");
   });
 
+  it("is loading, not asking for a thread, while a selected thread's project is unresolved", () => {
+    expect(
+      resolveWorkspacePanelView({ target: { kind: "pending" }, query: { data: null, error: null } })
+        .kind,
+    ).toBe("loading");
+  });
+
   it("is loading until the first read lands", () => {
     expect(
       resolveWorkspacePanelView({ target: server, query: { data: null, error: null } }).kind,
@@ -125,6 +137,26 @@ describe("resolveWorkspacePanelView", () => {
     expect(new Set(view.cards.map((card) => card.key)).size).toBe(3);
     expect(view.threadRef).toEqual(threadRef);
     expect(view.openBlockedReason).toBeNull();
+    expect(view.openNotice).toBeNull();
+  });
+
+  it("warns that steps open from the thread's worktree when it is not the project root", () => {
+    const view = resolveWorkspacePanelView({
+      target: { ...server, worktreePath: "/repo/.worktrees/feature" },
+      query: { data: registry, error: null },
+    });
+    if (view.kind !== "ready") throw new Error(`expected ready, got ${view.kind}`);
+    expect(view.openNotice).toMatch(/worktree/);
+    expect(view.threadRef).toEqual(threadRef);
+  });
+
+  it("adds no worktree notice when the worktree is the project root itself", () => {
+    const view = resolveWorkspacePanelView({
+      target: { ...server, worktreePath: "/repo/game" },
+      query: { data: registry, error: null },
+    });
+    if (view.kind !== "ready") throw new Error(`expected ready, got ${view.kind}`);
+    expect(view.openNotice).toBeNull();
   });
 
   it("lists registry problems above the cards and keeps step problems on their step", () => {
