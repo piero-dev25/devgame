@@ -30,10 +30,32 @@ vi.mock("./DiffDockPanel", () => ({ default: () => null }));
 vi.mock("./FilesDockPanel", () => ({ default: () => null }));
 vi.mock("./TerminalDockPanel", () => ({ default: () => null }));
 vi.mock("./BrowserDockPanel", () => ({ default: () => null }));
+vi.mock("../projectWorkspace/WorkspacePanel", () => ({ default: () => null }));
 
 const { chatDockPanelRegistry, chatDockPresetRegistry } = await import("./ChatDock");
-const { BROWSER_PANEL_ID, DIFF_PANEL_ID, FILES_PANEL_ID, TERMINAL_PANEL_ID } =
-  await import("./chatDockHandle");
+const {
+  BROWSER_PANEL_ID,
+  CHAT_PANEL_ID,
+  DIFF_PANEL_ID,
+  FILES_PANEL_ID,
+  TERMINAL_PANEL_ID,
+  WORKSPACE_PANEL_ID,
+} = await import("./chatDockHandle");
+const { migrateLoadedLayout } = await import("./lib/layoutMigration");
+
+function defaultTree() {
+  const [preset] = chatDockPresetRegistry.list();
+  return preset!.build();
+}
+
+/** The default layout as saved before the Workspace panel existed. */
+function layoutSavedBeforeWorkspace() {
+  const tree = structuredClone(defaultTree());
+  const { [WORKSPACE_PANEL_ID]: _removed, ...panels } = tree.panels;
+  const root = tree.grid.root as { data: Array<{ data: { views?: string[] } }> };
+  root.data = root.data.filter((leaf) => !leaf.data.views?.includes(WORKSPACE_PANEL_ID));
+  return { ...tree, panels };
+}
 
 describe("ChatDock panel registration", () => {
   it("leaves the four thread-scoped panels registered and in the default preset (no regression)", () => {
@@ -45,5 +67,53 @@ describe("ChatDock panel registration", () => {
     for (const id of [DIFF_PANEL_ID, FILES_PANEL_ID, TERMINAL_PANEL_ID, BROWSER_PANEL_ID]) {
       expect(Object.keys(tree.panels)).toContain(id);
     }
+  });
+});
+
+describe("ChatDock Workspace panel", () => {
+  it("is registered as a closeable singleton and placed right after Chat in the default preset", () => {
+    const definition = chatDockPanelRegistry.get(WORKSPACE_PANEL_ID);
+    expect(definition?.singleton).toBe(true);
+    expect(definition?.closeable).not.toBe(false);
+    const root = defaultTree().grid.root as { data: Array<{ data: { views: string[] } }> };
+    const columns = root.data.map((leaf) => leaf.data.views);
+    const chatIndex = columns.findIndex((views) => views.includes(CHAT_PANEL_ID));
+    expect(columns[chatIndex + 1]).toEqual([WORKSPACE_PANEL_ID]);
+  });
+
+  it("is grafted into a layout saved before it existed, keeping every saved panel", () => {
+    const saved = layoutSavedBeforeWorkspace();
+    const result = migrateLoadedLayout({
+      loaded: saved,
+      knownPanelIds: Object.keys(saved.panels),
+      panelRegistry: chatDockPanelRegistry,
+      defaultTree: defaultTree(),
+    });
+    expect(result.addedPanelIds).toEqual([WORKSPACE_PANEL_ID]);
+    expect(result.unplaceablePanelIds).toEqual([]);
+    expect(Object.keys(result.tree.panels).toSorted()).toEqual(
+      Object.keys(defaultTree().panels).toSorted(),
+    );
+  });
+
+  it("stays in a reloaded layout that has it, and stays closed in one where the user closed it", () => {
+    const withWorkspace = defaultTree();
+    const kept = migrateLoadedLayout({
+      loaded: withWorkspace,
+      knownPanelIds: Object.keys(withWorkspace.panels),
+      panelRegistry: chatDockPanelRegistry,
+      defaultTree: defaultTree(),
+    });
+    expect(Object.keys(kept.tree.panels)).toContain(WORKSPACE_PANEL_ID);
+
+    const closed = layoutSavedBeforeWorkspace();
+    const stillClosed = migrateLoadedLayout({
+      loaded: closed,
+      knownPanelIds: [...Object.keys(closed.panels), WORKSPACE_PANEL_ID],
+      panelRegistry: chatDockPanelRegistry,
+      defaultTree: defaultTree(),
+    });
+    expect(stillClosed.addedPanelIds).toEqual([]);
+    expect(Object.keys(stillClosed.tree.panels)).not.toContain(WORKSPACE_PANEL_ID);
   });
 });

@@ -65,6 +65,13 @@ export const TERMINAL_PANEL_ID = "terminal";
  * ports, the mini-player's "restore") needs this id to call
  * `openChatDockPanel` after Browser moved to the dock. */
 export const BROWSER_PANEL_ID = "browser";
+/** Moved here from `ChatDock.tsx` so the landing-panel decision
+ * (`lib/landingPanel.ts`) and future "Use in chat" callers can name Chat
+ * without importing the dock. */
+export const CHAT_PANEL_ID = "chat";
+/** The project Workspace panel: the default landing panel for game projects
+ * (`lib/landingPanel.ts`), so the landing decision needs its id. */
+export const WORKSPACE_PANEL_ID = "workspace";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;

@@ -251,6 +251,12 @@ export interface DockviewLayoutHandle {
    * group's live visibility on every change. Returns a no-op unsubscribe
    * when `id` isn't currently an open panel. */
   subscribePanelGroupVisibility(id: string, listener: (isVisible: boolean) => void): () => void;
+  /** The live layout's active panel id, or null before the dock exists or
+   * when nothing is active. Read by `ChatDock`'s late landing
+   * (`lib/landingPanel.ts`). */
+  getActivePanelId(): string | null;
+  /** Whether `id` is open anywhere in the live layout right now. */
+  isPanelOpen(id: string): boolean;
 }
 
 /**
@@ -1475,6 +1481,12 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
       [],
     );
 
+    const handleGetActivePanelId = useCallback(() => apiRef.current?.activePanel?.id ?? null, []);
+    const handleIsPanelOpen = useCallback(
+      (id: string) => apiRef.current?.getPanel(id) !== undefined,
+      [],
+    );
+
     useImperativeHandle(
       forwardedRef,
       () => ({
@@ -1486,6 +1498,8 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         togglePanelGroupVisibility: handleTogglePanelGroupVisibility,
         isPanelGroupVisible: handleIsPanelGroupVisible,
         subscribePanelGroupVisibility: handleSubscribePanelGroupVisibility,
+        getActivePanelId: handleGetActivePanelId,
+        isPanelOpen: handleIsPanelOpen,
       }),
       [
         handleReset,
@@ -1496,6 +1510,8 @@ export const DockviewLayout = forwardRef<DockviewLayoutHandle, DockviewLayoutPro
         handleTogglePanelGroupVisibility,
         handleIsPanelGroupVisible,
         handleSubscribePanelGroupVisibility,
+        handleGetActivePanelId,
+        handleIsPanelOpen,
       ],
     );
 
