@@ -1,9 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * MrMakImport - dry-run inventory of what importing a Mr. Mak workspace into
- * a DevGame project would copy.
+ * a DevGame project would copy. Applying it lives in importContent.ts and,
+ * with skills, importSkills.ts; skillDiscovery.ts checks what providers see.
  *
- * READ-ONLY. Content comes from the source's committed HEAD (`ls-tree` and
+ * Planning is READ-ONLY. Content comes from the source's committed HEAD (`ls-tree` and
  * `cat-file --batch`), never its working tree, which may hold uncommitted app
  * edits. Git runs with an argv (no shell), `GIT_OPTIONAL_LOCKS=0` and fsmonitor
  * off so not even the index is refreshed. The working tree is only listed
@@ -18,7 +19,9 @@ import * as NodePath from "node:path";
 
 import {
   MRMAK_IMPORT_ROOTS,
+  MrMakImportReceipt,
   WorkspaceManifest,
+  type MrMakSkillDiscoveryReport,
   type MrMakImportDestinationState,
   type MrMakImportEntry,
   type MrMakImportExclusion,
@@ -33,20 +36,30 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
+import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import {
   makeContentImporter,
+  MrMakImportApplyError,
   type ImportContentRequest,
   type ImportContentResult,
-  type MrMakImportApplyError,
   type RollbackImportResult,
 } from "./importContent.ts";
 import {
+  makeSkillImporter,
+  type ImportSkillsRequest,
+  type ImportSkillsResult,
+  type MrMakSkillImportError,
+} from "./importSkills.ts";
+import { checkSkillDiscovery, registrySkillProbe } from "./skillDiscovery.ts";
+import {
   extractHrefs,
+  isSkillDistributionPath,
   makeBatchParser,
   requirementsFrom,
   resolveLink,
@@ -87,6 +100,7 @@ const SKILLS_ROOT = ".agents/skills";
 const REGISTRY_PATH = "workspace/workspace.json";
 
 const decodeRegistry = Schema.decodeUnknownEffect(fromLenientJson(WorkspaceManifest));
+const decodeImportReceipt = Schema.decodeUnknownOption(fromLenientJson(MrMakImportReceipt));
 
 export class MrMakImportPlanError extends Schema.TaggedError<MrMakImportPlanError>()(
   "MrMakImportPlanError",
@@ -138,6 +152,23 @@ export class MrMakImport extends Context.Service<
       readonly destinationRoot: string;
       readonly importId: string;
     }) => Effect.Effect<RollbackImportResult, MrMakImportApplyError>;
+    /**
+     * Apply a plan with its skills: the full `.agents/skills` tree plus the
+     * `.claude/skills` copy Claude needs, verified byte for byte. A skill name
+     * the destination already uses for a different skill needs a choice.
+     */
+    readonly importSkills: (
+      input: ImportSkillsRequest,
+    ) => Effect.Effect<ImportSkillsResult, MrMakSkillImportError | MrMakImportApplyError>;
+    /**
+     * Which skills Claude and Codex discover as project skills of the
+     * destination, by each provider's own fresh workspace scan. `expected`
+     * defaults to the active names in the destination's receipt.
+     */
+    readonly verifySkillDiscovery: (input: {
+      readonly destinationRoot: string;
+      readonly expected?: ReadonlyArray<string> | undefined;
+    }) => Effect.Effect<ReadonlyArray<MrMakSkillDiscoveryReport>, MrMakImportApplyError>;
   }
 >()("t3/projectImport/MrMakImport") {}
 
@@ -240,17 +271,6 @@ const fileKind = (path: string): MrMakImportFileKind => {
   if (path.startsWith("context/")) return "context";
   if (path.startsWith("processes/") || path.startsWith("knowledge/")) return "reference";
   return "doc";
-};
-
-/** The sync-skills.mjs rule: no dot-entries, __pycache__, node_modules or compiled Python. */
-const inSkillDistribution = (path: string) => {
-  const segments = path.slice(SKILLS_ROOT.length + 1).split("/");
-  return (
-    !segments.some(
-      (segment) =>
-        segment.startsWith(".") || segment === "__pycache__" || segment === "node_modules",
-    ) && !/\.py[co]$/.test(path)
-  );
 };
 
 const make = Effect.gen(function* () {
@@ -648,7 +668,9 @@ const make = Effect.gen(function* () {
       issues,
       skills: {
         fullTreeFiles: skillFiles.length,
-        distributionFiles: skillFiles.filter((entry) => inSkillDistribution(entry.path)).length,
+        distributionFiles: skillFiles.filter((entry) =>
+          isSkillDistributionPath(entry.path.slice(SKILLS_ROOT.length + 1)),
+        ).length,
       },
       totals: {
         files: entries.length,
@@ -663,10 +685,35 @@ const make = Effect.gen(function* () {
   });
 
   const content = yield* makeContentImporter;
+  const skills = yield* makeSkillImporter(content.importContent);
+  const providerRegistry = yield* ProviderRegistry;
+
+  const verifySkillDiscovery: MrMakImport["Service"]["verifySkillDiscovery"] = Effect.fn(
+    "MrMakImport.verifySkillDiscovery",
+  )(function* (input) {
+    const fail = (detail: string) =>
+      new MrMakImportApplyError({
+        reason: "filesystem",
+        destinationRoot: input.destinationRoot,
+        detail,
+      });
+    const cwd = yield* fileSystem
+      .realPath(input.destinationRoot)
+      .pipe(Effect.mapError(() => fail("the destination does not exist.")));
+    const receipt = yield* fileSystem
+      .readFileString(path.join(cwd, ".devgame/import/receipt.json"))
+      .pipe(Effect.map(decodeImportReceipt), Effect.orElseSucceed(Option.none));
+    const expected =
+      input.expected ?? Object.values(Option.getOrUndefined(receipt)?.skills?.names ?? {});
+    return yield* checkSkillDiscovery(cwd, expected, registrySkillProbe(providerRegistry));
+  });
+
   return MrMakImport.of({
     plan,
     importContent: content.importContent,
     rollbackImport: content.rollback,
+    importSkills: skills.importSkills,
+    verifySkillDiscovery,
   });
 });
 

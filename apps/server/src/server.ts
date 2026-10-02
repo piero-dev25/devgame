@@ -672,6 +672,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   // Mr. Mak import: plans from committed-tree reads only, then writes into a
   // destination project (staged copies, git init, one baseline commit). Never the source.
+  // Its skill discovery check reads ProviderRegistryLive, provided further down this chain.
   Layer.provideMerge(
     MrMakImport.layer.pipe(Layer.provide(GitVcsDriver.layer), Layer.provide(ProcessRunner.layer)),
   ),

@@ -1,16 +1,20 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /**
  * Pure helpers MrMakImport applies to committed blob content: hashing the
- * `cat-file --batch` stream, finding and resolving links, and reducing tool
+ * `cat-file --batch` stream, finding and resolving links, reducing tool
  * configuration to sanitized requirement templates (names and keys, never
- * values).
+ * values), and renaming a skill's references to itself.
  *
  * @module mrMakImportContent
  */
 import * as NodeCrypto from "node:crypto";
 import * as NodePath from "node:path";
 
-import type { MrMakImportLink, MrMakImportRequirement } from "@t3tools/contracts";
+import type {
+  MrMakImportLink,
+  MrMakImportRequirement,
+  MrMakSkillRequirement,
+} from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Schema from "effect/Schema";
 
@@ -369,3 +373,83 @@ export const requirementsFrom = (path: string, text: string): Array<MrMakImportR
   const keys = [...frontmatter.matchAll(/^([\w-]+):/gm)].flatMap((match) => match[1] ?? []);
   return [{ source: path, kind: "skill", name: path.split("/")[2] ?? path, keys }];
 };
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A renamed skill's references to its own name, rewritten: the frontmatter
+ * `name:`, `skills/<name>` paths and `/<name>` or `$<name>` invocations. Binary
+ * and non-UTF-8 content comes back unchanged.
+ */
+export const rewriteSkillReferences = (bytes: Uint8Array, from: string, to: string): Uint8Array => {
+  const original = Buffer.from(bytes);
+  const text = original.toString("utf8");
+  if (original.includes(0) || !Buffer.from(text, "utf8").equals(original)) return bytes;
+  const name = escapeRegExp(from);
+  const end = String.raw`(?![A-Za-z0-9_-]|\.[A-Za-z0-9])`;
+  const rewritten = text
+    .replace(/^---\r?\n[\s\S]*?\r?\n---/, (frontmatter) =>
+      frontmatter.replace(
+        new RegExp(String.raw`^(name:[ \t]*["']?)${name}(?=["']?[ \t]*\r?$)`, "m"),
+        (_, prefix: string) => `${prefix}${to}`,
+      ),
+    )
+    .replace(new RegExp(`skills/${name}${end}`, "g"), () => `skills/${to}`)
+    .replace(
+      new RegExp(String.raw`(^|[\s\x60'"(])([/$])${name}${end}`, "gm"),
+      (_, before: string, sigil: string) => `${before}${sigil}${to}`,
+    );
+  return rewritten === text ? bytes : Buffer.from(rewritten, "utf8");
+};
+
+const PAID_PROVIDERS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["fal.ai", /\bfal(?:[-_.]ai|[-_]client)\b|\bFAL_KEY\b/i],
+  ["Higgsfield", /\bhiggsfield\b/i],
+  ["OpenAI", /\bopenai\b/i],
+  ["Tripo", /\btripo(?:3d)?\b/i],
+  ["Meshy", /\bmeshy\b/i],
+  ["ElevenLabs", /\belevenlabs\b/i],
+  ["Replicate", /\breplicate\.com\b|\bREPLICATE_API_TOKEN\b/],
+];
+const TOOLS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["blender", /\bblender\b/i],
+  ["ffmpeg", /\bff(?:mpeg|probe)\b/i],
+  ["python", /\bpython3?\b/i],
+  ["node", /\bnpx\b|\bnode\s+\S+\.[cm]?js\b/],
+  ["uv", /\buv\s+(?:run|pip|sync|tool|venv)\b/],
+  ["whisper", /\bwhisper\b/i],
+];
+
+/**
+ * What one SKILL.md or skill script names: paid providers, command-line
+ * tools, credential env var names and MCP servers. A script's own interpreter
+ * counts as a tool. Names only; nothing is run or contacted.
+ */
+export const skillRequirementsFrom = (path: string, text: string): Array<MrMakSkillRequirement> => {
+  const found: Array<MrMakSkillRequirement> = [];
+  const add = (kind: MrMakSkillRequirement["kind"], name: string) =>
+    found.push({ kind, name, source: path });
+  for (const [name, pattern] of PAID_PROVIDERS) if (pattern.test(text)) add("paid-provider", name);
+  for (const [name, pattern] of TOOLS) if (pattern.test(text)) add("tool", name);
+  if (path.endsWith(".py")) add("tool", "python");
+  if (/\.[cm]?[jt]s$/.test(path)) add("tool", "node");
+  for (const match of text.matchAll(
+    /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:API_KEY|KEY|TOKEN|SECRET))\b/g,
+  )) {
+    add("env-var", match[1] ?? "");
+  }
+  for (const match of text.matchAll(/\bmcp__([A-Za-z0-9-]+)__/g)) add("mcp-server", match[1] ?? "");
+  return found;
+};
+
+/**
+ * The sync-skills.mjs rule for a path relative to `.agents/skills`: no
+ * dot-entries, `__pycache__`, `node_modules` or compiled Python in `.claude/skills`.
+ */
+export const isSkillDistributionPath = (relativePath: string) =>
+  !relativePath
+    .split("/")
+    .some(
+      (segment) =>
+        segment.startsWith(".") || segment === "__pycache__" || segment === "node_modules",
+    ) && !/\.py[co]$/.test(relativePath);

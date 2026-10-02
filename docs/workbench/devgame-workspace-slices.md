@@ -710,6 +710,39 @@ importId})` in apps/server/src/projectImport/importContent.ts. No routes yet (M4
 
 Depends on: M1, M2. Estimate: ~300 lines.
 
+**As built (2026-10-03), superseding the plan below where they differ**
+
+- `MrMakImport.importSkills({plan, destinationRoot, skillChoices?, choices?})` in
+  apps/server/src/projectImport/importSkills.ts. It applies the whole M1 plan through M2's engine
+  (one import, one receipt, one baseline commit): content entries pass through, `.agents/skills`
+  entries go to `<dest>/.agents/skills` complete (dot-entries included), and each sync-skills
+  file is added again as a `.claude/skills` entry. Pass it the full plan, not a skills-only one: a
+  later import's plan becomes the receipt's file list.
+- A source skill whose name a different destination skill already uses (present, not recorded in
+  the receipt, not byte-identical) fails with `MrMakSkillImportError` `skill-conflict` before any
+  write. `keep-existing` skips it; `import-renamed` (default `<name>-mrmak`) moves it and rewrites
+  its own references (frontmatter `name:`, `skills/<name>` paths, `/<name>` and `$<name>`); the
+  engine applies the rewrite to the blob and lists it in `transforms`.
+- After the files land, both trees are checked on disk (`.agents` against the expected hashes,
+  `.claude` against `.agents`, SKILL.md links resolved in each copy). The result is
+  `receipt.skills`: per skill original and active name, file counts and requirements (paid
+  providers, tools, env var names, MCP servers named by SKILL.md and scripts/, never run), the
+  name map, and `baseline` (every source skill file's unmodified sha256).
+- `MrMakImport.verifySkillDiscovery({destinationRoot, expected?})` asks the first enabled,
+  installed Claude and Codex instances for a fresh workspace scan of the destination through
+  `ProviderRegistry.refreshWorkspaceSnapshot`, and reports discovered, missing and shadowed (found
+  outside the project) skills. `cliSkillProbe` runs the same probes without the registry for the
+  live check: Codex through `codex app-server` `skills/list` (argv, no shell), Claude through the
+  server's filesystem scan in ClaudeSkills.ts, which was verified against the CLI. No Claude
+  session or model turn is started.
+- Live checks (skipped by default): `DEVGAME_MRMAK_IMPORT_LIVE=1 MRMAK_SOURCE MRMAK_DEST` and
+  `DEVGAME_MRMAK_DISCOVERY_LIVE=1 MRMAK_DEST [CODEX_BINARY]` in importSkills.test.ts. On
+  2026-10-03 against source 6248c9ec: 20 skills, 391 `.agents/skills` files, 375 `.claude/skills`
+  files, 16 agents-only, verified, and identical to the source's own trees (`diff -r`). A rerun
+  was `unchanged`, and Claude and Codex each discovered all 20 as project skills.
+- Per-provider: Antigravity reads `.agents/skills` (covered by the shared copy). Cursor, Grok and
+  OpenCode are not targeted.
+
 **Reuse**
 
 - apps/server/src/projectImport/importContent.ts (M2) — the staged, conflict-safe copy engine; reuse it, do not write a second one
