@@ -121,6 +121,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
+import * as RunProfiles from "./projectRuntime/RunProfiles.ts";
 import { projectWorkspaceRouteLayer } from "./projectWorkspace/ProjectWorkspaceRoute.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as EngineTypeResolver from "./project/EngineTypeResolver.ts";
@@ -568,6 +569,10 @@ const WorkspaceLayerLive = Layer.mergeAll(
   WorkspaceEntriesLayerLive,
   WorkspaceFileSystemLayerLive,
   ProjectWorkspace.layer.pipe(
+    Layer.provide(WorkspaceFileSystemLayerLive),
+    Layer.provide(WorkspacePaths.layer),
+  ),
+  RunProfiles.layer.pipe(
     Layer.provide(WorkspaceFileSystemLayerLive),
     Layer.provide(WorkspacePaths.layer),
   ),
