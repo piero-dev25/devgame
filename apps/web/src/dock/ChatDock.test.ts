@@ -31,6 +31,7 @@ vi.mock("./FilesDockPanel", () => ({ default: () => null }));
 vi.mock("./TerminalDockPanel", () => ({ default: () => null }));
 vi.mock("./BrowserDockPanel", () => ({ default: () => null }));
 vi.mock("../projectWorkspace/WorkspacePanel", () => ({ default: () => null }));
+vi.mock("../projectRuntime/RuntimePanel", () => ({ default: () => null }));
 
 const { chatDockPanelRegistry, chatDockPresetRegistry } = await import("./ChatDock");
 const {
@@ -38,6 +39,7 @@ const {
   CHAT_PANEL_ID,
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
+  RUNTIME_PANEL_ID,
   TERMINAL_PANEL_ID,
   WORKSPACE_PANEL_ID,
 } = await import("./chatDockHandle");
@@ -115,5 +117,27 @@ describe("ChatDock Workspace panel", () => {
     });
     expect(stillClosed.addedPanelIds).toEqual([]);
     expect(Object.keys(stillClosed.tree.panels)).not.toContain(WORKSPACE_PANEL_ID);
+  });
+});
+
+describe("ChatDock Run panel", () => {
+  it("is a closeable singleton with its own leaf, so saved layouts gain it on load", () => {
+    const definition = chatDockPanelRegistry.get(RUNTIME_PANEL_ID);
+    expect(definition?.singleton).toBe(true);
+    expect(definition?.closeable).not.toBe(false);
+
+    const tree = structuredClone(defaultTree());
+    const { [RUNTIME_PANEL_ID]: _removed, ...panels } = tree.panels;
+    const root = tree.grid.root as { data: Array<{ data: { views?: string[] } }> };
+    root.data = root.data.filter((leaf) => !leaf.data.views?.includes(RUNTIME_PANEL_ID));
+    const saved = { ...tree, panels };
+    const result = migrateLoadedLayout({
+      loaded: saved,
+      knownPanelIds: Object.keys(saved.panels),
+      panelRegistry: chatDockPanelRegistry,
+      defaultTree: defaultTree(),
+    });
+    expect(result.addedPanelIds).toEqual([RUNTIME_PANEL_ID]);
+    expect(result.unplaceablePanelIds).toEqual([]);
   });
 });
