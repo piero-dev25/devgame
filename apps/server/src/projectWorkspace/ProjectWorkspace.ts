@@ -8,9 +8,8 @@
  *
  * Every read is rooted at the given project root. The registry file goes
  * through `WorkspaceFileSystem.readFile` (traversal, symlink containment,
- * non-file, binary and 1 MiB checks). Each step is checked lexically against
- * `<root>/workspace` and by realpath against the project root, and is only
- * stat'ed, never opened.
+ * non-file, binary and 1 MiB checks). Each step is checked lexically and by
+ * realpath against `<root>/workspace`, and is only stat'ed, never opened.
  *
  * @module ProjectWorkspace
  */
@@ -23,6 +22,7 @@ import {
   type ResolvedWorkspaceStep,
   type WorkspaceEntity,
   type WorkspaceManifestIssue,
+  type WorkspaceStepIssue,
 } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
@@ -30,6 +30,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
@@ -70,8 +71,10 @@ export class ProjectWorkspace extends Context.Service<
     /**
      * Read and validate `<workspaceRoot>/workspace/workspace.json`.
      *
-     * A missing registry is `missing`, not an error. Bad paths and missing step
-     * files are reported per step and in `issues`; they do not fail the read.
+     * A missing registry is `missing`, not an error. A project root that does
+     * not exist or is not a directory fails with reason `read`. Bad paths and
+     * missing step files are reported per step and in `issues`; they do not
+     * fail the read.
      */
     readonly readManifest: (
       workspaceRoot: string,
@@ -83,6 +86,31 @@ const errnoCode = (cause: unknown): string | undefined =>
   typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string"
     ? cause.code
     : undefined;
+
+/** Only "no such entry" means missing; loops, permissions and bad paths are unreadable. */
+const classifyStepFailure = (error: PlatformError.PlatformError) => {
+  const code = errnoCode(error.reason.cause);
+  return code === "ENOENT" || code === "ENOTDIR" ? ("missing" as const) : ("unreadable" as const);
+};
+
+const stepIssue = (issue: WorkspaceStepIssue, stepPath: string) => {
+  switch (issue) {
+    case "escape":
+      return {
+        kind: "step-escape" as const,
+        message: `Step "${stepPath}" resolves outside ${PROJECT_WORKSPACE_DIRECTORY}/.`,
+      };
+    case "missing":
+      return { kind: "step-missing" as const, message: `Step "${stepPath}" does not exist.` };
+    case "not-file":
+      return { kind: "step-not-file" as const, message: `Step "${stepPath}" is not a file.` };
+    case "unreadable":
+      return {
+        kind: "step-unreadable" as const,
+        message: `Step "${stepPath}" could not be checked (symlink loop, permissions or invalid path).`,
+      };
+  }
+};
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
@@ -99,7 +127,8 @@ export const make = Effect.gen(function* () {
         Effect.catchTags({
           WorkspaceFileSystemOperationError: (error) => {
             const code = errnoCode(error.cause);
-            return error.operation === "realpath-target" && (code === "ENOENT" || code === "ENOTDIR")
+            return error.operation === "realpath-target" &&
+              (code === "ENOENT" || code === "ENOTDIR")
               ? Effect.succeed(null)
               : Effect.fail(
                   new ProjectWorkspaceManifestError({
@@ -143,7 +172,7 @@ export const make = Effect.gen(function* () {
 
   const resolveStep = Effect.fn("ProjectWorkspace.resolveStep")(function* (input: {
     workspaceRoot: string;
-    realWorkspaceRoot: string;
+    realWorkspaceDirectory: string;
     folder: string;
     stepPath: string;
   }) {
@@ -160,15 +189,18 @@ export const make = Effect.gen(function* () {
     if (lexical._tag === "None") return escaped;
 
     const relativePath = `${PROJECT_WORKSPACE_DIRECTORY}/${lexical.value.relativePath}`;
-    const realTarget = yield* fileSystem.realPath(lexical.value.absolutePath).pipe(Effect.option);
-    if (realTarget._tag === "None") {
-      return { relativePath, exists: false, issue: "missing" as const };
+    const realTarget = yield* fileSystem.realPath(lexical.value.absolutePath).pipe(Effect.result);
+    if (realTarget._tag === "Failure") {
+      return { relativePath, exists: false, issue: classifyStepFailure(realTarget.failure) };
     }
-    if (isOutside(input.realWorkspaceRoot, realTarget.value)) return escaped;
+    // Symlinks must stay inside workspace/, not just the project root (which can hold .env files).
+    if (isOutside(input.realWorkspaceDirectory, realTarget.success)) return escaped;
 
-    const stat = yield* fileSystem.stat(realTarget.value).pipe(Effect.option);
-    if (stat._tag === "None") return { relativePath, exists: false, issue: "missing" as const };
-    if (stat.value.type !== "File") {
+    const stat = yield* fileSystem.stat(realTarget.success).pipe(Effect.result);
+    if (stat._tag === "Failure") {
+      return { relativePath, exists: false, issue: classifyStepFailure(stat.failure) };
+    }
+    if (stat.success.type !== "File") {
       return { relativePath, exists: false, issue: "not-file" as const };
     }
     return { relativePath, exists: true };
@@ -182,11 +214,39 @@ export const make = Effect.gen(function* () {
     return relative === "" || relative === ".." || relative.startsWith(`..${path.sep}`);
   };
 
+  /** Fields the registry decodes but that no card can use as written. */
+  const fieldIssues = (entity: WorkspaceEntity): Array<WorkspaceManifestIssue> => {
+    const issues: Array<WorkspaceManifestIssue> = [];
+    if (entity.id.trim().length === 0) {
+      issues.push({ kind: "empty-id", entityId: entity.id, message: "An entity has an empty id." });
+    }
+    if (entity.title.trim().length === 0) {
+      issues.push({
+        kind: "empty-title",
+        entityId: entity.id,
+        message: `Entity "${entity.id}" has an empty title.`,
+      });
+    }
+    const { defaultStep } = entity;
+    if (
+      defaultStep !== undefined &&
+      !(Number.isInteger(defaultStep) && defaultStep >= 0 && defaultStep < entity.steps.length)
+    ) {
+      issues.push({
+        kind: "default-step-out-of-range",
+        entityId: entity.id,
+        message: `Entity "${entity.id}" has defaultStep ${defaultStep} but ${entity.steps.length} step(s).`,
+      });
+    }
+    return issues;
+  };
+
   const resolveEntity = Effect.fn("ProjectWorkspace.resolveEntity")(function* (
     entity: WorkspaceEntity,
-    context: { workspaceRoot: string; realWorkspaceRoot: string },
+    context: { workspaceRoot: string; realWorkspaceDirectory: string },
     issues: Array<WorkspaceManifestIssue>,
   ) {
+    issues.push(...fieldIssues(entity));
     const folderEscapes = isFolderEscape(entity.folder);
     if (folderEscapes) {
       issues.push({
@@ -202,22 +262,7 @@ export const make = Effect.gen(function* () {
         : yield* resolveStep({ ...context, folder: entity.folder, stepPath: step.path });
       steps.push({ ...step, ...resolved });
       if (folderEscapes || resolved.issue === undefined) continue;
-      issues.push({
-        kind:
-          resolved.issue === "escape"
-            ? "step-escape"
-            : resolved.issue === "missing"
-              ? "step-missing"
-              : "step-not-file",
-        entityId: entity.id,
-        stepIndex,
-        message:
-          resolved.issue === "escape"
-            ? `Step "${step.path}" resolves outside the project workspace.`
-            : resolved.issue === "missing"
-              ? `Step "${step.path}" does not exist.`
-              : `Step "${step.path}" is not a file.`,
-      });
+      issues.push({ ...stepIssue(resolved.issue, step.path), entityId: entity.id, stepIndex });
     }
     return { ...entity, steps } satisfies ResolvedWorkspaceEntity;
   });
@@ -225,6 +270,25 @@ export const make = Effect.gen(function* () {
   const readManifest: ProjectWorkspace["Service"]["readManifest"] = Effect.fn(
     "ProjectWorkspace.readManifest",
   )(function* (workspaceRoot) {
+    // A root that is missing or not a directory is a broken project, not "no registry".
+    const rootStat = yield* fileSystem.stat(workspaceRoot).pipe(
+      Effect.mapError(
+        (error) =>
+          new ProjectWorkspaceManifestError({
+            reason: "read",
+            workspaceRoot,
+            detail: errnoCode(error.reason.cause) ?? error.message,
+          }),
+      ),
+    );
+    if (rootStat.type !== "Directory") {
+      return yield* new ProjectWorkspaceManifestError({
+        reason: "read",
+        workspaceRoot,
+        detail: "project root is not a directory",
+      });
+    }
+
     const file = yield* readRegistryText(workspaceRoot);
     if (file === null) return { _tag: "missing" as const };
     if (file.truncated) {
@@ -245,13 +309,33 @@ export const make = Effect.gen(function* () {
       ),
     );
 
-    // readFile already realpath'd the root successfully, so this only fails on a race.
-    const realWorkspaceRoot = yield* fileSystem.realPath(workspaceRoot).pipe(
-      Effect.mapError(
-        (error) =>
-          new ProjectWorkspaceManifestError({ reason: "read", workspaceRoot, detail: error.message }),
-      ),
+    // readFile already resolved both paths, so these only fail on a race.
+    const realPathOrFail = (target: string) =>
+      fileSystem
+        .realPath(target)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new ProjectWorkspaceManifestError({
+                reason: "read",
+                workspaceRoot,
+                detail: error.message,
+              }),
+          ),
+        );
+    const realWorkspaceRoot = yield* realPathOrFail(workspaceRoot);
+    const realWorkspaceDirectory = yield* realPathOrFail(
+      path.join(workspaceRoot, PROJECT_WORKSPACE_DIRECTORY),
     );
+    // The registry can resolve inside the root while workspace/ itself links elsewhere.
+    if (isOutside(realWorkspaceRoot, realWorkspaceDirectory)) {
+      return yield* new ProjectWorkspaceManifestError({
+        reason: "escape",
+        workspaceRoot,
+        detail: "",
+      });
+    }
+
     const issues: Array<WorkspaceManifestIssue> = [];
     const seenIds = new Set<string>();
     const entities: Array<ResolvedWorkspaceEntity> = [];
@@ -264,7 +348,9 @@ export const make = Effect.gen(function* () {
         });
       }
       seenIds.add(entity.id);
-      entities.push(yield* resolveEntity(entity, { workspaceRoot, realWorkspaceRoot }, issues));
+      entities.push(
+        yield* resolveEntity(entity, { workspaceRoot, realWorkspaceDirectory }, issues),
+      );
     }
     return { _tag: "ok" as const, manifest: { entities, issues } };
   });

@@ -50,11 +50,13 @@ export type WorkspaceManifest = typeof WorkspaceManifest.Type;
 /**
  * Why a step cannot be shown:
  * - `escape`: the folder or step path is absolute, climbs out of `workspace/`,
- *   or is a symlink whose target lies outside the project root. Never read.
+ *   or is a symlink whose target lies outside `workspace/`. Never read.
  * - `missing`: nothing exists at the path.
  * - `not-file`: something exists but is not a regular file.
+ * - `unreadable`: the path could not be checked, for example a symlink loop,
+ *   a permission error or an invalid path.
  */
-export const WorkspaceStepIssue = Schema.Literals(["escape", "missing", "not-file"]);
+export const WorkspaceStepIssue = Schema.Literals(["escape", "missing", "not-file", "unreadable"]);
 export type WorkspaceStepIssue = typeof WorkspaceStepIssue.Type;
 
 export const ResolvedWorkspaceStep = Schema.Struct({
@@ -72,8 +74,26 @@ export const ResolvedWorkspaceEntity = Schema.Struct({
 });
 export type ResolvedWorkspaceEntity = typeof ResolvedWorkspaceEntity.Type;
 
+/**
+ * Problems found in a registry that decoded. Entities are still returned:
+ * - `duplicate-id`, `empty-id`, `empty-title`: the id or title cannot identify
+ *   or label the card on its own (blank means empty after trimming).
+ * - `default-step-out-of-range`: `defaultStep` is not an integer index into
+ *   `steps`.
+ * - `folder-escape` and `step-*`: see {@link WorkspaceStepIssue}.
+ */
 export const WorkspaceManifestIssue = Schema.Struct({
-  kind: Schema.Literals(["duplicate-id", "folder-escape", "step-escape", "step-missing", "step-not-file"]),
+  kind: Schema.Literals([
+    "duplicate-id",
+    "empty-id",
+    "empty-title",
+    "default-step-out-of-range",
+    "folder-escape",
+    "step-escape",
+    "step-missing",
+    "step-not-file",
+    "step-unreadable",
+  ]),
   entityId: Schema.String,
   /** Set for step issues: index into the entity's `steps`. */
   stepIndex: Schema.optionalKey(Schema.Number),

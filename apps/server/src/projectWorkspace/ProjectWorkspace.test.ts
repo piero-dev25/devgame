@@ -50,7 +50,9 @@ const writeFile = Effect.fn("writeFile")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const absolutePath = path.join(root, relativePath);
-  yield* fileSystem.makeDirectory(path.dirname(absolutePath), { recursive: true }).pipe(Effect.orDie);
+  yield* fileSystem
+    .makeDirectory(path.dirname(absolutePath), { recursive: true })
+    .pipe(Effect.orDie);
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
 
@@ -124,7 +126,11 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
             exists: true,
           },
         ]);
-        expect(yours?.steps.map((s) => s.name)).toEqual(["Get started", "Everyday use", "Customize"]);
+        expect(yours?.steps.map((s) => s.name)).toEqual([
+          "Get started",
+          "Everyday use",
+          "Customize",
+        ]);
         expect(arachne?.steps).toHaveLength(10);
         expect(arachne?.steps[9]?.path).toBe("report_motion.html");
         expect(arachne).not.toHaveProperty("defaultStep");
@@ -182,14 +188,18 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
 
         expect(error).toBeInstanceOf(ProjectWorkspace.ProjectWorkspaceManifestError);
         expect(error.reason).toBe("malformed");
-        expect(error.message).toContain("workspace/workspace.json is not a valid workspace registry");
+        expect(error.message).toContain(
+          "workspace/workspace.json is not a valid workspace registry",
+        );
       }),
     );
 
     it.effect("fails as malformed for a wrong shape", () =>
       Effect.gen(function* () {
         const root = yield* makeRoot;
-        yield* writeManifest(root, { entities: [{ id: "x", title: "X", folder: "x", steps: [{}] }] });
+        yield* writeManifest(root, {
+          entities: [{ id: "x", title: "X", folder: "x", steps: [{}] }],
+        });
         expect((yield* readError(root)).reason).toBe("malformed");
 
         yield* writeManifest(root, { entities: {} });
@@ -242,7 +252,11 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
         yield* writeManifest(root, {
           entities: [
             entity({ id: "up-folder", folder: "../..", steps: [{ name: "a", path: "x.md" }] }),
-            entity({ id: "abs-folder", folder: outside, steps: [{ name: "a", path: "secret.md" }] }),
+            entity({
+              id: "abs-folder",
+              folder: outside,
+              steps: [{ name: "a", path: "secret.md" }],
+            }),
             entity({
               id: "bad-steps",
               steps: [
@@ -260,14 +274,14 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
         for (const step of steps) {
           expect(step).toMatchObject({ relativePath: null, exists: false, issue: "escape" });
         }
-        expect(manifest.issues.map((issue) => [issue.kind, issue.entityId, issue.stepIndex])).toEqual(
-          [
-            ["folder-escape", "up-folder", undefined],
-            ["folder-escape", "abs-folder", undefined],
-            ["step-escape", "bad-steps", 0],
-            ["step-escape", "bad-steps", 1],
-          ],
-        );
+        expect(
+          manifest.issues.map((issue) => [issue.kind, issue.entityId, issue.stepIndex]),
+        ).toEqual([
+          ["folder-escape", "up-folder", undefined],
+          ["folder-escape", "abs-folder", undefined],
+          ["step-escape", "bad-steps", 0],
+          ["step-escape", "bad-steps", 1],
+        ]);
       }),
     );
 
@@ -299,10 +313,123 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
           const manifest = yield* readOk(root);
 
           expect(manifest.entities[0]?.steps).toEqual([
-            { name: "linked", path: "report.md", relativePath: null, exists: false, issue: "escape" },
+            {
+              name: "linked",
+              path: "report.md",
+              relativePath: null,
+              exists: false,
+              issue: "escape",
+            },
             { name: "real", path: "real.md", relativePath: "workspace/card/real.md", exists: true },
           ]);
           expect(manifest.issues).toMatchObject([{ kind: "step-escape", stepIndex: 0 }]);
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "flags a step symlinked to a project-root file outside workspace/ (such as .env) as an escape",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* makeRoot;
+          yield* writeFile(root, ".env", "SECRET=1");
+          yield* writeFile(root, "workspace/other/shared.md", "# shared");
+          yield* fileSystem.makeDirectory(path.join(root, "workspace/card"), { recursive: true });
+          yield* fileSystem.symlink(
+            path.join(root, ".env"),
+            path.join(root, "workspace/card/env.md"),
+          );
+          yield* fileSystem.symlink(
+            path.join(root, "workspace/other/shared.md"),
+            path.join(root, "workspace/card/shared.md"),
+          );
+          yield* writeManifest(root, {
+            entities: [
+              entity({
+                steps: [
+                  { name: "env", path: "env.md" },
+                  { name: "shared", path: "shared.md" },
+                ],
+              }),
+            ],
+          });
+
+          const manifest = yield* readOk(root);
+
+          expect(manifest.entities[0]?.steps).toEqual([
+            { name: "env", path: "env.md", relativePath: null, exists: false, issue: "escape" },
+            {
+              name: "shared",
+              path: "shared.md",
+              relativePath: "workspace/card/shared.md",
+              exists: true,
+            },
+          ]);
+          expect(manifest.issues).toMatchObject([{ kind: "step-escape", stepIndex: 0 }]);
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "fails as escape when workspace/ itself links outside the project root",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* makeRoot;
+          const outside = yield* makeRoot;
+          // workspace/ -> outside, but outside/workspace.json links back to a registry
+          // inside the root, so the registry read alone passes containment.
+          yield* writeManifest(root, { entities: [entity()] });
+          yield* fileSystem.rename(path.join(root, "workspace"), path.join(root, "real"));
+          yield* fileSystem.symlink(
+            path.join(root, "real/workspace.json"),
+            path.join(outside, "workspace.json"),
+          );
+          yield* fileSystem.symlink(outside, path.join(root, "workspace"));
+
+          expect((yield* readError(root)).reason).toBe("escape");
+        }),
+    );
+
+    it.effect.skipIf(!symlinksSupported)(
+      "reports a symlink loop or invalid path as unreadable, and only absent entries as missing",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* makeRoot;
+          const card = path.join(root, "workspace/card");
+          yield* writeFile(root, "workspace/card/report.md", "# r");
+          yield* fileSystem.symlink(path.join(card, "loop2"), path.join(card, "loop1"));
+          yield* fileSystem.symlink(path.join(card, "loop1"), path.join(card, "loop2"));
+          yield* writeManifest(root, {
+            entities: [
+              entity({
+                steps: [
+                  { name: "loop", path: "loop1" },
+                  { name: "nul", path: "a\u0000b" },
+                  { name: "under-file", path: "report.md/x" },
+                ],
+              }),
+            ],
+          });
+
+          const manifest = yield* readOk(root);
+
+          expect(
+            manifest.entities[0]?.steps.map((step) => [step.name, step.exists, step.issue]),
+          ).toEqual([
+            ["loop", false, "unreadable"],
+            ["nul", false, "unreadable"],
+            ["under-file", false, "missing"],
+          ]);
+          expect(manifest.issues.map((issue) => [issue.kind, issue.stepIndex])).toEqual([
+            ["step-unreadable", 0],
+            ["step-unreadable", 1],
+            ["step-missing", 2],
+          ]);
+          expect(manifest.issues[0]?.message).not.toContain("does not exist");
         }),
     );
 
@@ -341,7 +468,10 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
             issue: "not-file",
           },
         ]);
-        expect(manifest.issues.map((issue) => issue.kind)).toEqual(["step-missing", "step-not-file"]);
+        expect(manifest.issues.map((issue) => issue.kind)).toEqual([
+          "step-missing",
+          "step-not-file",
+        ]);
       }),
     );
   });
@@ -356,8 +486,69 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
 
       expect(manifest.entities.map((e) => e.title)).toEqual(["Card", "Again"]);
       expect(manifest.issues).toEqual([
-        { kind: "duplicate-id", entityId: "card", message: 'Entity id "card" appears more than once.' },
+        {
+          kind: "duplicate-id",
+          entityId: "card",
+          message: 'Entity id "card" appears more than once.',
+        },
       ]);
+    }),
+  );
+
+  it.effect(
+    "reports empty ids and titles and an unusable defaultStep, and keeps the entities",
+    () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        yield* writeFile(root, "workspace/card/report.md", "# hi");
+        yield* writeManifest(root, {
+          entities: [
+            entity({ id: "", title: "" }),
+            entity({ id: "  ", title: "Blank id" }),
+            entity({ id: "past-end", defaultStep: 99, steps: [] }),
+            entity({ id: "negative", defaultStep: -1 }),
+            entity({ id: "fraction", defaultStep: 0.5 }),
+            entity({ id: "fine", defaultStep: 0 }),
+          ],
+        });
+
+        const manifest = yield* readOk(root);
+
+        expect(manifest.entities.map((e) => e.id)).toEqual([
+          "",
+          "  ",
+          "past-end",
+          "negative",
+          "fraction",
+          "fine",
+        ]);
+        expect(manifest.issues.map((issue) => [issue.kind, issue.entityId])).toEqual([
+          ["empty-id", ""],
+          ["empty-title", ""],
+          ["empty-id", "  "],
+          ["default-step-out-of-range", "past-end"],
+          ["default-step-out-of-range", "negative"],
+          ["default-step-out-of-range", "fraction"],
+        ]);
+      }),
+  );
+
+  it.effect("fails as read for a project root that is missing or not a directory", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const root = yield* makeRoot;
+      yield* writeFile(root, "plain-file", "not a project");
+
+      const notDirectory = yield* readError(path.join(root, "plain-file"));
+      const absent = yield* readError(path.join(root, "absent"));
+
+      expect([notDirectory.reason, absent.reason]).toEqual(["read", "read"]);
+      expect(notDirectory.detail).toBe("project root is not a directory");
+      expect(absent.detail).toBe("ENOENT");
+
+      // A project whose workspace/ is a plain file still has no registry.
+      yield* writeFile(root, "workspace", "not a directory");
+      expect(yield* readManifest(root)).toEqual({ _tag: "missing" });
     }),
   );
 
@@ -383,11 +574,12 @@ it.layer(TestLayer, { excludeTestServices: true })("ProjectWorkspace.readManifes
       const root = yield* makeRoot;
       const registryPath = path.join(root, "workspace/workspace.json");
       // Trailing comma and an unknown key: a rewrite from the decoded schema would change both.
-      const contents = '{"entities": [{"id":"card","title":"Card","folder":"card","steps":[],"x":1},]}';
+      const contents =
+        '{"entities": [{"id":"card","title":"Card","folder":"card","steps":[],"x":1},]}';
       yield* writeFile(root, "workspace/workspace.json", contents);
-      const listTree = fileSystem.readDirectory(root, { recursive: true }).pipe(
-        Effect.map((entries) => [...entries].toSorted()),
-      );
+      const listTree = fileSystem
+        .readDirectory(root, { recursive: true })
+        .pipe(Effect.map((entries) => [...entries].toSorted()));
       const treeBefore = yield* listTree;
       const statBefore = yield* fileSystem.stat(registryPath);
 
