@@ -790,6 +790,20 @@ Depends on: PR3, M2, M3. Estimate: ~600 lines.
 
 Depends on: PR1, PR6. Estimate: ~330 lines.
 
+**As built (2026-10-03), superseding the plan below where they differ**
+
+- The registry is a DevGame-owned sidecar, `<stateDir>/runs/<projectId>/evidence.json`
+  (`{version: 1, runs}`), updated by read, append and atomic rename under one lock. Nothing is
+  written to the project: `workspace/workspace.json` is never rewritten and no card step is
+  appended. A profile links its runs to a card by id with `evidence.workspaceCard`.
+- Artifacts are not copied. A profile writes per-run outputs into its own run directory through
+  the single `{{runDir}}` substitution (args and output paths); project-relative outputs are
+  hashed in place, and one older than the run's start does not count.
+- `evidence.build` names the build to fingerprint when the executable is a wrapper (the Kaigen
+  CAPTURE profile runs `tools/capture_kaigen_vfx.sh`, so it fingerprints the game binary).
+- Freshness (`fresh` / `stale` / `unknown`) is computed on every status read from the current
+  HEAD and build sha256; nothing stores it.
+
 **Reuse**
 
 - apps/server/src/atomicWrite.ts:5-25 — writeFileStringAtomically (temp file in the same directory, then rename)
