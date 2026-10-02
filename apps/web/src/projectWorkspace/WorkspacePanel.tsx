@@ -304,7 +304,8 @@ function CollectionSwitch(props: {
       {props.selected === "original" ? (
         <p className="break-all text-3xs text-muted-foreground">
           Read-only. Imported from {provenance.repositoryPath} at {provenance.revision.slice(0, 12)}
-          {provenance.branch ? ` (${provenance.branch})` : ""}, unchanged since.
+          {provenance.branch ? ` (${provenance.branch})` : ""}. Items marked Adapted changed here
+          since and open as they are now.
         </p>
       ) : (
         <p className="text-3xs text-muted-foreground">
@@ -384,12 +385,16 @@ function WorkspaceBody(props: {
       );
     case "ready": {
       const threadRef = view.threadRef;
-      // Every file, imported HTML included, opens in the Files panel's sandboxed preview.
+      const collections = props.collections;
+      // Every file, imported HTML included, opens in the Files panel's sandboxed
+      // preview; from "Original Mr. Mak" it opens read-only.
+      const openOptions =
+        collections !== null && props.collectionId === "original" ? { readOnly: true } : undefined;
       const onOpen =
         threadRef === null
           ? null
-          : (relativePath: string) => openFileInDock(threadRef, relativePath);
-      const collections = props.collections;
+          : (relativePath: string) =>
+              openFileInDock(threadRef, relativePath, undefined, openOptions);
       const collection = collections ? collections[props.collectionId] : null;
       const cards: ReadonlyArray<{
         readonly card: WorkspaceCardView;

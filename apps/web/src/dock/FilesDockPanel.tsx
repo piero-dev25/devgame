@@ -73,6 +73,7 @@ import { lazy, Suspense, useCallback, useContext } from "react";
 import type { ChatFileAttachment } from "@t3tools/contracts";
 
 import {
+  isFileExplorerPathReadOnly,
   selectFileExplorerAttachment,
   selectThreadFileExplorerState,
   useFileExplorerStore,
@@ -295,6 +296,7 @@ export default function FilesDockPanel(_props: PanelProps) {
             {...(activeAttachment ? { attachment: activeAttachment } : {})}
             revealLine={activeAttachment ? null : fileState.revealLine}
             revealRequestId={activeAttachment ? 0 : fileState.revealRequestId}
+            readOnly={isFileExplorerPathReadOnly(fileState, fileState.activePath)}
             onOpenFile={onOpenFile}
             onPendingChange={onPendingChange}
             selectedFilePending={

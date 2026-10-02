@@ -67,6 +67,32 @@ export interface FileExplorerThreadState {
    * attachments existed still reads as-is. An entry present here is an
    * attachment, not a workspace path. */
   attachments?: Readonly<Record<string, ChatFileAttachment>>;
+  /** Open workspace paths shown but never edited, such as a file opened from
+   * the Workspace panel's "Original Mr. Mak" collection. Opening the path
+   * again without `readOnly` makes it editable. Optional like `attachments`. */
+  readOnlyPaths?: string[];
+}
+
+/** Whether the open workspace `path` was opened read-only. */
+export function isFileExplorerPathReadOnly(
+  state: FileExplorerThreadState,
+  path: string | null,
+): boolean {
+  return path !== null && (state.readOnlyPaths ?? []).includes(path);
+}
+
+/** `current` with `path` marked read-only or not; drops the list once empty. */
+function withReadOnly(
+  current: FileExplorerThreadState,
+  path: string,
+  readOnly: boolean,
+): FileExplorerThreadState {
+  const paths = current.readOnlyPaths ?? [];
+  if (paths.includes(path) === readOnly) return current;
+  const next = readOnly ? [...paths, path] : paths.filter((candidate) => candidate !== path);
+  if (next.length > 0) return { ...current, readOnlyPaths: next };
+  const { readOnlyPaths: _dropped, ...rest } = current;
+  return rest;
 }
 
 /**
@@ -101,8 +127,14 @@ interface FileExplorerStoreState {
    * already-open file keeps its position), makes it active, and always
    * bumps `revealRequestId` (even for an already-open file — reopening the
    * same file with a new `line` must still trigger a scroll-to-line,
-   * mirroring the old `rightPanelStore.openFile`'s identical behaviour). */
-  openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
+   * mirroring the old `rightPanelStore.openFile`'s identical behaviour).
+   * `readOnly` shows it without editing; leaving it out makes it editable. */
+  openFile: (
+    ref: ScopedThreadRef,
+    relativePath: string,
+    line?: number,
+    options?: { readonly readOnly?: boolean },
+  ) => void;
   /** Opens a chat attachment as a file tab (upstream rightPanelStore's
    * `openAttachment`). Reopening the same attachment just reactivates it. */
   openAttachment: (ref: ScopedThreadRef, attachment: ChatFileAttachment) => void;
@@ -164,6 +196,7 @@ const updateThread = (
     next.activePath === null &&
     next.pendingPaths.length === 0 &&
     Object.keys(next.attachments ?? {}).length === 0 &&
+    (next.readOnlyPaths ?? []).length === 0 &&
     next.revealLine === null &&
     next.revealRequestId === 0
   ) {
@@ -178,7 +211,7 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
   persist(
     (set) => ({
       byThreadKey: {},
-      openFile: (ref, requestedPath, line) =>
+      openFile: (ref, requestedPath, line, options) =>
         set((state) => ({
           byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
             // A workspace-root link opens the explorer view (upstream opens
@@ -188,7 +221,7 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
             }
             const relativePath = normalizeWorkspaceEntryPath(requestedPath);
             return {
-              ...current,
+              ...withReadOnly(current, relativePath, options?.readOnly === true),
               openPaths: current.openPaths.includes(relativePath)
                 ? current.openPaths
                 : [...current.openPaths, relativePath],
@@ -226,7 +259,11 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
             if (index < 0) return current;
             const openPaths = current.openPaths.filter((path) => path !== relativePath);
             const pendingPaths = current.pendingPaths.filter((path) => path !== relativePath);
-            const remaining = withoutAttachment(current, relativePath);
+            const remaining = withReadOnly(
+              withoutAttachment(current, relativePath),
+              relativePath,
+              false,
+            );
             if (current.activePath !== relativePath) {
               return { ...remaining, openPaths, pendingPaths };
             }
@@ -279,11 +316,13 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
           if (openPaths.length === current.openPaths.length) return state;
           const activeStillOpen =
             current.activePath !== null && openPaths.includes(current.activePath);
+          // Only attachments stay open, and none of those is a read-only workspace path.
+          const { readOnlyPaths: _dropped, ...withoutReadOnly } = current;
           return {
             byThreadKey: {
               ...state.byThreadKey,
               [threadKey]: {
-                ...current,
+                ...withoutReadOnly,
                 openPaths,
                 pendingPaths: [],
                 activePath: activeStillOpen ? current.activePath : (openPaths.at(-1) ?? null),

@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   fileExplorerAttachmentEntry,
+  isFileExplorerPathReadOnly,
   selectFileExplorerAttachment,
   selectThreadFileExplorerState,
   useFileExplorerStore,
@@ -75,6 +76,35 @@ describe("fileExplorerStore — openFile", () => {
     expect(
       selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA).revealLine,
     ).toBeNull();
+  });
+
+  it("opens a path read-only until it is opened again without readOnly or closed", () => {
+    const store = useFileExplorerStore.getState();
+    const readOnly = (path: string) =>
+      isFileExplorerPathReadOnly(
+        selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA),
+        path,
+      );
+    store.openFile(refA, "workspace/intro/index.html", undefined, { readOnly: true });
+    store.openFile(refA, "docs/readme.md");
+    expect([readOnly("workspace/intro/index.html"), readOnly("docs/readme.md")]).toEqual([
+      true,
+      false,
+    ]);
+    // Opened from the Files tree or a chat link: editable again.
+    store.openFile(refA, "workspace/intro/index.html");
+    expect(readOnly("workspace/intro/index.html")).toBe(false);
+
+    store.openFile(refA, "workspace/intro/index.html", undefined, { readOnly: true });
+    store.closeFile(refA, "workspace/intro/index.html");
+    store.openFile(refA, "workspace/intro/index.html");
+    expect(readOnly("workspace/intro/index.html")).toBe(false);
+    expect(
+      isFileExplorerPathReadOnly(
+        selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refB),
+        "workspace/intro/index.html",
+      ),
+    ).toBe(false);
   });
 });
 

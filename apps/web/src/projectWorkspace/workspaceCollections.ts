@@ -1,9 +1,10 @@
 /**
  * The Workspace panel's two collections for a project a Mr. Mak import wrote
- * into: "Original Mr. Mak" (imported, unchanged since, read-only) and
- * "DevGame Adaptation" (what was adapted from it or made here). Each card,
- * workflow (`processes/`), context file (`context/`) and skill carries the
- * origin it is labelled with.
+ * into: "Original Mr. Mak" (everything the import placed, opened read-only;
+ * an item changed here since stays listed, marked Adapted) and "DevGame
+ * Adaptation" (what was adapted from it or made here). Each card, workflow
+ * (`processes/`), context file (`context/`) and skill carries the origin it
+ * is labelled with.
  *
  * Origins come from the server's per-file status, which it reads from the
  * project's import receipt, so they are the same after a project switch or a
@@ -99,7 +100,10 @@ export function resolveWorkspaceCollections(input: {
   const origins = new Map(files.map((file) => [file.path, file.origin]));
   const original = emptyCollection();
   const adaptation = emptyCollection();
-  const into = (origin: WorkspaceItemOrigin) => (origin === "mrmak" ? original : adaptation);
+  // Original keeps every imported item, adapted ones included (marked so);
+  // Adaptation holds what changed here and what was made here.
+  const into = (origin: WorkspaceItemOrigin) =>
+    origin === "mrmak" ? [original] : origin === "adapted" ? [original, adaptation] : [adaptation];
 
   for (const card of input.cards) {
     const stepPaths = card.steps.flatMap((step) =>
@@ -112,7 +116,7 @@ export function resolveWorkspaceCollections(input: {
         ? stepPaths
         : files.filter((file) => file.path.startsWith(folder)).map((file) => file.path);
     const origin = combine(paths.map((path) => origins.get(path)));
-    into(origin).cards.push({ card, origin });
+    for (const collection of into(origin)) collection.cards.push({ card, origin });
   }
 
   for (const file of files) {
@@ -123,12 +127,14 @@ export function resolveWorkspaceCollections(input: {
         : null;
     if (list === null) continue;
     const origin = itemOrigin(file.origin);
-    into(origin)[list].push({
-      path: file.path,
-      name: file.path.slice(file.path.indexOf("/") + 1),
-      origin,
-      removed: file.origin === "removed",
-    });
+    for (const collection of into(origin)) {
+      collection[list].push({
+        path: file.path,
+        name: file.path.slice(file.path.indexOf("/") + 1),
+        origin,
+        removed: file.origin === "removed",
+      });
+    }
   }
 
   // Skills by folder name across both trees; the `.agents` copy is the one to open.
@@ -149,11 +155,9 @@ export function resolveWorkspaceCollections(input: {
   }
   for (const [name, skill] of [...skills].toSorted(([a], [b]) => a.localeCompare(b))) {
     const origin = combine(skill.origins);
-    into(origin).skills.push({
-      name,
-      origin,
-      openPath: skill.skillFiles.toSorted()[0] ?? null,
-    });
+    for (const collection of into(origin)) {
+      collection.skills.push({ name, origin, openPath: skill.skillFiles.toSorted()[0] ?? null });
+    }
   }
 
   return {

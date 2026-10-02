@@ -808,13 +808,19 @@ Depends on: PR3, M2, M3. Estimate: ~600 lines.
   `confirmExistingProject`. There is no plan cache.
 - No provenance field was added to workspace entities. `status` reads the receipt and hashes each
   imported file: `original`, `adapted`, `removed`, plus `devgame` for unlisted files under
-  `processes/`, `context/` and both skill trees. The web splits cards by their step files'
-  origins (apps/web/src/projectWorkspace/workspaceCollections.ts), so collections survive
+  `processes/`, `context/` and both skill trees. Only plain relative receipt paths are hashed,
+  never through a symlink, and only regular files (streamed). The web sorts cards by their step
+  files' origins (apps/web/src/projectWorkspace/workspaceCollections.ts): Original lists every
+  imported item, an adapted one marked so (it is also in Adaptation), so collections survive
   project switches and restarts. Status is read on mount, refresh and after an import; it does
   not poll.
+- The dry run also lays a conflicting skill out as import-renamed would (`<name>-mrmak`) and lists
+  that folder's file conflicts, so a re-import never leaves one unreviewed.
 - Web: "Import from Mr. Mak…" in the Workspace panel header opens ImportDialog
-  (apps/web/src/projectImport/). No command palette entry. Every file opens through
-  `openFileInDock` (sandboxed Files preview). Mobile: not supported (no dock, no fork routes).
+  (apps/web/src/projectImport/). Conflict choices and the existing-project confirmation belong to
+  the source/destination pair they were made on. No command palette entry. Every file opens
+  through `openFileInDock` (sandboxed Files preview); from Original it opens read-only (the
+  current bytes, not the imported revision's). Mobile: not supported (no dock, no fork routes).
 
 **Reuse**
 

@@ -67,7 +67,7 @@ describe("resolveWorkspaceCollections", () => {
     expect(resolveWorkspaceCollections({ cards: cardsOf([]), status: null })).toBeNull();
   });
 
-  it("keeps unchanged imported cards in Original and the rest in Adaptation, ids and step order intact", () => {
+  it("keeps every imported card in Original, adapted ones too, and changed or new ones in Adaptation", () => {
     const cards = cardsOf([
       entity("intro", ["a.html", "b.md"]),
       entity("lore", ["index.html"]),
@@ -86,8 +86,11 @@ describe("resolveWorkspaceCollections", () => {
 
     const summary = (list: NonNullable<typeof collections>["original"]["cards"]) =>
       list.map(({ card, origin }) => [card.entity.id, origin, card.steps.map((step) => step.name)]);
+    // Adapting a card does not take it out of Original: it stays, marked adapted.
     expect(summary(collections?.original.cards ?? [])).toEqual([
       ["intro", "mrmak", ["a.html", "b.md"]],
+      ["lore", "adapted", ["index.html"]],
+      ["pitch", "adapted", ["deck.html", "extra.md"]],
     ]);
     expect(summary(collections?.adaptation.cards ?? [])).toEqual([
       ["lore", "adapted", ["index.html"]],
@@ -125,7 +128,12 @@ describe("resolveWorkspaceCollections", () => {
     expect(collections?.original.workflows.map((item) => item.path)).toEqual([
       "processes/review.md",
     ]);
-    expect(collections?.original.context).toEqual([]);
+    expect(
+      collections?.original.context.map((item) => [item.name, item.origin, item.removed]),
+    ).toEqual([
+      ["brand.md", "adapted", true],
+      ["tone.md", "adapted", false],
+    ]);
     expect(
       collections?.adaptation.workflows.map((item) => [item.name, item.origin, item.removed]),
     ).toEqual([["playtest.md", "devgame", false]]);
@@ -138,6 +146,7 @@ describe("resolveWorkspaceCollections", () => {
 
     expect(collections?.original.skills).toEqual([
       { name: "alpha", origin: "mrmak", openPath: ".agents/skills/alpha/SKILL.md" },
+      { name: "beta", origin: "adapted", openPath: ".claude/skills/beta/SKILL.md" },
     ]);
     expect(collections?.adaptation.skills).toEqual([
       // Its .agents copy is gone, so the Claude copy is the one to open.
