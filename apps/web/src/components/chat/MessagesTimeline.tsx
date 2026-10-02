@@ -139,7 +139,7 @@ import type {
   KnownComposerContextRecord,
 } from "@t3tools/contracts";
 import { Button } from "../ui/button";
-import type { QueuedComposerMessage } from "../../queuedMessageStore";
+import { queuedMessageContextCount, type QueuedComposerMessage } from "../../queuedMessageStore";
 import { useAssetUrlRefresh, useAssetUrls, useAssetUrlState } from "../../assets/assetUrls";
 import { MediaVideoPlayer } from "../media/MediaVideoPlayer";
 import { getVirtualizedScrollFadeClassName } from "../ui/scroll-area";
@@ -1789,10 +1789,7 @@ function QueuedMessageTimelineRow({
   const ctx = use(TimelineRowCtx);
   const { queuedMessage } = row;
   const attachmentCount = queuedMessage.images.length + queuedMessage.files.length;
-  const contextCount =
-    queuedMessage.terminalContexts.length +
-    queuedMessage.previewAnnotations.length +
-    queuedMessage.reviewComments.length;
+  const contextCount = queuedMessageContextCount(queuedMessage);
   const text = queuedMessage.prompt.trim();
   const sending = queuedMessage.sending !== undefined;
   const statusLabel = sending
@@ -1805,6 +1802,7 @@ function QueuedMessageTimelineRow({
   return (
     <div className="flex flex-col items-end" data-queued-message-id={queuedMessage.id}>
       <div className="max-w-[80%] rounded-2xl border border-dashed border-border p-3 text-message-foreground/80">
+        <WorkspacePacketMessageChip packet={queuedMessage.workspacePacket ?? null} />
         {text.length > 0 ? (
           <UserMessageBody text={text} skills={ctx.skills} markdownCwd={ctx.markdownCwd} />
         ) : null}

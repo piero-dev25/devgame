@@ -14,7 +14,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { describeWorkspacePacket, type WorkspacePacket } from "./contextPacket";
 import {
   clearStagedWorkspacePacket,
-  PROJECT_MISMATCH_REASON,
+  stagedWorkspacePacketBlockedReason,
   useWorkspacePacketStore,
 } from "./workspacePacketStore";
 
@@ -62,6 +62,8 @@ function PacketChip(props: {
 export function WorkspacePacketChip(props: {
   readonly threadRef: ScopedThreadRef;
   readonly projectId: ProjectId | null;
+  /** A multi-model send is selected; it carries no packet. */
+  readonly multiModelSend: boolean;
 }) {
   const threadKey = scopedThreadKey(props.threadRef);
   const packet = useWorkspacePacketStore((state) => state.packetsByThreadKey[threadKey] ?? null);
@@ -70,11 +72,11 @@ export function WorkspacePacketChip(props: {
     <div className="mb-3 flex flex-wrap items-center gap-1.5">
       <PacketChip
         packet={packet}
-        blockedReason={
-          packet.projectId === props.projectId
-            ? null
-            : `Not sent: ${PROJECT_MISMATCH_REASON.toLowerCase()}`
-        }
+        blockedReason={stagedWorkspacePacketBlockedReason({
+          packet,
+          threadProjectId: props.projectId,
+          multiModelSend: props.multiModelSend,
+        })}
         onRemove={() => clearStagedWorkspacePacket(props.threadRef)}
       />
     </div>

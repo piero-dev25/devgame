@@ -309,14 +309,21 @@ export default function WorkspacePanel(_props: PanelProps) {
   // thread and sent with its next message.
   const threadRef: ScopedThreadRef | null =
     route === null ? null : { environmentId: route.environmentId, threadId: route.threadId };
-  const workspaceProjectId = projectRef?.projectId ?? null;
+  // The cards are read for the route thread's own project (`useRouteProjectRef`
+  // is the shell's project on a server route, the draft session's on a draft),
+  // so at render time the thread and the workspace share one project and only
+  // the "no thread" / "still loading" reasons can disable the action. A thread
+  // that changes project between render and click is caught by the fresh read
+  // in `use` below, which `stageWorkspacePacket` checks again.
+  const threadProjectId = projectRef?.projectId ?? null;
+  const workspaceProjectId = threadProjectId;
   const useInChat: UseInChat | null =
     route === null
       ? null
       : {
           blockedReason: workspacePacketBlockedReason({
             threadRef,
-            threadProjectId: workspaceProjectId,
+            threadProjectId,
             workspaceProjectId,
           }),
           use: (card, stepIndexes) => {
@@ -328,14 +335,16 @@ export default function WorkspacePanel(_props: PanelProps) {
               // Filled from run evidence once the run panel lands (PR7/PR8).
               acceptedVersion: null,
               runSummary: null,
+              // Existence was checked at the project root, not the worktree.
+              threadInWorktree: view.kind === "ready" && view.threadInWorktree,
             });
             // Re-read the thread's project now: the cards may predate a switch.
-            const threadProjectId =
+            const currentThreadProjectId =
               route.routeKind === "server"
                 ? (readThreadShell(threadRef)?.projectId ?? null)
                 : (useComposerDraftStore.getState().getDraftSession(route.draftId)?.projectId ??
                   null);
-            const refused = stageWorkspacePacket(threadRef, threadProjectId, packet);
+            const refused = stageWorkspacePacket(threadRef, currentThreadProjectId, packet);
             if (refused !== null) {
               toastManager.add({ type: "error", title: "Not added to chat", description: refused });
               return;

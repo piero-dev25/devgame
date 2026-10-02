@@ -257,7 +257,9 @@ describe("workspace packet ('Use in chat') on the structured send path", () => {
     expect(providerText).toContain("Draft the pitch");
     expect(providerText).toContain('<context kind="workspace-packet"');
     expect(providerText).toContain("workspace/pitch/report.md");
-    expect(providerText).toContain('"missingRefs":["workspace/pitch/deck.html"]');
+    expect(providerText).toContain(
+      '"missingRefs":[{"step":"Deck","path":"workspace/pitch/deck.html","issue":"missing"}]',
+    );
     expect(providerText).toContain("Write the boss rush pitch.");
     expect(providerText).not.toContain('kind="editor-selection"');
   });

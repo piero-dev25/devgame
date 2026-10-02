@@ -42,6 +42,26 @@ export function workspacePacketBlockedReason(input: {
   return null;
 }
 
+const MULTI_MODEL_REASON =
+  "Not sent with a multi-model send. Send to one model to include this card.";
+
+/**
+ * Why the staged packet will not ride on the composer's next send, or null
+ * when it will: another project's packet, or a multi-model send (which starts
+ * new threads and carries no packet). Mirrors the send path's own checks.
+ */
+export function stagedWorkspacePacketBlockedReason(input: {
+  readonly packet: WorkspacePacket;
+  readonly threadProjectId: string | null;
+  readonly multiModelSend: boolean;
+}): string | null {
+  if (input.packet.projectId !== input.threadProjectId) {
+    return `Not sent: ${PROJECT_MISMATCH_REASON.toLowerCase()}`;
+  }
+  if (input.multiModelSend) return MULTI_MODEL_REASON;
+  return null;
+}
+
 /** Stages (or replaces) the thread's packet. Refuses a packet from another project. */
 export function stageWorkspacePacket(
   threadRef: ScopedThreadRef,

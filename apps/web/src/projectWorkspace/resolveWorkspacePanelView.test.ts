@@ -147,6 +147,7 @@ describe("resolveWorkspacePanelView", () => {
     });
     if (view.kind !== "ready") throw new Error(`expected ready, got ${view.kind}`);
     expect(view.openNotice).toMatch(/worktree/);
+    expect(view.threadInWorktree).toBe(true);
     expect(view.threadRef).toEqual(threadRef);
   });
 
@@ -157,6 +158,7 @@ describe("resolveWorkspacePanelView", () => {
     });
     if (view.kind !== "ready") throw new Error(`expected ready, got ${view.kind}`);
     expect(view.openNotice).toBeNull();
+    expect(view.threadInWorktree).toBe(false);
   });
 
   it("lists registry problems above the cards and keeps step problems on their step", () => {

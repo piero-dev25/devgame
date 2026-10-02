@@ -69,6 +69,11 @@ export type WorkspacePanelView =
        * badges describe the project root.
        */
       readonly openNotice: string | null;
+      /**
+       * The thread runs in a git worktree other than the project root, where
+       * the cards' existence checks were made. "Use in chat" tells the agent.
+       */
+      readonly threadInWorktree: boolean;
       /** The thread the Files panel opens steps for; null on drafts. */
       readonly threadRef: ScopedThreadRef | null;
     };
@@ -181,6 +186,10 @@ export function resolveWorkspacePanelView(input: {
 
   const manifest = query.data.manifest;
   if (manifest === null) return { kind: "missing" };
+  const threadInWorktree =
+    target.kind === "server" &&
+    target.worktreePath !== null &&
+    target.worktreePath !== target.projectRoot;
 
   return {
     kind: "ready",
@@ -194,12 +203,8 @@ export function resolveWorkspacePanelView(input: {
       ),
     ],
     openBlockedReason: canOpen ? null : DRAFT_OPEN_BLOCKED_REASON,
-    openNotice:
-      target.kind === "server" &&
-      target.worktreePath !== null &&
-      target.worktreePath !== target.projectRoot
-        ? WORKTREE_OPEN_NOTICE
-        : null,
+    openNotice: threadInWorktree ? WORKTREE_OPEN_NOTICE : null,
+    threadInWorktree,
     threadRef: target.kind === "server" ? target.threadRef : null,
   };
 }

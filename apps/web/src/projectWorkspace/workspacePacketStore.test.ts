@@ -9,6 +9,7 @@ import {
   readSendableWorkspacePacket,
   restageWorkspacePacket,
   stageWorkspacePacket,
+  stagedWorkspacePacketBlockedReason,
   useWorkspacePacketStore,
   workspacePacketBlockedReason,
 } from "./workspacePacketStore";
@@ -125,5 +126,37 @@ describe("workspacePacketBlockedReason", () => {
         workspaceProjectId: "project-a",
       }),
     ).toBeNull();
+  });
+});
+
+describe("stagedWorkspacePacketBlockedReason (composer chip)", () => {
+  it("is null when the packet rides on this thread's next single-model send", () => {
+    expect(
+      stagedWorkspacePacketBlockedReason({
+        packet: packet("project-a"),
+        threadProjectId: "project-a",
+        multiModelSend: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("says the packet is not sent with a multi-model send", () => {
+    expect(
+      stagedWorkspacePacketBlockedReason({
+        packet: packet("project-a"),
+        threadProjectId: "project-a",
+        multiModelSend: true,
+      }),
+    ).toMatch(/^Not sent with a multi-model send/);
+  });
+
+  it("names a project mismatch first", () => {
+    expect(
+      stagedWorkspacePacketBlockedReason({
+        packet: packet("project-a"),
+        threadProjectId: "project-b",
+        multiModelSend: true,
+      }),
+    ).toBe(`Not sent: ${PROJECT_MISMATCH_REASON.toLowerCase()}`);
   });
 });

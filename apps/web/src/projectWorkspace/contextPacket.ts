@@ -6,13 +6,16 @@
  *
  * The packet carries the card's brief and project-relative reference paths
  * only. File bodies are never inlined: the agent opens the paths with its own
- * tools when it needs them, and nothing here reads or imports skills.
+ * tools when it needs them, and nothing here reads or imports skills. A step
+ * whose path leaves the workspace is reported by name and reason only: its
+ * raw manifest path is never forwarded, so the agent is not pointed at it.
  */
 import type {
   ComposerContextId,
   ComposerContextRecord,
   ResolvedWorkspaceEntity,
   UnknownContextRecord,
+  WorkspaceStepIssue,
 } from "@t3tools/contracts";
 import { sanitizeComposerContextLabel } from "@t3tools/shared/composerContextReferences";
 
@@ -26,13 +29,23 @@ const FIELD_MAX_CHARS = 500;
 const MAX_REFS = 64;
 const TRUNCATION_MARKER = "… [truncated]";
 const PACKET_NOTE =
-  "Workspace card attached by the user. Paths are project-relative; read them with your tools when needed. File contents are not included.";
+  "Workspace card attached by the user. Paths are project-relative; read them with your tools when needed. File contents are not included. missingRefs lists chosen steps that could not be used, with the reason; a step outside the workspace has no path and must not be looked for.";
+const WORKTREE_NOTE =
+  " Whether each file exists was checked at the project root. This thread runs in a git worktree, where these files may be missing or differ.";
 
 export interface WorkspacePacketRunSummary {
   readonly runId: string;
   readonly profileId: string;
   readonly state: string;
   readonly exitCode: number | null;
+}
+
+/** A chosen step whose file cannot be used, and why. */
+interface WorkspacePacketMissingRef {
+  readonly step: string;
+  /** Project-relative path, or null when the step points outside the workspace. */
+  readonly path: string | null;
+  readonly issue: WorkspaceStepIssue;
 }
 
 export interface WorkspacePacket {
@@ -44,12 +57,17 @@ export interface WorkspacePacket {
   readonly brief: string | null;
   /** Project-relative paths of the chosen steps whose files exist. */
   readonly referencePaths: ReadonlyArray<string>;
-  /** Chosen steps whose file is missing, unreadable or outside the workspace. */
-  readonly missingRefs: ReadonlyArray<string>;
+  /** Chosen steps whose file is missing, not a file, unreadable or outside the workspace. */
+  readonly missingRefs: ReadonlyArray<WorkspacePacketMissingRef>;
   readonly acceptedVersion: string | null;
   readonly runSummary: WorkspacePacketRunSummary | null;
   /** Reference paths (existing or missing) dropped to stay inside the budget. */
   readonly truncatedCount: number;
+  /**
+   * The thread runs in a git worktree, while existence was checked at the
+   * project root, so `referencePaths` and `missingRefs` may not hold there.
+   */
+  readonly threadInWorktree: boolean;
 }
 
 function clamp(value: string, max: number): string {
@@ -69,17 +87,25 @@ export function buildWorkspacePacket(input: {
   readonly stepIndexes: ReadonlyArray<number>;
   readonly acceptedVersion?: string | null;
   readonly runSummary?: WorkspacePacketRunSummary | null;
+  /** The thread runs in a git worktree other than the project root. */
+  readonly threadInWorktree?: boolean;
 }): WorkspacePacket {
   const { entity } = input;
+  const threadInWorktree = input.threadInWorktree === true;
   const referencePaths: string[] = [];
-  const missingRefs: string[] = [];
+  const missingRefs: WorkspacePacketMissingRef[] = [];
   for (const index of new Set(input.stepIndexes)) {
     const step = entity.steps[index];
     if (!step) continue;
     if (step.relativePath !== null && step.exists) {
       referencePaths.push(clamp(step.relativePath, FIELD_MAX_CHARS));
     } else {
-      missingRefs.push(clamp(step.relativePath ?? step.path, FIELD_MAX_CHARS));
+      // Never the raw manifest path: for an escaping step it is the traversal.
+      missingRefs.push({
+        step: clamp(step.name.trim() || "Unnamed step", FIELD_MAX_CHARS),
+        path: step.relativePath === null ? null : clamp(step.relativePath, FIELD_MAX_CHARS),
+        issue: step.relativePath === null ? "escape" : (step.issue ?? "missing"),
+      });
     }
   }
   const total = referencePaths.length + missingRefs.length;
@@ -89,7 +115,7 @@ export function buildWorkspacePacket(input: {
   const description = entity.description?.trim() ?? "";
   const packet = {
     version: 1 as const,
-    note: PACKET_NOTE,
+    note: threadInWorktree ? `${PACKET_NOTE}${WORKTREE_NOTE}` : PACKET_NOTE,
     projectId: input.projectId,
     entityId: clamp(entity.id, FIELD_MAX_CHARS),
     title: clamp(entity.title.trim() || entity.id.trim() || "Untitled", FIELD_MAX_CHARS),
@@ -108,6 +134,7 @@ export function buildWorkspacePacket(input: {
             exitCode: input.runSummary.exitCode,
           },
     truncatedCount: 0,
+    threadInWorktree,
   };
   while (
     JSON.stringify(packet).length > WORKSPACE_PACKET_MAX_CHARS &&
@@ -137,6 +164,22 @@ const isStringArray = (value: unknown): value is string[] =>
   Array.isArray(value) && value.every(isString);
 const isNullableString = (value: unknown): value is string | null =>
   value === null || isString(value);
+const STEP_ISSUES: ReadonlySet<string> = new Set<WorkspaceStepIssue>([
+  "escape",
+  "missing",
+  "not-file",
+  "unreadable",
+]);
+const isMissingRef = (value: unknown): value is WorkspacePacketMissingRef => {
+  if (typeof value !== "object" || value === null) return false;
+  const ref = value as Record<string, unknown>;
+  return (
+    isString(ref.step) &&
+    isNullableString(ref.path) &&
+    isString(ref.issue) &&
+    STEP_ISSUES.has(ref.issue)
+  );
+};
 
 function readRunSummary(value: unknown): WorkspacePacketRunSummary | null | undefined {
   if (value === null || value === undefined) return null;
@@ -163,7 +206,8 @@ export function readWorkspacePacketRecord(record: ComposerContextRecord): Worksp
     !isString(value.title) ||
     !isNullableString(value.brief ?? null) ||
     !isStringArray(value.referencePaths) ||
-    !isStringArray(value.missingRefs) ||
+    !Array.isArray(value.missingRefs) ||
+    !value.missingRefs.every(isMissingRef) ||
     !isNullableString(acceptedVersion) ||
     runSummary === undefined
   ) {
@@ -178,15 +222,27 @@ export function readWorkspacePacketRecord(record: ComposerContextRecord): Worksp
     title: value.title,
     brief: (value.brief as string | null | undefined) ?? null,
     referencePaths: value.referencePaths,
-    missingRefs: value.missingRefs,
+    missingRefs: value.missingRefs.map((ref: WorkspacePacketMissingRef) => ({
+      step: ref.step,
+      path: ref.path,
+      issue: ref.issue,
+    })),
     acceptedVersion,
     runSummary,
     truncatedCount:
       typeof truncatedCount === "number" && Number.isInteger(truncatedCount) && truncatedCount > 0
         ? truncatedCount
         : 0,
+    threadInWorktree: value.threadInWorktree === true,
   };
 }
+
+const MISSING_REASONS: Readonly<Record<WorkspaceStepIssue, string>> = {
+  missing: "missing",
+  "not-file": "not a file",
+  escape: "outside the workspace",
+  unreadable: "unreadable",
+};
 
 /** What a chip shows for a packet, in the composer or the transcript. */
 export function describeWorkspacePacket(packet: WorkspacePacket): {
@@ -201,10 +257,13 @@ export function describeWorkspacePacket(packet: WorkspacePacket): {
     );
   }
   if (packet.truncatedCount > 0) warnings.push(`${packet.truncatedCount} more not included`);
+  if (packet.threadInWorktree) warnings.push("files checked at the project root, not the worktree");
   const lines = [packet.title];
   if (packet.brief) lines.push(packet.brief);
   for (const path of packet.referencePaths) lines.push(`• ${path}`);
-  for (const path of packet.missingRefs) lines.push(`• ${path} (missing)`);
+  for (const ref of packet.missingRefs) {
+    lines.push(`• ${ref.path ?? ref.step} (${MISSING_REASONS[ref.issue]})`);
+  }
   if (packet.truncatedCount > 0) lines.push(`+${packet.truncatedCount} more not included`);
   if (packet.acceptedVersion) lines.push(`Accepted version: ${packet.acceptedVersion}`);
   if (packet.runSummary) {

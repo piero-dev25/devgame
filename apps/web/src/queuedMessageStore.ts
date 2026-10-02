@@ -228,6 +228,21 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
  * message goes out on. Live arrays are sorted, but a snapshot loaded from the
  * database is not, so pick by sequence rather than position.
  */
+/** Context items a queued message carries, its workspace packet included. */
+export function queuedMessageContextCount(
+  message: Pick<
+    QueuedComposerMessage,
+    "terminalContexts" | "previewAnnotations" | "reviewComments" | "workspacePacket"
+  >,
+): number {
+  return (
+    message.terminalContexts.length +
+    message.previewAnnotations.length +
+    message.reviewComments.length +
+    (message.workspacePacket ? 1 : 0)
+  );
+}
+
 export function latestCompletedToolActivityId(
   activities: ReadonlyArray<{
     readonly id: string;

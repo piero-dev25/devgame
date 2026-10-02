@@ -52,7 +52,10 @@ describe("buildWorkspacePacket", () => {
       title: "Pitch",
       brief: "Write the one-page pitch for the boss rush mode.",
       referencePaths: ["workspace/pitch/report.md"],
-      missingRefs: ["workspace/pitch/deck.html", "../../secret.md"],
+      missingRefs: [
+        { step: "Deck", path: "workspace/pitch/deck.html", issue: "missing" },
+        { step: "Escape", path: null, issue: "escape" },
+      ],
       acceptedVersion: null,
       runSummary: null,
       truncatedCount: 0,
@@ -67,7 +70,41 @@ describe("buildWorkspacePacket", () => {
     });
 
     expect(packet.referencePaths).toEqual([]);
-    expect(packet.missingRefs).toEqual(["workspace/pitch/deck.html"]);
+    expect(packet.missingRefs).toEqual([
+      { step: "Deck", path: "workspace/pitch/deck.html", issue: "missing" },
+    ]);
+  });
+
+  it("never forwards the raw path of a step that leaves the workspace", () => {
+    const packet = buildWorkspacePacket({
+      projectId: "project-a",
+      entity: pitch,
+      stepIndexes: [2],
+    });
+
+    expect(packet.missingRefs).toEqual([{ step: "Escape", path: null, issue: "escape" }]);
+    expect(JSON.stringify(packet)).not.toContain("secret.md");
+    expect(describeWorkspacePacket(packet).details).toContain("• Escape (outside the workspace)");
+  });
+
+  it("warns the agent and the chip when the thread runs in a worktree", () => {
+    const root = buildWorkspacePacket({ projectId: "project-a", entity: pitch, stepIndexes: [0] });
+    const worktree = buildWorkspacePacket({
+      projectId: "project-a",
+      entity: pitch,
+      stepIndexes: [0],
+      threadInWorktree: true,
+    });
+
+    expect(root.threadInWorktree).toBe(false);
+    expect(root.note).not.toMatch(/worktree/);
+    expect(worktree.threadInWorktree).toBe(true);
+    expect(worktree.note).toMatch(/checked at the project root/);
+    expect(worktree.note).toMatch(/git worktree/);
+    expect(describeWorkspacePacket(worktree).warning).toBe(
+      "files checked at the project root, not the worktree",
+    );
+    expect(readWorkspacePacketRecord(buildWorkspacePacketRecord(worktree))).toEqual(worktree);
   });
 
   it("carries paths only, never file contents", () => {
@@ -86,6 +123,7 @@ describe("buildWorkspacePacket", () => {
       "projectId",
       "referencePaths",
       "runSummary",
+      "threadInWorktree",
       "title",
       "truncatedCount",
       "version",
@@ -127,7 +165,9 @@ describe("buildWorkspacePacket", () => {
       stepIndexes: Array.from({ length: 80 }, (_, index) => index),
     });
 
-    expect(packet.missingRefs).toEqual([missing.relativePath]);
+    expect(packet.missingRefs).toEqual([
+      { step: missing.name, path: missing.relativePath, issue: "missing" },
+    ]);
     expect(packet.referencePaths).toHaveLength(63);
     expect(packet.truncatedCount).toBe(16);
   });
@@ -174,6 +214,18 @@ describe("workspace packet record", () => {
       readWorkspacePacketRecord({ ...record, payload: { ...packet, referencePaths: "x" } }),
     ).toBeNull();
     expect(readWorkspacePacketRecord({ ...record, payload: null })).toBeNull();
+    expect(
+      readWorkspacePacketRecord({
+        ...record,
+        payload: { ...packet, missingRefs: ["../../secret.md"] },
+      }),
+    ).toBeNull();
+    expect(
+      readWorkspacePacketRecord({
+        ...record,
+        payload: { ...packet, missingRefs: [{ step: "Deck", path: null, issue: "gone" }] },
+      }),
+    ).toBeNull();
   });
 });
 

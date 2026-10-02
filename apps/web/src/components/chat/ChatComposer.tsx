@@ -6512,6 +6512,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 <WorkspacePacketChip
                   threadRef={routeThreadRef}
                   projectId={workspacePacketProjectId}
+                  multiModelSend={routeKind === "draft" && multipleModelSelections !== null}
                 />
               )}
 
