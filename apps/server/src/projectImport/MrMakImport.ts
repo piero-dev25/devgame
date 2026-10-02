@@ -39,6 +39,13 @@ import * as Schema from "effect/Schema";
 import * as ProcessRunner from "../processRunner.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import {
+  makeContentImporter,
+  type ImportContentRequest,
+  type ImportContentResult,
+  type MrMakImportApplyError,
+  type RollbackImportResult,
+} from "./importContent.ts";
+import {
   extractHrefs,
   makeBatchParser,
   requirementsFrom,
@@ -119,6 +126,18 @@ export class MrMakImport extends Context.Service<
     readonly plan: (
       input: MrMakImportPlanRequest,
     ) => Effect.Effect<MrMakImportPlan, MrMakImportPlanError>;
+    /**
+     * Apply a plan to a destination project: staged, resumable, never
+     * overwriting or deleting the user's files. Rerunning the same plan is a no-op.
+     */
+    readonly importContent: (
+      input: ImportContentRequest,
+    ) => Effect.Effect<ImportContentResult, MrMakImportApplyError>;
+    /** Undo an interrupted import, touching only files it wrote. */
+    readonly rollbackImport: (input: {
+      readonly destinationRoot: string;
+      readonly importId: string;
+    }) => Effect.Effect<RollbackImportResult, MrMakImportApplyError>;
   }
 >()("t3/projectImport/MrMakImport") {}
 
@@ -642,7 +661,12 @@ const make = Effect.gen(function* () {
     } satisfies MrMakImportPlan;
   });
 
-  return MrMakImport.of({ plan });
+  const content = yield* makeContentImporter;
+  return MrMakImport.of({
+    plan,
+    importContent: content.importContent,
+    rollbackImport: content.rollback,
+  });
 });
 
 export const layer = Layer.effect(MrMakImport, make);
