@@ -224,8 +224,13 @@ export const makeSkillImporter = (
       return { root, takenAt, conflicts };
     });
 
-    const importSkills = Effect.fn("MrMakImport.importSkills")(function* (
-      request: ImportSkillsRequest,
+    /**
+     * The plan as these skill choices import it: kept skills dropped, renamed
+     * ones moved and rewritten, Claude copies added. Refuses choices that are
+     * missing, unknown or name a taken folder. Reads, never writes.
+     */
+    const layout = Effect.fn("importSkills.layout")(function* (
+      request: Pick<ImportSkillsRequest, "plan" | "destinationRoot" | "skillChoices">,
     ) {
       const { plan } = request;
       const fail = (
@@ -384,6 +389,15 @@ export const makeSkillImporter = (
         }
         placed.push({ copy, claudePath });
       }
+      return { skillEntries, bySkill, active, entries, rewrites, placed, textOf };
+    });
+
+    const importSkills = Effect.fn("MrMakImport.importSkills")(function* (
+      request: ImportSkillsRequest,
+    ) {
+      const { plan } = request;
+      const { skillEntries, bySkill, active, entries, rewrites, placed, textOf } =
+        yield* layout(request);
 
       const requirementsOf = (list: ReadonlyArray<MrMakImportEntry>) => {
         const found = new Map<string, MrMakSkillRequirement>();
@@ -479,30 +493,64 @@ export const makeSkillImporter = (
     /**
      * Without writing: each source skill, whether a different destination skill
      * already uses its name, and the plan laid out as an import without skill
-     * choices would place it (each sync-skills file again under `.claude/skills`).
+     * choices would place it (each sync-skills file again under `.claude/skills`),
+     * plus each conflicting skill's files where import-renamed would place them.
      */
     const previewSkills = Effect.fn("MrMakImport.previewSkills")(function* (
       request: SkillPreviewRequest,
     ) {
       const bySkill = groupSkills(request.plan);
       const { conflicts } = yield* destinationSkills(request.destinationRoot, bySkill);
+      // Imported renamed, a conflicting skill lands in `<name>-mrmak`, where an
+      // earlier import may have left files the user changed since. That layout
+      // is previewed too, so its file conflicts are reviewed before apply.
+      const renamedLayout =
+        conflicts.length === 0
+          ? Option.none()
+          : yield* layout({
+              plan: request.plan,
+              destinationRoot: request.destinationRoot,
+              skillChoices: conflicts.map((skill) => ({
+                skill,
+                action: "import-renamed" as const,
+              })),
+            }).pipe(Effect.option);
+      const renamedEntries = Option.match(renamedLayout, {
+        onNone: (): ReadonlyArray<MrMakImportEntry> => [],
+        onSome: (renamed) =>
+          renamed.entries.filter(
+            (entry) => entry.root === AGENTS && conflicts.includes(skillOf(entry)?.name ?? ""),
+          ),
+      });
       return {
         skills: [...bySkill].map(([name, list]) => ({
           name,
           files: list.length,
           conflict: conflicts.includes(name),
         })),
-        entries: request.plan.entries.flatMap((entry) =>
-          entry.root === AGENTS && isDistributed(entry)
-            ? [
-                entry,
-                {
-                  ...entry,
-                  destinationPath: `${CLAUDE}/${entry.sourcePath.slice(AGENTS.length + 1)}`,
-                },
-              ]
-            : [entry],
-        ),
+        entries: [
+          ...request.plan.entries.flatMap((entry) =>
+            entry.root === AGENTS && isDistributed(entry)
+              ? [
+                  entry,
+                  {
+                    ...entry,
+                    destinationPath: `${CLAUDE}/${entry.sourcePath.slice(AGENTS.length + 1)}`,
+                  },
+                ]
+              : [entry],
+          ),
+          ...renamedEntries,
+        ],
+        /** Conflicting skill to the folder name import-renamed gives it, where it can. */
+        renamed: Option.match(renamedLayout, {
+          onNone: (): Readonly<Record<string, string>> => ({}),
+          onSome: (renamed) =>
+            Object.fromEntries(conflicts.flatMap((name) => {
+              const activeName = renamed.active.get(name);
+              return activeName === undefined ? [] : [[name, activeName]];
+            })),
+        }),
       };
     });
 

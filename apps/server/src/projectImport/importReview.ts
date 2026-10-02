@@ -27,12 +27,14 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import * as ProcessRunner from "../processRunner.ts";
-import type {
-  ImportContentRequest,
-  ImportContentResult,
-  MrMakImportApplyError,
+import {
+  isPlainRelativePath,
+  type ImportContentRequest,
+  type ImportContentResult,
+  type MrMakImportApplyError,
 } from "./importContent.ts";
 import type {
   ImportSkillsRequest,
@@ -125,6 +127,8 @@ export const makeImportReview = (deps: {
     {
       readonly skills: ReadonlyArray<MrMakImportPlanSummary["skills"][number]>;
       readonly entries: MrMakImportPlan["entries"];
+      /** Conflicting skill to the folder import-renamed would give it. */
+      readonly renamed: Readonly<Record<string, string>>;
     },
     MrMakImportApplyError
   >;
@@ -166,17 +170,25 @@ export const makeImportReview = (deps: {
       const kind = yield* destinationKind(destinationRoot);
       const preview = plan.entries.some((entry) => entry.root === ".agents/skills")
         ? yield* deps.previewSkills({ plan, destinationRoot })
-        : { skills: [], entries: plan.entries };
+        : { skills: [], entries: plan.entries, renamed: {} };
       // A conflicting skill's files are settled by its skill choice, not one by one.
       const conflictedSkills = new Set(
         preview.skills.filter((skill) => skill.conflict).map((skill) => skill.name),
       );
+      // Its renamed folder's files are not: import-renamed would overwrite them.
+      const renamedFrom = new Map(
+        Object.entries(preview.renamed).map(([name, renamed]) => [renamed, name]),
+      );
       const conflicts = (yield* deps.previewConflicts({
         plan: { ...plan, entries: preview.entries },
         destinationRoot,
-      })).filter((conflict) => {
+      })).flatMap((conflict) => {
         const skill = SKILL_FILE.exec(conflict.path)?.[1];
-        return skill === undefined || !conflictedSkills.has(skill);
+        if (skill !== undefined && conflictedSkills.has(skill)) return [];
+        const original = skill === undefined ? undefined : renamedFrom.get(skill);
+        return original === undefined
+          ? [conflict]
+          : [{ ...conflict, reason: `If ${original} is imported as ${skill}: ${conflict.reason}` }];
       });
       const reviewed = {
         source: {
@@ -249,15 +261,37 @@ export const makeImportReview = (deps: {
       } satisfies MrMakImportApplySuccess;
     });
 
-    /** sha256 of a file, or of a symlink's own link text; null when absent. */
-    const hashAt = (absolute: string) =>
-      fileSystem.readLink(absolute).pipe(
-        Effect.map((text) => sha256(text)),
-        Effect.catch(() =>
-          fileSystem.readFile(absolute).pipe(Effect.map((bytes) => sha256(bytes))),
-        ),
-        Effect.orElseSucceed((): string | null => null),
-      );
+    /**
+     * sha256 of what sits at a receipt path: a regular file's bytes (streamed)
+     * or a symlink's own link text; null for anything else or nothing. The
+     * receipt is read from disk, so the walk never passes through a symlink or
+     * a non-directory: nothing outside `root`, and no FIFO or device, is opened.
+     */
+    const hashPlaced = (root: string, relativePath: string) =>
+      Effect.gen(function* () {
+        const segments = relativePath.split("/");
+        let current = root;
+        for (const [index, segment] of segments.entries()) {
+          current = NodePath.join(current, segment);
+          const last = index === segments.length - 1;
+          const link = yield* fileSystem.readLink(current).pipe(Effect.option);
+          if (Option.isSome(link)) return last ? sha256(link.value) : null;
+          const info = yield* fileSystem.stat(current);
+          if (!last) {
+            if (info.type !== "Directory") return null;
+            continue;
+          }
+          if (info.type !== "File") return null;
+          const digest = yield* fileSystem.stream(current).pipe(
+            Stream.runFold(
+              () => NodeCrypto.createHash("sha256"),
+              (hash, chunk: Uint8Array) => hash.update(chunk),
+            ),
+          );
+          return digest.digest("hex");
+        }
+        return null;
+      }).pipe(Effect.orElseSucceed((): string | null => null));
 
     const status = Effect.fn("MrMakImport.status")(function* (input: {
       readonly destinationRoot: string;
@@ -271,10 +305,11 @@ export const makeImportReview = (deps: {
         .readFileString(NodePath.join(root, RECEIPT_PATH))
         .pipe(Effect.map(decodeReceipt), Effect.orElseSucceed(Option.none));
       if (Option.isNone(receipt)) return none;
+      // Only paths an import can write are looked at; the receipt is data from disk.
       const placed = yield* Effect.forEach(
-        receipt.value.files,
+        receipt.value.files.filter((file) => isPlainRelativePath(file.path)),
         (file) =>
-          hashAt(NodePath.join(root, file.path)).pipe(
+          hashPlaced(root, file.path).pipe(
             Effect.map((current) => {
               const origin: MrMakImportFileOrigin =
                 current === null

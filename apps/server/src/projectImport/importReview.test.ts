@@ -5,14 +5,17 @@
  * a project reads back from disk after a restart.
  */
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterAll, beforeAll, expect, it, vi } from "@effect/vitest";
+import { MrMakImportReceipt } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -87,7 +90,12 @@ const makeFixture = Effect.gen(function* () {
   return { source, destination, request: { sourceRoot: source, destinationRoot: destination } };
 });
 
-const NO_CHOICES = { choices: {}, skillChoices: [], confirmExistingProject: false };
+const ReceiptJson = {
+  decode: Schema.decodeUnknownSync(Schema.fromJsonString(MrMakImportReceipt)),
+  encode: Schema.encodeSync(Schema.fromJsonString(MrMakImportReceipt)),
+};
+
+const NO_CHOICES ={ choices: {}, skillChoices: [], confirmExistingProject: false };
 
 it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport review", (it) => {
   it.effect("dry-runs a new project with a stable fingerprint and writes nothing", () =>
@@ -160,6 +168,49 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport review"
     }).pipe(Effect.provide(ServiceLayer)),
   );
 
+  it.effect("lists edits in a renamed skill's folder as conflicts before a re-import", () =>
+    Effect.gen(function* () {
+      const { source, destination, request } = yield* makeFixture;
+      write(destination, ".agents/skills/alpha/SKILL.md", "---\nname: alpha\n---\nOurs.\n");
+      const service = yield* MrMakImport.MrMakImport;
+      const renamed = {
+        skillChoices: [{ skill: "alpha", action: "import-renamed" as const }],
+        confirmExistingProject: true,
+      };
+      const first = yield* service.review(request);
+      yield* service.apply({ ...request, ...renamed, choices: {}, planId: first.planId });
+      const renamedSkill = ".agents/skills/alpha-mrmak/SKILL.md";
+      write(destination, renamedSkill, "---\nname: alpha-mrmak\n---\nEdited here.\n");
+      // Both sides changed it: an update would overwrite the edit.
+      write(source, ".agents/skills/alpha/SKILL.md", "---\nname: alpha\n---\nAlpha, revised.\n");
+      git(source, "commit", "-q", "-am", "revise alpha");
+
+      const again = yield* service.review(request);
+      expect(again.skills).toEqual([{ name: "alpha", files: 1, conflict: true }]);
+      expect(again.conflicts).toEqual([
+        {
+          path: renamedSkill,
+          reason:
+            "If alpha is imported as alpha-mrmak: Changed at the destination since the last import.",
+        },
+      ]);
+      const refused = yield* service
+        .apply({ ...request, ...renamed, choices: {}, planId: again.planId })
+        .pipe(Effect.flip);
+      expect(refused._tag === "MrMakImportReviewError" && refused.paths).toEqual([renamedSkill]);
+
+      yield* service.apply({
+        ...request,
+        ...renamed,
+        choices: { [renamedSkill]: "keep-destination" },
+        planId: again.planId,
+      });
+      expect(NodeFS.readFileSync(NodePath.join(destination, renamedSkill), "utf8")).toContain(
+        "Edited here.",
+      );
+    }).pipe(Effect.provide(ServiceLayer)),
+  );
+
   it.effect("refuses a plan the source moved past since the dry run", () =>
     Effect.gen(function* () {
       const { source, destination, request } = yield* makeFixture;
@@ -212,5 +263,54 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport review"
         ".claude/skills/alpha/SKILL.md": "original",
       });
     }),
+  );
+
+  it.effect("reads only receipt paths inside the project, and never opens a FIFO", () =>
+    Effect.gen(function* () {
+      const { destination, request } = yield* makeFixture;
+      const service = yield* MrMakImport.MrMakImport;
+      const summary = yield* service.review(request);
+      yield* service.apply({ ...request, ...NO_CHOICES, planId: summary.planId });
+
+      // A shared comparison repository can carry any receipt; this one points outside it.
+      const base = NodePath.dirname(destination);
+      write(base, "outside/secret.txt", "secret\n");
+      NodeFS.symlinkSync(NodePath.join(base, "outside"), NodePath.join(destination, "linked"));
+      NodeChildProcess.execFileSync("mkfifo", [NodePath.join(destination, "pipe")]);
+      const secret = NodeCrypto.createHash("sha256").update("secret\n").digest("hex");
+      const receiptPath = NodePath.join(destination, ".devgame/import/receipt.json");
+      const receipt = ReceiptJson.decode(NodeFS.readFileSync(receiptPath, "utf8"));
+      const planted = [
+        "../outside/secret.txt",
+        "processes/../../outside/secret.txt",
+        NodePath.join(base, "outside/secret.txt"),
+        "/dev/zero",
+        "linked/secret.txt",
+        "pipe",
+      ];
+      const files = planted.map((path) => ({
+        path,
+        sourceSha256: secret,
+        destinationSha256: secret,
+        outcome: "written" as const,
+      }));
+      NodeFS.writeFileSync(
+        receiptPath,
+        ReceiptJson.encode({ ...receipt, files: [...receipt.files, ...files] }),
+      );
+
+      const status = yield* service.status({ destinationRoot: destination });
+      const origins = new Map((status.import?.files ?? []).map((file) => [file.path, file.origin]));
+      expect(planted.map((path) => origins.get(path) ?? "not listed")).toEqual([
+        "not listed",
+        "not listed",
+        "not listed",
+        "not listed",
+        // Plain paths, but behind a symlinked folder or not a regular file: never read.
+        "removed",
+        "removed",
+      ]);
+      expect(origins.get("docs/readme.md")).toBe("original");
+    }).pipe(Effect.provide(ServiceLayer)),
   );
 });

@@ -166,7 +166,7 @@ const sha256 = (bytes: string | Uint8Array) =>
   NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 
 /** A POSIX path of plain names that stays out of `.git` and DevGame's own folder. */
-const isPlainRelativePath = (relativePath: string) => {
+export const isPlainRelativePath = (relativePath: string) => {
   const segments = relativePath.split("/");
   return (
     !/[\\\0]/.test(relativePath) &&

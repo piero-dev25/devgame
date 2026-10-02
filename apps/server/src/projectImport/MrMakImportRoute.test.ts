@@ -22,8 +22,9 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import { HttpRouter } from "effect/unstable/http";
 
-import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
 import { MrMakImportReviewError } from "./importReview.ts";
@@ -32,6 +33,9 @@ import {
   dispatchImportApply,
   dispatchImportPlan,
   dispatchImportStatus,
+  importApplyRouteLayer,
+  importPlanRouteLayer,
+  importStatusRouteLayer,
 } from "./MrMakImportRoute.ts";
 
 const MRMAK = ProjectId.make("project-mrmak");
@@ -215,4 +219,56 @@ describe("MrMakImportRoute", () => {
       expect(service.calls).toEqual([]);
     }),
   );
+
+  it("answers 400 for a malformed body and 403 for a missing scope over HTTP", async () => {
+    const service = makeService();
+    const sessions = { reader, operator };
+    const { handler, dispose } = HttpRouter.toWebHandler(
+      Layer.mergeAll(importPlanRouteLayer, importApplyRouteLayer, importStatusRouteLayer).pipe(
+        Layer.provideMerge(
+          Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+            authenticateHttpRequest: (request) =>
+              Effect.succeed(
+                request.headers["x-test-session"] === "operator"
+                  ? sessions.operator
+                  : sessions.reader,
+              ),
+          }),
+        ),
+        Layer.provideMerge(service.layer),
+        Layer.provideMerge(projectionLayer(ROOTS)),
+      ),
+      { disableLogger: true },
+    );
+    const post = async (path: string, body: string, session: keyof typeof sessions) => {
+      const response = await handler(
+        new Request(`http://localhost${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-test-session": session },
+          body,
+        }),
+      );
+      return { status: response.status, body: await response.text() };
+    };
+    try {
+      const responses = [
+        await post(MRMAK_IMPORT_STATUS_PATH, "not json", "reader"),
+        await post(MRMAK_IMPORT_STATUS_PATH, JSON.stringify({ projectId: 42 }), "reader"),
+        await post(MRMAK_IMPORT_APPLY_PATH, JSON.stringify({ planId: "plan-1" }), "operator"),
+        // Reading is not enough to write files into a project.
+        await post(MRMAK_IMPORT_APPLY_PATH, JSON.stringify(applyInput()), "reader"),
+        await post(MRMAK_IMPORT_STATUS_PATH, JSON.stringify({ projectId: COMPARISON }), "reader"),
+      ];
+      expect(responses).toEqual([
+        { status: 400, body: "Bad Request: malformed project import request" },
+        { status: 400, body: "Bad Request: malformed project import request" },
+        { status: 400, body: "Bad Request: malformed project import request" },
+        { status: 403, body: "Forbidden: insufficient scope" },
+        { status: 200, body: JSON.stringify({ import: null }) },
+      ]);
+      expect(service.calls.map((call) => call.method)).toEqual(["status"]);
+    } finally {
+      await dispose();
+    }
+  });
 });
