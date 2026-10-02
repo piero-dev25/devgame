@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import { AlertTriangle, Play, RefreshCw, Square } from "lucide-react";
 import { type ReactNode, useContext, useLayoutEffect, useRef, useState } from "react";
 
+import { openFileInDock } from "~/components/ChatMarkdown";
 import { resolveEngineChipState } from "~/components/ChatView.logic";
 import { ThreadRouteContext, type ThreadRouteContextValue } from "~/dock/ChatPanel";
 import type { PanelProps } from "~/dock/lib/types";
@@ -38,6 +39,7 @@ import {
   type RuntimeProfileRow,
   type RuntimeReceipt,
 } from "./resolveRuntimePanelView";
+import { RunEvidenceSummary } from "./RunEvidenceSummary";
 import { runtimeStatusAtom } from "./runtimeStatusAtom";
 
 const TONE_DOT: Readonly<Record<NonNullable<RuntimeProfileRow["run"]>["tone"], string>> = {
@@ -269,6 +271,23 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
             />
           ))}
         </ul>
+      ) : null}
+      {/* Recorded evidence outlives the run list, which a server restart empties. */}
+      {selected?.evidence ? (
+        <div className="shrink-0 px-3 pt-2">
+          <RunEvidenceSummary
+            evidence={selected.evidence}
+            onOpen={
+              route.routeKind === "server"
+                ? (relativePath) =>
+                    openFileInDock(
+                      { environmentId: route.environmentId, threadId: route.threadId },
+                      relativePath,
+                    )
+                : null
+            }
+          />
+        </div>
       ) : null}
       {selected?.run ? (
         <div className="flex min-h-0 flex-1 flex-col">

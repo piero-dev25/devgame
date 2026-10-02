@@ -1,7 +1,8 @@
 // The Run panel's truthfulness rules: nothing is shown as running unless the
 // server said so through the current connection, and every action is off
 // while what is shown is only "last known".
-import type { RunState, RunStatusSuccess } from "@t3tools/contracts";
+import type { RunEvidenceView, RunState, RunStatusSuccess } from "@t3tools/contracts";
+import { ProjectId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -255,6 +256,51 @@ describe("resolveRuntimePanelView: missing manifest", () => {
     expect(row.unavailableReason).not.toMatch(/No longer listed/);
     expect(row.canStop).toBe(true);
     expect(row.canLaunch).toBe(false);
+  });
+
+  it("shows a profile's recorded evidence even when the server no longer lists its run", () => {
+    const evidence: RunEvidenceView = {
+      record: {
+        schema: "devgame.run-evidence/1",
+        runId: "run-before-restart",
+        projectId: ProjectId.make("project-1"),
+        profileId: "arena",
+        threadId: null,
+        workspaceCard: null,
+        source: { revision: "unknown", dirty: "unknown" },
+        build: { path: "bin/game", bytes: "unknown", mtime: "unknown", sha256: "unknown" },
+        startedAt: "2026-10-03T09:00:00.000Z",
+        endedAt: "2026-10-03T09:00:05.000Z",
+        registeredAt: "2026-10-03T09:00:05.000Z",
+        runStatus: "exited",
+        exitCode: 3,
+        signal: null,
+        log: {
+          absolutePath: "/state/run.log",
+          exists: true,
+          bytes: 10,
+          bytesReceived: 10,
+          sha256: null,
+          problem: null,
+        },
+        checks: [],
+        artifacts: [],
+        outcome: "failed",
+        failures: ["The program exited with code 3."],
+      },
+      freshness: "stale",
+      freshnessReasons: ["Build changed: bin/game is gone or unreadable now."],
+    };
+
+    const row = arena(statusView(resolve({ status: status([], { evidence: [evidence] }) })));
+
+    expect(row.run).toBeNull();
+    expect(row.evidence).toMatchObject({
+      runId: "run-before-restart",
+      passed: false,
+      freshnessLabel: "Stale",
+      failures: ["The program exited with code 3."],
+    });
   });
 
   it("is loading before the first read, and offline with nothing known when never read", () => {

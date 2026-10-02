@@ -37,6 +37,9 @@ import { useRouteProjectRef, useRouteThreadWorktreePath } from "~/dock/useRouteP
 import { cn } from "~/lib/utils";
 import { readThreadShell, useProject } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
+import { RunEvidenceSummary } from "~/projectRuntime/RunEvidenceSummary";
+import { cardEvidence, type RunEvidenceSummaryView } from "~/projectRuntime/runEvidenceView";
+import { runtimeStatusAtom } from "~/projectRuntime/runtimeStatusAtom";
 
 import { buildWorkspacePacket } from "./contextPacket";
 import { projectWorkspaceAtom } from "./projectWorkspaceAtom";
@@ -96,6 +99,8 @@ function WorkspaceCard(props: {
   onOpen: ((relativePath: string) => void) | null;
   openBlockedReason: string | null;
   useInChat: UseInChat | null;
+  /** The newest run evidence linked to this card, or null. */
+  evidence: RunEvidenceSummaryView | null;
 }) {
   const { card, useInChat } = props;
   return (
@@ -175,6 +180,9 @@ function WorkspaceCard(props: {
           })}
         </ul>
       )}
+      {props.evidence ? (
+        <RunEvidenceSummary evidence={props.evidence} onOpen={props.onOpen} />
+      ) : null}
     </li>
   );
 }
@@ -183,6 +191,7 @@ function WorkspaceBody(props: {
   view: WorkspacePanelView;
   onRetry: () => void;
   useInChat: UseInChat | null;
+  evidenceFor: (entityId: string) => RunEvidenceSummaryView | null;
 }) {
   const { view } = props;
   switch (view.kind) {
@@ -232,6 +241,7 @@ function WorkspaceBody(props: {
                   onOpen={null}
                   openBlockedReason={null}
                   useInChat={null}
+                  evidence={null}
                 />
               ))}
             </ul>
@@ -273,6 +283,7 @@ function WorkspaceBody(props: {
                   onOpen={onOpen}
                   openBlockedReason={view.openBlockedReason}
                   useInChat={props.useInChat}
+                  evidence={props.evidenceFor(card.entity.id)}
                 />
               ))}
             </ul>
@@ -289,6 +300,12 @@ export default function WorkspacePanel(_props: PanelProps) {
   const worktreePath = useRouteThreadWorktreePath(route);
   const project = useProject(projectRef);
   const query = useEnvironmentQuery(projectRef === null ? null : projectWorkspaceAtom(projectRef));
+  // Run evidence linked to cards by their id; the registry itself is never edited.
+  const runtimeQuery = useEnvironmentQuery(
+    projectRef === null ? null : runtimeStatusAtom(projectRef),
+  );
+  const evidenceFor = (entityId: string) =>
+    cardEvidence({ data: runtimeQuery.data, error: runtimeQuery.error }, entityId)[0] ?? null;
   const view = resolveWorkspacePanelView({
     target:
       route === null
@@ -368,7 +385,12 @@ export default function WorkspacePanel(_props: PanelProps) {
           </button>
         </div>
       ) : null}
-      <WorkspaceBody view={view} onRetry={query.refresh} useInChat={useInChat} />
+      <WorkspaceBody
+        view={view}
+        onRetry={query.refresh}
+        useInChat={useInChat}
+        evidenceFor={evidenceFor}
+      />
     </div>
   );
 }

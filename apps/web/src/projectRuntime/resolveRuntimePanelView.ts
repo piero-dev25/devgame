@@ -17,6 +17,8 @@
  */
 import type { EngineType, RunState, RunStatusKind, RunStatusSuccess } from "@t3tools/contracts";
 
+import { latestProfileEvidence, type RunEvidenceSummaryView } from "./runEvidenceView";
+
 /** Client-side cap on rendered log lines; the server already bounds the tail to a few KiB. */
 export const RUNTIME_LOG_LINE_CAP = 200;
 
@@ -57,6 +59,8 @@ export interface RuntimeProfileRow {
   readonly unavailableReason: string | null;
   /** This profile's newest run, or null. */
   readonly run: RuntimeRunView | null;
+  /** The newest recorded evidence of this profile, or null. */
+  readonly evidence: RunEvidenceSummaryView | null;
   readonly canLaunch: boolean;
   readonly canStop: boolean;
   /** Button text while this row's request is in flight. */
@@ -188,6 +192,7 @@ function buildRows(input: {
     return {
       ...profile,
       run: run === null ? null : toRunView(run),
+      evidence: latestProfileEvidence(input.status, profile.profileId),
       canLaunch: idle && profile.unavailableReason === null && runEnded,
       canStop: idle && !runEnded,
       pendingLabel:
