@@ -18,6 +18,8 @@ import type {
 
 export interface WorkspaceStepView {
   readonly key: string;
+  /** Index into the entity's `steps`, for "Use in chat". */
+  readonly index: number;
   readonly name: string;
   /** Project-relative path the Files panel opens, or null when the path escapes. */
   readonly relativePath: string | null;
@@ -35,6 +37,8 @@ export interface WorkspaceCardView {
   readonly description: string | null;
   readonly pinned: boolean;
   readonly steps: ReadonlyArray<WorkspaceStepView>;
+  /** The registry entry the card shows, for building a "Use in chat" packet. */
+  readonly entity: ResolvedWorkspaceEntity;
 }
 
 export type WorkspacePanelView =
@@ -113,6 +117,7 @@ function toCard(
       const problem = stepProblem(step);
       return {
         key: `${stepIndex}:${step.path}`,
+        index: stepIndex,
         name: step.name.trim() || step.path,
         relativePath: step.relativePath,
         isDefault: entity.defaultStep === stepIndex,
@@ -120,6 +125,7 @@ function toCard(
         openable: canOpen && problem === null && step.relativePath !== null,
       };
     }),
+    entity,
   };
 }
 

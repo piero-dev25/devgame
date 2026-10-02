@@ -350,6 +350,11 @@ import {
 import { sendQueuedMessage } from "./chat/sendQueuedMessage";
 import { type ReviewCommentContext } from "../reviewCommentContext";
 import { collectAmbientContextRecords } from "../editorPresence/ambientContext";
+import {
+  clearStagedWorkspacePacket,
+  readSendableWorkspacePacket,
+  restageWorkspacePacket,
+} from "../projectWorkspace/workspacePacketStore";
 import { useEditorPresence } from "../editorPresence/useEditorPresence";
 import { resolveConnectedEditorForProject } from "../editorPresence/resolveProjectEditor";
 import { dispatchEditorPresenceCommand } from "../editorPresence/dispatchCommand";
@@ -7305,6 +7310,12 @@ export default function ChatView(props: ChatViewProps) {
     const nextPrompt = prompts.join("\n\n");
     promptRef.current = nextPrompt;
     setComposerDraftPrompt(composerDraftTarget, nextPrompt);
+    // A workspace packet that moved with a queued message comes back to the
+    // composer too, unless the user staged a newer one meanwhile.
+    const restoredWorkspacePacket = messages.find(
+      (message) => message.workspacePacket,
+    )?.workspacePacket;
+    if (restoredWorkspacePacket) restageWorkspacePacket(routeThreadRef, restoredWorkspacePacket);
     // The draft store silently drops attachments over the per-turn cap. Split
     // the overflow back into the queue so nothing is lost; the user can send
     // the first batch and the rest follows as a queued message.
@@ -7638,10 +7649,16 @@ export default function ChatView(props: ChatViewProps) {
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
-      // DevGame ambient editor context rides on this send path too.
+      // DevGame ambient editor context and the staged workspace packet ride
+      // on this send path too.
+      const followUpWorkspacePacket = readSendableWorkspacePacket(
+        routeThreadRef,
+        activeProject?.id,
+      );
       const followUpAmbientRecords = collectAmbientContextRecords({
         project: activeProject ?? null,
         engineChipState,
+        workspacePacket: followUpWorkspacePacket,
       });
       const followUpSent = await onSubmitPlanFollowUp({
         text: appendAmbientContextReferences(followUp.text, followUpAmbientRecords),
@@ -7653,6 +7670,9 @@ export default function ChatView(props: ChatViewProps) {
         }),
         interactionMode: followUp.interactionMode,
       });
+      if (followUpSent && followUpWorkspacePacket) {
+        clearStagedWorkspacePacket(routeThreadRef, followUpWorkspacePacket);
+      }
       if (!followUpSent) {
         promptRef.current = followUpPromptSnapshot;
         composerTerminalContextsRef.current = [...followUpTerminalContexts];
@@ -7740,6 +7760,11 @@ export default function ChatView(props: ChatViewProps) {
       ) {
         return;
       }
+      // The staged workspace packet moves with the queued message.
+      const queuedWorkspacePacket = readSendableWorkspacePacket(routeThreadRef, activeProject?.id);
+      if (queuedWorkspacePacket) {
+        clearStagedWorkspacePacket(routeThreadRef, queuedWorkspacePacket);
+      }
       useQueuedMessageStore.getState().enqueue(activeThreadKey, {
         prompt: promptForSend,
         images: [...composerImages],
@@ -7747,6 +7772,7 @@ export default function ChatView(props: ChatViewProps) {
         terminalContexts: [...composerTerminalContexts],
         previewAnnotations: [...composerPreviewAnnotations],
         reviewComments: [...composerReviewComments],
+        workspacePacket: queuedWorkspacePacket,
         sendSettings,
         queuedAfterToolActivityId: latestCompletedToolActivityId(threadActivities),
         createdAt: new Date().toISOString(),
@@ -7799,10 +7825,17 @@ export default function ChatView(props: ChatViewProps) {
     // DevGame: the editor selection (scoped to THIS thread's project, task
     // #71) and the engine state ride as context records with inline
     // references, so the server renders them for every provider. Snapshotted
-    // once so every wire form of this send carries the same values.
+    // once so every wire form of this send carries the same values. The
+    // staged workspace packet rides only on this thread's own turn, never on
+    // the new threads a multi-model send starts.
+    const sentWorkspacePacket =
+      multipleModelSelections === null
+        ? readSendableWorkspacePacket(routeThreadRef, activeProject?.id)
+        : null;
     const ambientContextRecords = collectAmbientContextRecords({
       project: activeProject ?? null,
       engineChipState,
+      workspacePacket: sentWorkspacePacket,
     });
     const buildOutgoingMessageContext = (attachmentIds: ReadonlyArray<string>) =>
       buildMessageContext({
@@ -8521,6 +8554,7 @@ export default function ChatView(props: ChatViewProps) {
         failure = startResult;
       } else {
         turnStartSucceeded = true;
+        if (sentWorkspacePacket) clearStagedWorkspacePacket(routeThreadRef, sentWorkspacePacket);
         // The turn is under way and will spend quota, so that thread's limits
         // snapshot is stale. Uploads may have outlasted a navigation, so only
         // the sending thread's panel clears.
@@ -10240,6 +10274,7 @@ export default function ChatView(props: ChatViewProps) {
                             draftId={draftId}
                             engineChipState={engineChipState}
                             presenceWorkspaceRoot={presenceWorkspaceRoot}
+                            workspacePacketProjectId={activeProject?.id ?? null}
                             activeThreadId={activeThreadId}
                             activeThreadEnvironmentId={activeThread?.environmentId}
                             activeThread={activeThread}

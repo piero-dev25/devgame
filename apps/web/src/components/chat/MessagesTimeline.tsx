@@ -247,6 +247,7 @@ import type { ChatMarkdownContextReference } from "../ChatMarkdown";
 import { useMediaQuery } from "~/hooks/useMediaQuery";
 import { extractAmbientMessageContext } from "~/editorPresence/ambientContext";
 import { EditorSelectionMessageChips } from "~/editorPresence/EditorSelectionMessageChips";
+import { WorkspacePacketMessageChip } from "~/projectWorkspace/WorkspacePacketChip";
 import { APP_BASE_NAME } from "~/branding";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -2285,6 +2286,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         ) : null}
+        <WorkspacePacketMessageChip packet={ambientContext.workspacePacket} />
         <EditorSelectionMessageChips selection={ambientContext.editorSelection} />
         <div onCopyCapture={onBodyCopyCapture}>
           <CollapsibleUserMessageBody
