@@ -40,11 +40,17 @@ export const RunProfile = Schema.Struct({
   cwd: Schema.optionalKey(Schema.String),
   /**
    * Names of server environment variables the child may inherit. Omitted or
-   * empty means the child inherits none of them.
+   * empty means the child inherits none of them. Names that look like secrets
+   * (`*TOKEN*`, `*SECRET*`, `*_KEY`, ...) or loader variables (`DYLD_*`,
+   * `LD_*`, `NODE_OPTIONS`) are refused.
    */
   envAllowList: Schema.optionalKey(Schema.Array(Schema.String)),
   outputs: Schema.optionalKey(Schema.Array(RunProfileOutput)),
-  /** Regular expressions a successful run's log must match. */
+  /**
+   * Regular expressions a successful run's log must match. The log is the
+   * child's stdout and stderr, which the runner records; the runner also
+   * creates each output's parent directory before the run.
+   */
   evidence: Schema.optionalKey(Schema.Struct({ logPatterns: Schema.Array(Schema.String) })),
 });
 export type RunProfile = typeof RunProfile.Type;
@@ -58,14 +64,17 @@ export type RunProfilesFile = typeof RunProfilesFile.Type;
 /**
  * Why a profile that decoded cannot be launched:
  * - `*-escape`: the path is absolute, climbs out of the project root, or is a
- *   symlink whose target lies outside it.
+ *   symlink whose target lies outside it. An output path through a dangling
+ *   symlink also counts, since writing it would follow the link.
  * - `executable-missing`: nothing exists at the executable path.
- * - `executable-not-executable`: the path is not a regular file with an
- *   execute bit set.
+ * - `executable-not-executable`: the path is not a regular file the server
+ *   user may execute.
  * - `cwd-missing`: the working directory does not exist or is not a directory.
  * - `duplicate-id`: an earlier profile already uses this id.
- * - `env-name-invalid`, `output-name-duplicate`, `log-pattern-invalid`: a
- *   field is present but unusable as written.
+ * - `env-name-invalid`: not a variable name, or a refused secret or loader
+ *   variable (see `envAllowList`).
+ * - `output-name-duplicate`, `log-pattern-invalid`: a field is present but
+ *   unusable as written.
  */
 export const RunProfileIssueKind = Schema.Literals([
   "executable-escape",

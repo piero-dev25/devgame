@@ -292,6 +292,38 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
           expect(issueKinds(yield* load(root))).toEqual(["output-escape"]);
         }),
     );
+
+    for (const [label, linkPath, outputPath] of [
+      ["the output file itself", "work/a.png", "work/a.png"],
+      ["a directory on the output path", "work/captures", "work/captures/a.png"],
+    ] as const) {
+      it.effect.skipIf(!symlinksSupported)(
+        `flags an output when ${label} is a dangling symlink to outside the root`,
+        () =>
+          Effect.gen(function* () {
+            const fileSystem = yield* FileSystem.FileSystem;
+            const path = yield* Path.Path;
+            const root = yield* makeRoot;
+            const outside = yield* makeRoot;
+            yield* writeExecutable(root, "bin/game");
+            yield* fileSystem.makeDirectory(path.join(root, "work"));
+            yield* fileSystem.symlink(
+              path.join(outside, "not-yet-there"),
+              path.join(root, linkPath),
+            );
+            yield* writeProfiles(root, [
+              profile({ outputs: [{ name: "shot", kind: "image", path: outputPath }] }),
+            ]);
+
+            const statuses = yield* load(root);
+            const error = yield* Effect.flip(resolve(root, "game"));
+
+            expect(issueKinds(statuses)).toEqual(["output-escape"]);
+            expect(error).toBeInstanceOf(RunProfiles.RunProfilePathEscape);
+            expect(error).toMatchObject({ field: "output", path: outputPath });
+          }),
+      );
+    }
   });
 
   describe("executable checks", () => {
@@ -299,6 +331,21 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
       Effect.gen(function* () {
         const root = yield* makeRoot;
         yield* writeFile(root, "bin/game", "#!/bin/sh\n", 0o644);
+        yield* writeProfiles(root, [profile()]);
+
+        const statuses = yield* load(root);
+        const error = yield* Effect.flip(resolve(root, "game"));
+
+        expect(issueKinds(statuses)).toEqual(["executable-not-executable"]);
+        expect(error).toBeInstanceOf(RunProfiles.RunProfileExecutableNotExecutable);
+      }),
+    );
+
+    it.effect("flags a file only others may execute as not executable for the server user", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        // Owner rw-, other --x: an execute bit is set, but not one the owner can use.
+        yield* writeFile(root, "bin/game", "#!/bin/sh\nexit 0\n", 0o601);
         yield* writeProfiles(root, [profile()]);
 
         const statuses = yield* load(root);
@@ -334,6 +381,30 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
 
         expect(plan.absCwd).toBe(path.resolve(root));
         expect(plan.envAllowList).toEqual(["HOME", "VK_ICD_FILENAMES"]);
+      }),
+    );
+
+    it.effect("refuses env names that look like secrets or loader variables", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        const denied = [
+          "AWS_SECRET_ACCESS_KEY",
+          "GITHUB_TOKEN",
+          "OPENAI_API_KEY",
+          "DB_PASSWORD",
+          "DYLD_INSERT_LIBRARIES",
+          "LD_PRELOAD",
+          "NODE_OPTIONS",
+        ];
+        yield* writeExecutable(root, "bin/game");
+        yield* writeProfiles(root, [profile({ envAllowList: ["HOME", "LANG", ...denied] })]);
+
+        const statuses = yield* load(root);
+        const error = yield* Effect.flip(resolve(root, "game"));
+
+        expect(issueKinds(statuses)).toEqual(denied.map(() => "env-name-invalid"));
+        expect(error).toBeInstanceOf(RunProfiles.RunProfileInvalid);
+        expect(error.message).toContain("GITHUB_TOKEN");
       }),
     );
 

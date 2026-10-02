@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 /**
  * RunProfiles - Effect service that reads a game project's run profiles
  * (`devgame.runtime.json`) and turns one into a launch plan.
@@ -15,6 +16,9 @@
  *
  * @module RunProfiles
  */
+import * as NodeFS from "node:fs";
+import * as NodeFSP from "node:fs/promises";
+
 import {
   RUN_PROFILES_FILE_NAME,
   RunProfilesFile,
@@ -122,7 +126,14 @@ export interface RunProfileStatus {
   readonly issues: ReadonlyArray<RunProfileIssue>;
 }
 
-/** What the runner spawns: no shell, no build step, argv passed through untouched. */
+/**
+ * What the runner spawns: no shell, no build step, argv passed through untouched.
+ *
+ * Resolving creates nothing. Before spawning, the runner creates the parent
+ * directory of each declared output, and it records the child's stdout and
+ * stderr as the run log that `logPatterns` are matched against. A `log`
+ * output is a separate file the program itself writes.
+ */
 export interface LaunchPlan {
   readonly profileId: string;
   readonly absExecutable: string;
@@ -161,6 +172,12 @@ const errnoCode = (cause: unknown): string | undefined =>
     : undefined;
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/**
+ * The manifest is project-owned, so it may not ask for the server's secrets or
+ * for variables that inject code into the child (dynamic loader, Node options).
+ */
+const ENV_NAME_DENIED =
+  /^(DYLD_|LD_|NODE_OPTIONS$)|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|(^|_)(API_?)?KEY(_|$)|(^|_)AUTH(_|$)/i;
 
 const isValidRegExp = (pattern: string) => {
   try {
@@ -169,7 +186,6 @@ const isValidRegExp = (pattern: string) => {
     return false;
   }
 };
-const ANY_EXECUTE_BIT = 0o111;
 
 type Checked =
   | { readonly _tag: "escape" }
@@ -242,12 +258,16 @@ const make = Effect.gen(function* () {
   ) {
     const checked = yield* checkPath(roots, relativePath, false);
     if (checked._tag !== "missing") return checked;
-    let ancestor = path.dirname(checked.absPath);
+    let ancestor = checked.absPath;
     while (true) {
       const real = yield* fileSystem.realPath(ancestor).pipe(Effect.result);
       if (real._tag === "Success") {
         return isOutside(roots.realRoot, real.success) ? ({ _tag: "escape" } as const) : checked;
       }
+      // A component that exists but does not resolve is a dangling (or looping) symlink.
+      // Writing through it would follow the link wherever it points, so refuse it.
+      const link = yield* fileSystem.readLink(ancestor).pipe(Effect.option);
+      if (link._tag === "Some") return { _tag: "escape" } as const;
       // The lexical check guarantees the walk reaches the root, whose realpath is known.
       if (ancestor === roots.workspaceRoot || ancestor === path.dirname(ancestor)) return checked;
       ancestor = path.dirname(ancestor);
@@ -280,11 +300,11 @@ const make = Effect.gen(function* () {
       });
     } else {
       const stat = yield* fileSystem.stat(executable.realPath).pipe(Effect.option);
-      if (
-        stat._tag === "None" ||
-        stat.value.type !== "File" ||
-        (stat.value.mode & ANY_EXECUTE_BIT) === 0
-      ) {
+      // access(X_OK) asks whether this server user may execute it, not whether any bit is set.
+      const canExecute = yield* Effect.tryPromise(() =>
+        NodeFSP.access(executable.realPath, NodeFS.constants.X_OK),
+      ).pipe(Effect.option);
+      if (stat._tag === "None" || stat.value.type !== "File" || canExecute._tag === "None") {
         issues.push({
           kind: "executable-not-executable",
           message: `"${profile.executable}" is not an executable file.`,
@@ -312,6 +332,11 @@ const make = Effect.gen(function* () {
         issues.push({
           kind: "env-name-invalid",
           message: `"${name}" is not an environment variable name.`,
+        });
+      } else if (ENV_NAME_DENIED.test(name)) {
+        issues.push({
+          kind: "env-name-invalid",
+          message: `"${name}" looks like a secret or a loader variable and cannot be passed to a run.`,
         });
       }
     }
