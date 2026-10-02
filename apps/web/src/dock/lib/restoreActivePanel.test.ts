@@ -351,3 +351,32 @@ describe("restoreActivePanelForKey — a remembered panel is a chrome id (task #
     expect(chatActivated).toBe(true);
   });
 });
+
+describe("restoreActivePanelForKey — an ordered fallback list", () => {
+  it("activates the first fallback that is still open, and only that one", () => {
+    const activated: string[] = [];
+    const api = fakeApi({
+      getPanel: (id) =>
+        id === "chat" || id === "files" ? fakePanel(id, () => activated.push(id)) : undefined,
+    });
+
+    restoreActivePanelForKey(api, {
+      rememberedPanelId: null,
+      fallbackPanelId: ["workspace", "chat", "files"],
+    });
+
+    expect(activated).toEqual(["chat"]);
+  });
+
+  it("prefers the first fallback when it is open", () => {
+    const activated: string[] = [];
+    const api = fakeApi({ getPanel: (id) => fakePanel(id, () => activated.push(id)) });
+
+    restoreActivePanelForKey(api, {
+      rememberedPanelId: null,
+      fallbackPanelId: ["workspace", "chat"],
+    });
+
+    expect(activated).toEqual(["workspace"]);
+  });
+});

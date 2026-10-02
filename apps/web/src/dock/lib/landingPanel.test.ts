@@ -1,9 +1,15 @@
+import type { DockviewApi, IDockviewPanel } from "dockview";
 import { describe, expect, it } from "vite-plus/test";
 
 import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
 
 import { CHAT_PANEL_ID, DIFF_PANEL_ID, WORKSPACE_PANEL_ID } from "../chatDockHandle";
-import { resolveDockLandingPanelId, shouldApplyLateLanding } from "./landingPanel";
+import {
+  resolveDockLandingFallbackPanelIds,
+  resolveDockLandingPanelId,
+  shouldApplyLateLanding,
+} from "./landingPanel";
+import { restoreActivePanelForThread } from "./restoreActivePanel";
 
 const openPanels =
   (...ids: string[]) =>
@@ -64,5 +70,46 @@ describe("shouldApplyLateLanding", () => {
   it("does nothing once the user has moved off Chat", () => {
     expect(shouldApplyLateLanding({ ...base, activePanelId: DIFF_PANEL_ID })).toBe(false);
     expect(shouldApplyLateLanding({ ...base, activePanelId: null })).toBe(false);
+  });
+});
+
+describe("resolveDockLandingFallbackPanelIds", () => {
+  it("falls back to Chat after Workspace, and to Chat alone otherwise", () => {
+    expect(resolveDockLandingFallbackPanelIds(WORKSPACE_PANEL_ID)).toEqual([
+      WORKSPACE_PANEL_ID,
+      CHAT_PANEL_ID,
+    ]);
+    expect(resolveDockLandingFallbackPanelIds(CHAT_PANEL_ID)).toEqual([CHAT_PANEL_ID]);
+  });
+
+  it("keeps a stable identity across calls", () => {
+    expect(resolveDockLandingFallbackPanelIds(WORKSPACE_PANEL_ID)).toBe(
+      resolveDockLandingFallbackPanelIds(WORKSPACE_PANEL_ID),
+    );
+  });
+
+  it("brings Chat forward on a game project's unvisited thread once Workspace was closed", () => {
+    const activated: string[] = [];
+    const open = new Set([CHAT_PANEL_ID, "files"]);
+    const api = {
+      getPanel: (id: string) =>
+        open.has(id)
+          ? ({ id, api: { setActive: () => activated.push(id) } } as unknown as IDockviewPanel)
+          : undefined,
+    } as unknown as DockviewApi;
+    const fallbackPanelId = resolveDockLandingFallbackPanelIds(resolveDockLandingPanelId("unity"));
+
+    restoreActivePanelForThread(api, {
+      byActivationKey: {},
+      activationKey: "env:t",
+      fallbackPanelId,
+    });
+    restoreActivePanelForThread(api, {
+      byActivationKey: { "env:t": WORKSPACE_PANEL_ID },
+      activationKey: "env:t",
+      fallbackPanelId,
+    });
+
+    expect(activated).toEqual([CHAT_PANEL_ID, CHAT_PANEL_ID]);
   });
 });

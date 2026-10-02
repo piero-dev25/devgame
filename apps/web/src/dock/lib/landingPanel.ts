@@ -17,6 +17,20 @@ export function resolveDockLandingPanelId(engineState: "unknown" | "none" | Engi
   return engineState === "unknown" || engineState === "none" ? CHAT_PANEL_ID : WORKSPACE_PANEL_ID;
 }
 
+const CHAT_FALLBACK: ReadonlyArray<string> = [CHAT_PANEL_ID];
+const LANDING_THEN_CHAT_FALLBACK: ReadonlyArray<string> = [WORKSPACE_PANEL_ID, CHAT_PANEL_ID];
+
+/**
+ * The ordered fallback `DockviewLayout` brings forward on a thread switch
+ * with no remembered selection: the landing panel, then Chat. Workspace is
+ * closeable, so a game project whose Workspace tab was closed still gets
+ * Chat (never closeable) instead of keeping the previous thread's tab in
+ * front. Module-level arrays, so the identity is stable across renders.
+ */
+export function resolveDockLandingFallbackPanelIds(landingPanelId: string): ReadonlyArray<string> {
+  return landingPanelId === WORKSPACE_PANEL_ID ? LANDING_THEN_CHAT_FALLBACK : CHAT_FALLBACK;
+}
+
 /**
  * Whether to bring the landing panel forward after the thread was already
  * shown. `DockviewLayout` applies `activateOnChangeId` only when the

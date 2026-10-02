@@ -179,7 +179,8 @@ export interface DockviewLayoutProps {
    * (`lib/restoreActivePanel.ts`) for the actual precedence logic.
    */
   activationKey?: string | number;
-  activateOnChangeId?: string;
+  /** One panel id, or an ordered list where the first open panel wins. */
+  activateOnChangeId?: string | ReadonlyArray<string>;
   // `| undefined` spelled out explicitly — this fork's tsconfig.base.json
   // sets `exactOptionalPropertyTypes: true` (the source repo's does not),
   // and ChatDock.tsx passes this straight through from its own optional

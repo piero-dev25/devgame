@@ -82,7 +82,11 @@ import {
   type PanelRegistry,
   type PresetRegistry,
 } from "./lib/index";
-import { resolveDockLandingPanelId, shouldApplyLateLanding } from "./lib/landingPanel";
+import {
+  resolveDockLandingFallbackPanelIds,
+  resolveDockLandingPanelId,
+  shouldApplyLateLanding,
+} from "./lib/landingPanel";
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
 import { SidebarPanel } from "./SidebarPanel";
 import { useRouteProjectRef } from "./useRouteProjectRef";
@@ -780,7 +784,7 @@ export function ChatDock(props: ChatDockProps) {
         // must bring Chat forward the same way — team-lead's report named
         // both as regressions, not just the server-thread case.
         activationKey={activationKey}
-        activateOnChangeId={landingPanelId}
+        activateOnChangeId={resolveDockLandingFallbackPanelIds(landingPanelId)}
         className={className}
       />
     </ThreadRouteContext.Provider>

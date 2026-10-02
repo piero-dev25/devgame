@@ -74,7 +74,7 @@ export function restoreActivePanelForKey(
   {
     rememberedPanelId,
     fallbackPanelId,
-  }: { rememberedPanelId: string | null; fallbackPanelId?: string },
+  }: { rememberedPanelId: string | null; fallbackPanelId?: string | ReadonlyArray<string> },
 ): void {
   const effectiveRememberedPanelId =
     rememberedPanelId !== null && CHROME_PANEL_IDS.has(rememberedPanelId)
@@ -87,9 +87,21 @@ export function restoreActivePanelForKey(
       return;
     }
   }
-  if (fallbackPanelId !== undefined) {
-    const panel = api.getPanel(fallbackPanelId);
-    if (panel) activatePanelInItsGroup(panel);
+  // An ordered list: the first one still open wins. A game project's landing
+  // panel (Workspace) can be closed, so `ChatDock` passes Chat after it and a
+  // thread switch never leaves the previous thread's tab in front.
+  const fallbackPanelIds =
+    fallbackPanelId === undefined
+      ? []
+      : typeof fallbackPanelId === "string"
+        ? [fallbackPanelId]
+        : fallbackPanelId;
+  for (const id of fallbackPanelIds) {
+    const panel = api.getPanel(id);
+    if (panel) {
+      activatePanelInItsGroup(panel);
+      return;
+    }
   }
 }
 
@@ -132,7 +144,7 @@ export function restoreActivePanelForThread(
   }: {
     byActivationKey: Record<string, string>;
     activationKey: string | number | undefined;
-    fallbackPanelId?: string;
+    fallbackPanelId?: string | ReadonlyArray<string>;
   },
 ): void {
   if (activationKey === undefined) return;
