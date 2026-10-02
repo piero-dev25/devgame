@@ -119,15 +119,82 @@ describe("postRuntimeStart / postRuntimeStop", () => {
     expect(describeRuntimeCommand("stop", outcome)).toMatch(/^Not permitted:/);
   });
 
-  it("rejects a body that does not match the contract", async () => {
+  it("reports a body that does not match the contract as a server answer, not unreachable", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ run: { runId: "x" } })));
-    await expect(
-      postRuntimeStart({
-        prepared: primaryPreparedConnection(),
-        projectId: PROJECT_ID,
-        profileId: "vfx-arena",
-        threadId: null,
-      }),
-    ).rejects.toMatchObject({ _tag: "SchemaError" });
+    const outcome = await postRuntimeStart({
+      prepared: primaryPreparedConnection(),
+      projectId: PROJECT_ID,
+      profileId: "vfx-arena",
+      threadId: null,
+    });
+    expect(outcome).toEqual({
+      _tag: "failed",
+      message: "It answered with a response this app could not read.",
+    });
+    expect(describeRuntimeCommand("start", outcome)).toMatch(
+      /^The environment answered but did not launch the run:/,
+    );
+  });
+
+  it("reports a rejected credential as the server's auth answer", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json(
+          {
+            _tag: "EnvironmentAuthInvalidError",
+            code: "auth_invalid",
+            reason: "invalid_credential",
+            traceId: "trace-rejected",
+          },
+          { status: 401 },
+        ),
+      ),
+    );
+    const outcome = await postRuntimeStart({
+      prepared: primaryPreparedConnection(),
+      projectId: PROJECT_ID,
+      profileId: "vfx-arena",
+      threadId: null,
+    });
+    expect(outcome).toEqual({
+      _tag: "failed",
+      message: "The environment rejected this client's credentials (invalid_credential).",
+    });
+    expect(describeRuntimeCommand("start", outcome)).not.toMatch(/Could not reach/);
+  });
+
+  it("reports a text error status other than 403 with its status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response("Bad Request: malformed project runtime request", { status: 400 }),
+        ),
+    );
+    const outcome = await postRuntimeStop({
+      prepared: primaryPreparedConnection(),
+      projectId: PROJECT_ID,
+      runId: "run-1",
+    });
+    expect(outcome).toEqual({ _tag: "failed", message: "It answered with status 400." });
+    expect(describeRuntimeCommand("stop", outcome)).toBe(
+      "The environment answered but did not stop the run: It answered with status 400.",
+    );
+  });
+
+  it("reports unreachable only when no answer came back", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("Failed to fetch")));
+    const outcome = await postRuntimeStart({
+      prepared: primaryPreparedConnection(),
+      projectId: PROJECT_ID,
+      profileId: "vfx-arena",
+      threadId: null,
+    });
+    expect(outcome._tag).toBe("unreachable");
+    expect(describeRuntimeCommand("start", outcome)).toMatch(
+      /^Could not reach the environment to launch the run:/,
+    );
   });
 });

@@ -14,7 +14,7 @@ import type { ScopedProjectRef } from "@t3tools/contracts";
 import { scopedProjectKey } from "@t3tools/client-runtime/environment";
 import * as Option from "effect/Option";
 import { AlertTriangle, Play, RefreshCw, Square } from "lucide-react";
-import { type ReactNode, useContext, useState } from "react";
+import { type ReactNode, useContext, useLayoutEffect, useRef, useState } from "react";
 
 import { resolveEngineChipState } from "~/components/ChatView.logic";
 import { ThreadRouteContext, type ThreadRouteContextValue } from "~/dock/ChatPanel";
@@ -32,6 +32,7 @@ import {
   type RuntimeCommandOutcome,
 } from "./postRuntimeCommand";
 import {
+  isRuntimeLogPinned,
   resolveRuntimePanelView,
   type RuntimePendingCommand,
   type RuntimeProfileRow,
@@ -112,6 +113,33 @@ function ProfileRow(props: {
   );
 }
 
+/**
+ * The selected run's log. It opens at the newest lines and follows new output
+ * on each poll, unless the reader has scrolled up to read older lines.
+ */
+function RuntimeLog(props: { lines: ReadonlyArray<string> }) {
+  const ref = useRef<HTMLPreElement>(null);
+  // Starts pinned so a log longer than the view opens at its end.
+  const pinned = useRef(true);
+  const text = props.lines.length > 0 ? props.lines.join("\n") : "No output yet.";
+  // After every render (each poll re-renders): while pinned, stay at the end.
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (element !== null && pinned.current) element.scrollTop = element.scrollHeight;
+  });
+  return (
+    <pre
+      ref={ref}
+      onScroll={(event) => {
+        pinned.current = isRuntimeLogPinned(event.currentTarget);
+      }}
+      className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-3xs text-foreground/80"
+    >
+      {text}
+    </pre>
+  );
+}
+
 function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: ScopedProjectRef }) {
   const { route, projectRef } = props;
   const project = useProject(projectRef);
@@ -156,8 +184,9 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
       }
       setNotice(describeRuntimeCommand(command.kind, outcome));
     } catch (error) {
+      // Typed failures already resolve as outcomes; only a defect lands here.
       const message = error instanceof Error ? error.message : String(error);
-      setNotice(describeRuntimeCommand(command.kind, { _tag: "unreachable", message }));
+      setNotice(describeRuntimeCommand(command.kind, { _tag: "unexpected", message }));
     } finally {
       setPending(null);
       // Read the server's state again whatever happened.
@@ -247,9 +276,11 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
             Log · {selected.name}
             {selected.run.logTruncated ? " (latest lines)" : ""}
           </p>
-          <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-all px-3 py-2 font-mono text-3xs text-foreground/80">
-            {selected.run.logLines.length > 0 ? selected.run.logLines.join("\n") : "No output yet."}
-          </pre>
+          {/* Keyed so another profile's log, or a new run, opens at its newest lines. */}
+          <RuntimeLog
+            key={`${selected.profileId}:${selected.run.runId}`}
+            lines={selected.run.logLines}
+          />
         </div>
       ) : null}
     </div>

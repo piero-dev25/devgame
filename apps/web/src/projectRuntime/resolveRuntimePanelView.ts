@@ -20,6 +20,23 @@ import type { EngineType, RunState, RunStatusKind, RunStatusSuccess } from "@t3t
 /** Client-side cap on rendered log lines; the server already bounds the tail to a few KiB. */
 export const RUNTIME_LOG_LINE_CAP = 200;
 
+/** How close (px) to the end the log must be scrolled to keep following new lines. */
+const RUNTIME_LOG_PIN_SLACK_PX = 24;
+
+/**
+ * Whether the log view should follow new output: true while the reader is at
+ * (or within a line of) the newest lines, false once they scroll up to read.
+ */
+export function isRuntimeLogPinned(metrics: {
+  readonly scrollTop: number;
+  readonly scrollHeight: number;
+  readonly clientHeight: number;
+}): boolean {
+  return (
+    metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= RUNTIME_LOG_PIN_SLACK_PX
+  );
+}
+
 export interface RuntimeRunView {
   readonly runId: string;
   readonly status: RunStatusKind;
@@ -86,6 +103,8 @@ const NO_PROFILES_GUIDANCE =
 const NOT_A_GAME_GUIDANCE =
   "No game engine was detected in this project and it has no run profiles. To launch a custom engine build, add devgame.runtime.json at the project root.";
 const REMOVED_PROFILE_REASON = "No longer listed in devgame.runtime.json.";
+const UNREADABLE_MANIFEST_REASON =
+  "devgame.runtime.json could not be read, so this profile's settings are unknown.";
 
 function runLabel(run: RunState): string {
   switch (run.status) {
@@ -152,10 +171,13 @@ function buildRows(input: {
       ? null
       : profile.issues.map((issue) => issue.message).join(" ") || "This profile is not valid.",
   }));
-  // A run of a profile since removed from the manifest still shows, so it can be stopped.
+  // A run whose profile is not listed still shows, so it can be stopped. When the
+  // manifest could not be read, the profile may still be in it: say that, not "removed".
+  const unlistedReason =
+    input.status.profilesError === null ? REMOVED_PROFILE_REASON : UNREADABLE_MANIFEST_REASON;
   for (const profileId of latest.keys()) {
     if (!profiles.some((profile) => profile.profileId === profileId)) {
-      profiles.push({ profileId, name: profileId, unavailableReason: REMOVED_PROFILE_REASON });
+      profiles.push({ profileId, name: profileId, unavailableReason: unlistedReason });
     }
   }
   const idle = input.live && input.pending === null;

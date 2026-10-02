@@ -5,6 +5,7 @@ import type { RunState, RunStatusSuccess } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isRuntimeLogPinned,
   resolveRuntimePanelView,
   RUNTIME_LOG_LINE_CAP,
   type RuntimePanelView,
@@ -171,7 +172,7 @@ describe("resolveRuntimePanelView: launch and stop", () => {
     const old = view.rows.find((row) => row.profileId === "old");
     expect(old?.canStop).toBe(true);
     expect(old?.canLaunch).toBe(false);
-    expect(old?.unavailableReason).not.toBeNull();
+    expect(old?.unavailableReason).toBe("No longer listed in devgame.runtime.json.");
   });
 
   it("states how a run ended: exit code, signal or launch failure", () => {
@@ -196,6 +197,27 @@ describe("resolveRuntimePanelView: launch and stop", () => {
     expect(shown?.logLines).toHaveLength(RUNTIME_LOG_LINE_CAP);
     expect(shown?.logLines.at(-1)).toBe(`line ${lines.length - 1}`);
     expect(shown?.logTruncated).toBe(true);
+  });
+});
+
+describe("isRuntimeLogPinned: the log follows the newest output", () => {
+  it("follows new lines while the reader is at the bottom, including a fresh log", () => {
+    // A log that fits the view is at its end.
+    expect(isRuntimeLogPinned({ scrollTop: 0, scrollHeight: 100, clientHeight: 100 })).toBe(true);
+    expect(isRuntimeLogPinned({ scrollTop: 900, scrollHeight: 1200, clientHeight: 300 })).toBe(
+      true,
+    );
+    // Within a line of the end still counts as the end.
+    expect(isRuntimeLogPinned({ scrollTop: 890, scrollHeight: 1200, clientHeight: 300 })).toBe(
+      true,
+    );
+  });
+
+  it("stops following once the reader scrolls up to older lines", () => {
+    expect(isRuntimeLogPinned({ scrollTop: 0, scrollHeight: 1200, clientHeight: 300 })).toBe(false);
+    expect(isRuntimeLogPinned({ scrollTop: 600, scrollHeight: 1200, clientHeight: 300 })).toBe(
+      false,
+    );
   });
 });
 
@@ -227,6 +249,12 @@ describe("resolveRuntimePanelView: missing manifest", () => {
     expect(view.guidance).toBeNull();
     expect(view.profilesError).toBe("devgame.runtime.json is not valid JSON.");
     expect(view.rows.map((row) => row.profileId)).toEqual(["arena"]);
+    // The profile may still be in the file; it just failed to parse.
+    const row = arena(view);
+    expect(row.unavailableReason).toMatch(/could not be read/);
+    expect(row.unavailableReason).not.toMatch(/No longer listed/);
+    expect(row.canStop).toBe(true);
+    expect(row.canLaunch).toBe(false);
   });
 
   it("is loading before the first read, and offline with nothing known when never read", () => {
