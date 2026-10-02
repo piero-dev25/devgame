@@ -30,11 +30,13 @@ import type * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { PersistenceSqlError } from "../persistence/Errors.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as RunEvidence from "./RunEvidence.ts";
 import * as RunProfiles from "./RunProfiles.ts";
 import { dispatchRunStart, dispatchRunStatus, dispatchRunStop } from "./RunRoute.ts";
 import * as RunService from "./RunService.ts";
@@ -58,6 +60,12 @@ const ServiceLayer = RunService.layer.pipe(
       ),
       Layer.provide(WorkspacePaths.layer),
       Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+    ),
+  ),
+  Layer.provide(
+    RunEvidence.layer.pipe(
+      Layer.provide(GitVcsDriver.layer.pipe(Layer.provide(VcsProcess.layer))),
+      Layer.provide(WorkspacePaths.layer),
     ),
   ),
 );

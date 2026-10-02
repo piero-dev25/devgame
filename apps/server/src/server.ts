@@ -121,6 +121,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
+import * as RunEvidence from "./projectRuntime/RunEvidence.ts";
 import * as RunProfiles from "./projectRuntime/RunProfiles.ts";
 import {
   runStartRouteLayer,
@@ -664,8 +665,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // RunService is a stateful singleton: one registry for every route, and its
   // scope (this runtime's) stops every run it launched at shutdown. It sits
   // above ProviderRuntimeLayerLive so the orchestration projection (for its
-  // thread check) is in reach.
-  Layer.provideMerge(RunService.layer),
+  // thread check) is in reach. RunEvidence records the runs it finishes.
+  Layer.provideMerge(
+    RunService.layer.pipe(Layer.provide(RunEvidence.layer.pipe(Layer.provide(GitVcsDriver.layer)))),
+  ),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
