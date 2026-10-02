@@ -32,6 +32,9 @@ import {
   ORCHESTRATION_WS_METHODS,
   type PreviewEvent,
   ProjectId,
+  PROJECT_RUNTIME_START_PATH,
+  PROJECT_RUNTIME_STATUS_PATH,
+  PROJECT_RUNTIME_STOP_PATH,
   PROJECT_WORKSPACE_READ_PATH,
   type ProviderAuthState,
   ProviderDriverKind,
@@ -166,6 +169,7 @@ import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
+import * as RunService from "./projectRuntime/RunService.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -555,6 +559,7 @@ const buildAppUnderTest = (options?: {
       ProviderSessionDirectory.ProviderSessionDirectory["Service"]
     >;
     terminalManager?: Partial<TerminalManager.TerminalManager["Service"]>;
+    runService?: Partial<RunService.RunService["Service"]>;
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     threadDeletionReactor?: Partial<ThreadDeletionReactor["Service"]>;
     analyticsService?: Partial<AnalyticsService.AnalyticsService["Service"]>;
@@ -970,6 +975,7 @@ const buildAppUnderTest = (options?: {
           Layer.mock(TerminalManager.TerminalManager)({
             ...options?.layers?.terminalManager,
           }),
+          Layer.mock(RunService.RunService)({ ...options?.layers?.runService }),
           WorktreeSetupTracker.layer,
           ProjectCloneTracker.layer.pipe(
             Layer.provide(
@@ -5275,6 +5281,88 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         const accessOnlyCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
         const forbiddenResponse = yield* readWorkspace(accessOnlyCookie, { projectId: projectA });
         assert.equal(forbiddenResponse.status, 403);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "mounts the project runtime routes: start and stop behind terminal:operate, status behind orchestration:read",
+    () =>
+      Effect.gen(function* () {
+        const projectA = ProjectId.make("project-runtime-a");
+        const statusRoots: Array<string> = [];
+        let startCalls = 0;
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getProjectShellById: (projectId) =>
+                Effect.succeed(
+                  projectId === projectA
+                    ? Option.some({
+                        id: projectId,
+                        title: projectId,
+                        workspaceRoot: "/canonical/project-runtime-a",
+                        defaultModelSelection: null,
+                        scripts: [],
+                        createdAt: "2026-10-03T00:00:00.000Z",
+                        updatedAt: "2026-10-03T00:00:00.000Z",
+                      })
+                    : Option.none(),
+                ),
+            },
+            runService: {
+              status: ({ workspaceRoot }) =>
+                Effect.sync(() => {
+                  statusRoots.push(workspaceRoot);
+                  return { profiles: [], profilesError: null, runs: [] };
+                }),
+              start: () =>
+                Effect.sync(() => {
+                  startCalls += 1;
+                }).pipe(Effect.andThen(Effect.die("start is not exercised here"))),
+              stop: () => Effect.die("stop is not exercised here"),
+            },
+          },
+        });
+
+        const post = Effect.fnUntraced(function* (path: string, cookie: string, body: unknown) {
+          return yield* HttpClient.post(path, {
+            headers: { cookie },
+            body: yield* HttpBody.json(body),
+          });
+        });
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+
+        const status = yield* post(PROJECT_RUNTIME_STATUS_PATH, ownerCookie, {
+          projectId: projectA,
+        });
+        assert.equal(status.status, 200);
+        assert.deepEqual(yield* status.json, { profiles: [], profilesError: null, runs: [] });
+        assert.deepEqual(statusRoots, ["/canonical/project-runtime-a"]);
+        const malformed = yield* post(PROJECT_RUNTIME_START_PATH, ownerCookie, {
+          projectId: projectA,
+        });
+        assert.equal(malformed.status, 400);
+
+        const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: ownerCookie },
+          body: yield* HttpBody.json({ scopes: ["orchestration:read"] }),
+        });
+        assert.equal(pairingResponse.status, 200);
+        const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
+        const readOnlyCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
+        const start = yield* post(PROJECT_RUNTIME_START_PATH, readOnlyCookie, {
+          projectId: projectA,
+          profileId: "game",
+        });
+        const stop = yield* post(PROJECT_RUNTIME_STOP_PATH, readOnlyCookie, {
+          projectId: projectA,
+          runId: "run-1",
+        });
+        const readOnlyStatus = yield* post(PROJECT_RUNTIME_STATUS_PATH, readOnlyCookie, {
+          projectId: projectA,
+        });
+        assert.deepEqual([start.status, stop.status, readOnlyStatus.status], [403, 403, 200]);
+        assert.equal(startCalls, 0);
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

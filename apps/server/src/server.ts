@@ -122,6 +122,11 @@ import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
 import * as RunProfiles from "./projectRuntime/RunProfiles.ts";
+import {
+  runStartRouteLayer,
+  runStatusRouteLayer,
+  runStopRouteLayer,
+} from "./projectRuntime/RunRoute.ts";
 import * as RunService from "./projectRuntime/RunService.ts";
 import { projectWorkspaceRouteLayer } from "./projectWorkspace/ProjectWorkspaceRoute.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -781,6 +786,11 @@ export const makeRoutesLayer = Layer.mergeAll(
     generationAssetRouteLayer.pipe(HttpRouter.provideRequest(GenerationServiceLive)),
     // ProjectWorkspace is ambient through WorkspaceLayerLive; no provideRequest needed.
     projectWorkspaceRouteLayer,
+    // RunService is ambient through the runtime chain. Never provideRequest it:
+    // each route would build its own registry and lose the others' runs.
+    runStartRouteLayer,
+    runStopRouteLayer,
+    runStatusRouteLayer,
   ),
   McpHttpServer.layer(GenerationServiceLive).pipe(Layer.provide(McpSessionRegistry.layer)),
   // Last, so no route layer can replace the server's one TracerDisabledWhen.
