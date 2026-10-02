@@ -122,6 +122,7 @@ import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
 import * as RunEvidence from "./projectRuntime/RunEvidence.ts";
+import * as MrMakImport from "./projectImport/MrMakImport.ts";
 import * as RunProfiles from "./projectRuntime/RunProfiles.ts";
 import {
   runStartRouteLayer,
@@ -668,6 +669,10 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // thread check) is in reach. RunEvidence records the runs it finishes.
   Layer.provideMerge(
     RunService.layer.pipe(Layer.provide(RunEvidence.layer.pipe(Layer.provide(GitVcsDriver.layer)))),
+  ),
+  // Read-only Mr. Mak import planning: committed-tree reads and conflict checks only.
+  Layer.provideMerge(
+    MrMakImport.layer.pipe(Layer.provide(GitVcsDriver.layer), Layer.provide(ProcessRunner.layer)),
   ),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
