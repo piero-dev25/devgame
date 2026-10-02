@@ -43,7 +43,7 @@ class ImportStatusFetchError extends Schema.TaggedError<ImportStatusFetchError>(
   }
 }
 
-function createImportStatusAtom(input: {
+export function createImportStatusAtom(input: {
   readonly preparedConnectionAtom: (
     environmentId: EnvironmentId,
   ) => Atom.Atom<Option.Option<PreparedConnection>>;
