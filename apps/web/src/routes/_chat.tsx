@@ -1,4 +1,4 @@
-import { Outlet, createFileRoute, redirect } from "@tanstack/react-router";
+import { Outlet, createFileRoute, redirect, useLocation, useParams } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import {
   useEffect,
@@ -17,6 +17,10 @@ import {
   toggleChatDockSidebarVisibility,
 } from "../dock/chatDockHandle";
 import { useDesktopFullscreenState } from "../hooks/useDesktopFullscreenState";
+import { ThreadRouteView } from "../components/ThreadRouteView";
+import { readDockShortcutPanelContext } from "../dock/dockShortcutContext";
+import { routeUsesAppSidebarLayout } from "../appSidebarRoutes";
+import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
 import { useProjects } from "../state/entities";
@@ -26,12 +30,15 @@ import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { SidebarChromeHeader } from "../components/sidebar/SidebarChrome";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useScratchProject } from "../hooks/useScratchProject";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isMacPlatform } from "../lib/utils";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
-import { resolveShortcutCommand } from "../keybindings";
-import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
+import { isEditableFocused } from "../lib/editableFocus";
+import { isModelPickerOpen } from "../modelPickerVisibility";
+import { undoLatestThreadAction } from "../hooks/showThreadUndoNotice";
+import { isRichTextBoldShortcut, resolveShortcutCommand } from "../keybindings";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
@@ -49,6 +56,7 @@ function ChatRouteGlobalShortcuts() {
   const projectGroupingSettings = useClientSettings(selectProjectGroupingSettings);
   const projects = useProjects();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const { scratchEnvironmentId, startScratchThread } = useScratchProject();
   const projectGroupCount = useMemo(
     () =>
       buildSidebarProjectSnapshots({
@@ -59,33 +67,31 @@ function ChatRouteGlobalShortcuts() {
       }).length,
     [primaryEnvironmentId, projectGroupingSettings, projects],
   );
-  const terminalOpen = useTerminalUiStateStore((state) =>
-    routeThreadRef
-      ? selectThreadTerminalUiState(state.terminalUiStateByThreadKey, routeThreadRef).terminalOpen
-      : false,
-  );
-  // Task #53: used to read `rightPanelStore` ("preview" was one of its
-  // surface kinds); now that Browser is its own dock panel, open/closed
-  // lives inside dockview's own layout state, not synchronously reachable
-  // here. Hard-coded `false`, not reconstructed — grep-verified against
-  // packages/contracts and apps/web/src that no keybinding "when" clause
-  // anywhere in this repo actually references `previewOpen` (only
-  // `previewFocus` is), so this was already dead context data before this
-  // migration. See CommandPalette.tsx's matching fix for the same finding.
-  const previewOpen = false;
   useEffect(() => {
     const onWindowKeyDown = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       const command = resolveShortcutCommand(event, keybindings, {
         context: {
           terminalFocus: isTerminalFocused(),
-          terminalOpen,
+          // Terminal and Browser are dock panels in DevGame, so their "open"
+          // context comes from the dock's stores, not upstream's right panel.
+          ...readDockShortcutPanelContext(routeThreadRef),
           previewFocus: isPreviewFocused(),
-          previewOpen,
+          editableFocus: isEditableFocused(event.target),
+          modelPickerOpen: isModelPickerOpen(),
         },
       });
 
       if (isCommandPaletteOpen()) {
+        return;
+      }
+
+      if (command === "thread.undo") {
+        if (event.repeat || isModelPickerOpen()) return;
+        if (undoLatestThreadAction()) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
         return;
       }
 
@@ -104,6 +110,17 @@ function ChatRouteGlobalShortcuts() {
           defaultProjectRef,
           handleNewThread,
         });
+        return;
+      }
+
+      if (command === "chat.newWithoutProject") {
+        const environmentId = scratchEnvironmentId(
+          activeThread?.environmentId ?? activeDraftThread?.environmentId ?? primaryEnvironmentId,
+        );
+        if (environmentId === null) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void startScratchThread(environmentId);
         return;
       }
 
@@ -181,35 +198,58 @@ function ChatRouteGlobalShortcuts() {
     handleNewThread,
     keybindings,
     defaultProjectRef,
-    previewOpen,
+    primaryEnvironmentId,
     projectGroupCount,
     routeThreadRef,
+    scratchEnvironmentId,
     selectedThreadKeysSize,
+    startScratchThread,
     legacySidebarEnabled,
-    terminalOpen,
   ]);
 
-  // dock-chrome-strip.md, Section C: `sidebar.toggle` (Mod+B,
-  // keybindings.ts:22) was previously handled only inside
-  // `AppSidebarLayout.tsx`'s `SidebarControl`, so it was already dead on
-  // thread routes (no `SidebarControl` renders there). This gives it a
-  // real target here — the SAME dock-side toggle the strip's own button
-  // calls (`toggleChatDockSidebarVisibility`, chatDockHandle.ts) — NOT
-  // `useSidebar().toggleSidebar()`: critique m13 forbids touching
-  // `SidebarProvider`'s own open state from this toggle (its
-  // `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS` consumers key off it; wiring
-  // both would half-wire two different sidebar concepts into one control).
-  // A SEPARATE effect/listener from the one above, in the CAPTURE phase —
-  // mirroring `AppSidebarLayout.tsx`'s `SidebarControl` keydown handler
-  // exactly — so Mod+B reaches this before a focused composer/editor
-  // consumes it for rich-text formatting; the bubble-phase listener above
-  // does not have that guarantee and is not touched here.
+  return null;
+}
+
+/**
+ * Mod+B (`sidebar.toggle`) for routes where the dock owns the layout.
+ *
+ * dock-chrome-strip.md, Section C: `sidebar.toggle` (Mod+B,
+ * keybindings.ts:22) was previously handled only inside
+ * `AppSidebarLayout.tsx`'s `SidebarControl`, so it was already dead on
+ * thread routes (no `SidebarControl` renders there). This gives it a
+ * real target here — the SAME dock-side toggle the strip's own button
+ * calls (`toggleChatDockSidebarVisibility`, chatDockHandle.ts) — NOT
+ * `useSidebar().toggleSidebar()`: critique m13 forbids touching
+ * `SidebarProvider`'s own open state from this toggle (its
+ * `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS` consumers key off it; wiring
+ * both would half-wire two different sidebar concepts into one control).
+ * A SEPARATE effect/listener from the one above, in the CAPTURE phase —
+ * mirroring `AppSidebarLayout.tsx`'s `SidebarControl` keydown handler
+ * exactly — so Mod+B reaches this before a focused composer/editor
+ * consumes it for rich-text formatting; the bubble-phase listener above
+ * (in `ChatRouteGlobalShortcuts`) does not have that guarantee.
+ *
+ * Only mounted where the dock owns the layout: on `/pull-requests`
+ * `AppSidebarLayout`'s own `SidebarControl` owns Mod+B, and a second capture
+ * listener here would swallow it (it marks the event handled first).
+ * Upstream's rich-text exemption applies here too: the rich-text composer
+ * claims Mod+B for bold.
+ */
+function DockSidebarToggleShortcut() {
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   useEffect(() => {
     const onWindowKeyDownCapture = (event: KeyboardEvent) => {
       if (event.defaultPrevented) return;
       if (
         event.target instanceof HTMLElement &&
         event.target.closest("[data-keybinding-capture]")
+      ) {
+        return;
+      }
+      if (
+        isRichTextBoldShortcut(event) &&
+        event.target instanceof HTMLElement &&
+        event.target.closest('[data-composer-rich-text="true"]')
       ) {
         return;
       }
@@ -451,6 +491,27 @@ function ChatRouteLayout() {
     isMacDesktop: isMacosDesktop,
     isFullscreen: isWindowFullscreen,
   });
+  // Both thread routes render here, not in their own leaf components, so the
+  // draft-to-thread promotion keeps one dock (and one ChatView) mounted
+  // across the swap. ThreadRouteView mounts the dock.
+  const threadTarget = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteTarget(params),
+  });
+  const pathname = useLocation({ select: (location) => location.pathname });
+
+  // `/pull-requests` is a `_chat` child with no dock: `__root.tsx` wraps it
+  // in `AppSidebarLayout`, which already provides the SidebarProvider, the
+  // sidebar, its Mod+B toggle and the titlebar inset. Only the chat-wide
+  // shortcuts are added here.
+  if (routeUsesAppSidebarLayout(pathname)) {
+    return (
+      <>
+        <ChatRouteGlobalShortcuts />
+        <Outlet />
+      </>
+    );
+  }
 
   return (
     <SidebarProvider
@@ -460,7 +521,8 @@ function ChatRouteLayout() {
     >
       {isElectron ? <WorkspaceChromeStrip /> : null}
       <ChatRouteGlobalShortcuts />
-      <Outlet />
+      <DockSidebarToggleShortcut />
+      {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
     </SidebarProvider>
   );
 }

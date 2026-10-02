@@ -125,7 +125,10 @@ export const unityRaiseRouteLayer = HttpRouter.add(
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
       Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-        failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+        failEnvironmentAuthInvalid(
+          EnvironmentAuth.serverAuthCredentialReason(error),
+          EnvironmentAuth.serverAuthDpopFailureReason(error),
+        ),
       ),
       Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
         failEnvironmentInternal("internal_error", error),

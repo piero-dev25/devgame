@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { appendElementContextsToPrompt, type ElementContextSelection } from "../lib/elementContext";
-import { deriveDisplayedUserMessageState } from "../lib/terminalContext";
+import type { ElementContextRecord } from "@t3tools/contracts";
+import { upgradeLegacyContextMessage } from "@t3tools/shared/composerContextLegacy";
+import { serializeLegacyContextMessage } from "@t3tools/shared/composerContextLegacySend";
+
 import {
   appendEditorSelectionToPrompt,
   buildEditorSelectionBlock,
+  buildEditorSelectionContextRecord,
   extractTrailingEditorSelection,
+  readEditorSelectionContextRecord,
   EDITOR_SELECTION_ATTACHMENT_MAX_ITEMS,
 } from "./editorSelectionContext";
 import type { EditorPresenceEntry } from "./protocol";
@@ -298,8 +302,14 @@ describe("extractTrailingEditorSelection", () => {
     expect(extracted).toEqual({ promptText: midMessage, entries: [], truncatedCount: 0 });
   });
 
-  it("composes with the existing terminal/element extraction chain in the same order the send path appends them", () => {
-    const elementFixture: ElementContextSelection = {
+  it("strips off before the legacy element/terminal upgrade, in the order old sends appended them", () => {
+    // Messages sent before the records transport: the legacy element block
+    // first, then the editor selection appended outermost.
+    const element: ElementContextRecord = {
+      version: 1,
+      contextId: "element_1" as ElementContextRecord["contextId"],
+      kind: "element",
+      label: "SubmitButton",
       pageUrl: "http://localhost:3000/",
       pageTitle: "Preview",
       tagName: "button",
@@ -309,16 +319,14 @@ describe("extractTrailingEditorSelection", () => {
       source: null,
       styles: "",
     };
-    const editorChip = chip({ label: "PlayerRoot", pinned: true });
+    const withElement = serializeLegacyContextMessage({
+      text: "move that object left",
+      records: [element],
+    });
+    const sent = appendEditorSelectionToPrompt(withElement, [
+      chip({ label: "PlayerRoot", pinned: true }),
+    ]);
 
-    // Mirrors ChatView.tsx's send path: element context first, editor
-    // selection appended outermost (after everything else).
-    const withElement = appendElementContextsToPrompt("move that object left", [elementFixture]);
-    const sent = appendEditorSelectionToPrompt(withElement, [editorChip]);
-
-    // Mirrors MessagesTimeline.tsx's read path: editor selection stripped
-    // first (it's the one unconditional trailing block), then the existing
-    // terminal/element chain runs on what's left.
     const editorSelection = extractTrailingEditorSelection(sent);
     expect(editorSelection.entries).toEqual([
       {
@@ -331,9 +339,61 @@ describe("extractTrailingEditorSelection", () => {
       },
     ]);
 
-    const displayed = deriveDisplayedUserMessageState(editorSelection.promptText);
-    expect(displayed.elementContexts).toHaveLength(1);
-    expect(displayed.elementContexts[0]?.header).toBe("<SubmitButton>");
-    expect(displayed.visibleText).toBe("move that object left");
+    // MessagesTimeline then hands the rest to the upstream legacy upgrade.
+    const upgraded = upgradeLegacyContextMessage(editorSelection.promptText);
+    expect(upgraded.records.map((record) => record.kind)).toContain("element");
+    expect(upgraded.text).toContain("move that object left");
+    expect(upgraded.text).not.toContain("editor_selection");
+  });
+});
+
+describe("buildEditorSelectionContextRecord / readEditorSelectionContextRecord", () => {
+  it("builds no record when nothing is selected or pinned", () => {
+    expect(buildEditorSelectionContextRecord([])).toBeNull();
+  });
+
+  it("round-trips the entries, pinned-first, through the record payload", () => {
+    const record = buildEditorSelectionContextRecord([
+      chip({ id: "live", key: "s:live", label: "Live" }),
+      chip({ id: "pin", key: "s:pin", label: "Pinned", pinned: true }),
+    ]);
+
+    expect(record?.kind).toBe("editor-selection");
+    expect(record?.label).toBe("Pinned +1");
+    expect(readEditorSelectionContextRecord(record!)?.entries.map((entry) => entry.label)).toEqual([
+      "Pinned",
+      "Live",
+    ]);
+  });
+
+  it("carries truncation in the payload instead of dropping objects silently", () => {
+    const many = Array.from({ length: EDITOR_SELECTION_ATTACHMENT_MAX_ITEMS + 3 }, (_, index) =>
+      chip({ id: `obj-${index}`, key: `s:obj-${index}`, label: `Obj${index}` }),
+    );
+
+    const selection = readEditorSelectionContextRecord(buildEditorSelectionContextRecord(many)!);
+
+    expect(selection?.entries).toHaveLength(EDITOR_SELECTION_ATTACHMENT_MAX_ITEMS);
+    expect(selection?.truncatedCount).toBe(3);
+  });
+
+  it("keeps an oversized payload inside the wire bound and counts what it dropped", () => {
+    const huge = Array.from({ length: 30 }, (_, index) =>
+      chip({ id: `obj-${index}`, key: `s:obj-${index}`, detail: "d".repeat(100_000) }),
+    );
+
+    const record = buildEditorSelectionContextRecord(huge)!;
+
+    expect(JSON.stringify(record.payload).length).toBeLessThanOrEqual(64_000);
+    expect(readEditorSelectionContextRecord(record)?.truncatedCount).toBeGreaterThan(0);
+  });
+
+  it("ignores another kind or a payload this build does not recognize", () => {
+    const record = buildEditorSelectionContextRecord([chip()])!;
+
+    expect(readEditorSelectionContextRecord({ ...record, kind: "something-else" })).toBeNull();
+    expect(
+      readEditorSelectionContextRecord({ ...record, payload: { entries: "nope" } }),
+    ).toBeNull();
   });
 });

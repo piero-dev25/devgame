@@ -31,7 +31,7 @@ const GLB_MAGIC = 0x46546c67; // "glTF" read as a little-endian uint32
 const CHUNK_TYPE_JSON = 0x4e4f534a; // "JSON" read as a little-endian uint32
 const CHUNK_TYPE_BIN = 0x004e4942; // "BIN\0" read as a little-endian uint32
 
-export class GlbTextureExtractionError extends Schema.TaggedErrorClass<GlbTextureExtractionError>()(
+export class GlbTextureExtractionError extends Schema.TaggedError<GlbTextureExtractionError>()(
   "GlbTextureExtractionError",
   { detail: Schema.String },
 ) {

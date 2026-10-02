@@ -9,7 +9,9 @@ import type { CSSProperties } from "react";
  * `AppSidebarLayout` consumes this exact function too — no behavior change
  * there, see its own call site.
  */
-export const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "90px";
+// Upstream #11906: the desktop preload writes `--desktop-window-controls-inset`
+// (zoom-corrected traffic-light width); 90px is the fallback outside Electron.
+export const MACOS_TRAFFIC_LIGHTS_LEFT_INSET = "var(--desktop-window-controls-inset, 90px)";
 
 /**
  * `isMacDesktop`: Electron + macOS (`isElectron && isMacPlatform(navigator.platform)`

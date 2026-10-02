@@ -235,7 +235,7 @@ const generationErrorContext = {
   providerInstanceId: ProviderInstanceId,
 };
 
-export class GenerationCapabilityUnavailableError extends Schema.TaggedErrorClass<GenerationCapabilityUnavailableError>()(
+export class GenerationCapabilityUnavailableError extends Schema.TaggedError<GenerationCapabilityUnavailableError>()(
   "GenerationCapabilityUnavailableError",
   { ...generationErrorContext },
 ) {
@@ -244,7 +244,7 @@ export class GenerationCapabilityUnavailableError extends Schema.TaggedErrorClas
   }
 }
 
-export class GenerationJobNotFoundError extends Schema.TaggedErrorClass<GenerationJobNotFoundError>()(
+export class GenerationJobNotFoundError extends Schema.TaggedError<GenerationJobNotFoundError>()(
   "GenerationJobNotFoundError",
   { jobId: GenerationJobId },
 ) {
@@ -253,7 +253,7 @@ export class GenerationJobNotFoundError extends Schema.TaggedErrorClass<Generati
   }
 }
 
-export class GeneratedAssetNotFoundError extends Schema.TaggedErrorClass<GeneratedAssetNotFoundError>()(
+export class GeneratedAssetNotFoundError extends Schema.TaggedError<GeneratedAssetNotFoundError>()(
   "GeneratedAssetNotFoundError",
   {
     jobId: Schema.optional(GenerationJobId),
@@ -265,7 +265,7 @@ export class GeneratedAssetNotFoundError extends Schema.TaggedErrorClass<Generat
   }
 }
 
-export class GenerationProjectResolutionError extends Schema.TaggedErrorClass<GenerationProjectResolutionError>()(
+export class GenerationProjectResolutionError extends Schema.TaggedError<GenerationProjectResolutionError>()(
   "GenerationProjectResolutionError",
   { threadId: ThreadId, detail: Schema.String },
 ) {
@@ -279,7 +279,7 @@ export class GenerationProjectResolutionError extends Schema.TaggedErrorClass<Ge
  * `GenerationProjectResolutionError`'s `getThreadShellById` (different
  * lookup, different key), never reused for a threadId failure and vice
  * versa so a client can always tell which id was the problem. */
-export class UnityWorkspaceResolutionError extends Schema.TaggedErrorClass<UnityWorkspaceResolutionError>()(
+export class UnityWorkspaceResolutionError extends Schema.TaggedError<UnityWorkspaceResolutionError>()(
   "UnityWorkspaceResolutionError",
   { projectId: ProjectId, detail: Schema.String },
 ) {
@@ -295,7 +295,7 @@ export class UnityWorkspaceResolutionError extends Schema.TaggedErrorClass<Unity
  * caller's perspective all three mean the same thing: nothing to import
  * into yet, go make Unity ready. `reason` carries the underlying
  * classification for debugging, never surfaced as a distinct error type. */
-export class UnityEditorNotReadyError extends Schema.TaggedErrorClass<UnityEditorNotReadyError>()(
+export class UnityEditorNotReadyError extends Schema.TaggedError<UnityEditorNotReadyError>()(
   "UnityEditorNotReadyError",
   { projectId: ProjectId, reason: Schema.String },
 ) {
@@ -314,7 +314,7 @@ export class UnityEditorNotReadyError extends Schema.TaggedErrorClass<UnityEdito
  * shape for the whole sequence rather than one class per step, since a
  * caller's useful response ("something in the Unity import failed, here's
  * where and why") is the same regardless of which step it was. */
-export class UnityImportFailedError extends Schema.TaggedErrorClass<UnityImportFailedError>()(
+export class UnityImportFailedError extends Schema.TaggedError<UnityImportFailedError>()(
   "UnityImportFailedError",
   { assetId: GeneratedAssetId, step: Schema.String, detail: Schema.String },
 ) {

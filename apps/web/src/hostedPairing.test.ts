@@ -91,6 +91,21 @@ describe("hostedPairing", () => {
     expect(isHostedStaticApp(new URL("https://preview.t3.codes/"))).toBe(false);
   });
 
+  it("is not a hosted static app when there is no window to read an origin from", () => {
+    vi.stubEnv("VITE_HOSTED_APP_URL", "https://preview.t3.codes");
+    vi.stubEnv("VITE_HTTP_URL", "");
+    vi.stubEnv("VITE_WS_URL", "");
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "");
+    vi.stubGlobal("window", undefined);
+    try {
+      expect(isHostedStaticApp()).toBe(false);
+      // An explicit URL still answers without touching window.
+      expect(isHostedStaticApp(new URL("https://preview.t3.codes/"))).toBe(true);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("detects hosted channel aliases as static apps", () => {
     vi.stubEnv("VITE_HOSTED_APP_URL", "https://app.t3.codes");
     vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "nightly");

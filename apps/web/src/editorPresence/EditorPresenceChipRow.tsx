@@ -24,11 +24,9 @@
 // a permanent widget.
 import { Box, Pin } from "lucide-react";
 
-import {
-  COMPOSER_INLINE_CHIP_CLASS_NAME,
-  COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
-  COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME,
-} from "../components/composerInlineChip";
+// Upstream retired the COMPOSER_INLINE_CHIP_* class constants in favor of the
+// shared ContextChip pill, so presence chips use that pill too.
+import { ContextChip, ContextChipLabel } from "../components/ContextChip";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip";
 import { cn } from "~/lib/utils";
 import type { EditorPresenceConnectionPhase } from "./connection";
@@ -52,22 +50,21 @@ function EditorPresenceChip({ item, onToggle }: EditorPresenceChipProps) {
     <Tooltip>
       <TooltipTrigger
         render={
-          <button
-            type="button"
+          <ContextChip
+            render={<button type="button" />}
             aria-pressed={item.pinned}
             aria-label={item.pinned ? `${item.label} (pinned)` : item.label}
             onClick={() => onToggle(item)}
             className={cn(
-              COMPOSER_INLINE_CHIP_CLASS_NAME,
-              "cursor-pointer pr-1.5",
+              "select-none pr-1.5",
               item.pinned &&
                 "border-blue-500/40 bg-blue-500/10 text-blue-700 hover:bg-blue-500/15 dark:text-blue-300",
             )}
           />
         }
       >
-        <Box className={COMPOSER_INLINE_CHIP_ICON_CLASS_NAME} />
-        <span className={COMPOSER_INLINE_CHIP_LABEL_CLASS_NAME}>{item.label}</span>
+        <Box className="opacity-85" />
+        <ContextChipLabel className="select-none">{item.label}</ContextChipLabel>
         {item.pinned ? (
           <Pin aria-hidden className="size-3 shrink-0 opacity-85" data-testid="pin-indicator" />
         ) : null}

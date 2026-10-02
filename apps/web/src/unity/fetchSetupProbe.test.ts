@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { fetchUnitySetupProbe } from "./fetchSetupProbe";
 
 afterEach(() => {
@@ -42,8 +43,7 @@ describe("fetchUnitySetupProbe", () => {
     vi.stubGlobal("fetch", fetchMock);
     const input = {
       projectId: ProjectId.make("project-unity"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
 
     await fetchUnitySetupProbe(input);
@@ -60,8 +60,7 @@ describe("fetchUnitySetupProbe", () => {
     await expect(
       fetchUnitySetupProbe({
         projectId: ProjectId.make("project-unity"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
     ).rejects.toBeTruthy();
   });
@@ -96,8 +95,7 @@ describe("fetchUnitySetupProbe", () => {
 
     const result = await fetchUnitySetupProbe({
       projectId: ProjectId.make("project-unity"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     });
 
     expect(result.primary).toEqual({ state: "S11" });

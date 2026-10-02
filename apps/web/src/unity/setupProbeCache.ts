@@ -11,7 +11,7 @@
 // serves many projects, and caching by environment alone would let one
 // project's classified answer leak into another project's toolbar.
 import type { EnvironmentId, ProjectId, UnitySetupProbeSuccess } from "@t3tools/contracts";
-import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import { scopedProjectKey } from "@t3tools/client-runtime/environment";
 
 import { fetchUnitySetupProbe } from "./fetchSetupProbe";
@@ -39,8 +39,7 @@ const cache = new Map<string, CacheEntry>();
 export function fetchUnitySetupProbeCached(input: {
   readonly environmentId: EnvironmentId;
   readonly projectId: ProjectId;
-  readonly httpBaseUrl: string;
-  readonly httpAuthorization: PreparedHttpAuthorization | null;
+  readonly prepared: PreparedConnection;
 }): Promise<UnitySetupProbeSuccess> {
   const key = scopedProjectKey(input);
   const existing = cache.get(key);

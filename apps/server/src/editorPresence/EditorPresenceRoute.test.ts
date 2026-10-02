@@ -34,9 +34,11 @@ import {
   HttpRouter,
   HttpServer,
 } from "effect/unstable/http";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -60,6 +62,7 @@ const makeEnvironmentAuthLayer = () =>
   EnvironmentAuth.layer.pipe(
     Layer.provide(SqlitePersistenceMemory),
     Layer.provide(ServerSecretStore.layer),
+    Layer.provide(ServerEnvironment.identityLayer),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-editor-presence-route-test-" }),
     ),
@@ -68,14 +71,14 @@ const makeEnvironmentAuthLayer = () =>
 const getPublisherWsUrl = () =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address as NetAddress.InetAddress;
     return `ws://127.0.0.1:${address.port}/editor-presence?role=publisher`;
   });
 
 const getSubscriberWsUrl = () =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address as NetAddress.InetAddress;
     return `ws://127.0.0.1:${address.port}/editor-presence?role=subscriber`;
   });
 
@@ -725,33 +728,52 @@ function makePublisherRegistrySpy(): {
   return { registry, registerPublisherCallCount: () => calls };
 }
 
-/** A fake `Socket` whose `runRaw` runs `onOpen`, then — deterministically,
- * no timing games — invokes the message handler with `helloText` exactly
- * once, then completes. Proves the SAME thing a real network race would
- * (does a `hello` processed immediately after `onOpen` settles ever reach
- * the registry) without depending on winning an unwinnable real-network
- * race — see the doc comment on the suite below for why a real-wire
- * version of this specific test does not work in this runtime. Records
- * every close the connection under test writes, so a passing test can be
- * confirmed to still be exercising an actual rejection, not one that
- * silently stopped closing the connection at all. */
+/** A fake `Socket` whose reader has `helloText` already buffered: the
+ * connection's first `pull` after `onOpen` settles returns it,
+ * deterministically, no timing games. The next `pull` fails the way a real
+ * socket does once the peer answers our close: with a `SocketCloseError`
+ * carrying the last code the connection wrote (1000 if it wrote none).
+ * Proves the SAME thing a real network race would (does a `hello` that
+ * arrives while `onOpen` is still settling ever reach the registry) without
+ * depending on winning an unwinnable real-network race — see the doc comment
+ * on the suite below for why a real-wire version of this specific test does
+ * not work in this runtime. Records every close the connection under test
+ * writes, so a passing test can be confirmed to still be exercising an
+ * actual rejection, not one that silently stopped closing the connection at
+ * all. */
 function makeHandlerAfterOnOpenSocket(helloText: string): {
   readonly socket: Socket.Socket;
   readonly writtenCloses: Array<{ readonly code: number; readonly reason: string }>;
 } {
   const writtenCloses: Array<{ readonly code: number; readonly reason: string }> = [];
-  const socket = Socket.make({
-    runRaw: (handler, opts) =>
-      Effect.gen(function* () {
-        if (opts?.onOpen) yield* opts.onOpen;
-        const result = handler(helloText);
-        if (Effect.isEffect(result)) yield* result;
-      }),
-    writer: Effect.succeed((chunk) => {
-      if (Socket.isCloseEvent(chunk)) {
-        writtenCloses.push({ code: chunk.code, reason: chunk.reason ?? "" });
+  let delivered = false;
+  const pull = Effect.suspend(
+    (): Effect.Effect<readonly [string, ...Array<string>], Socket.SocketError> => {
+      if (!delivered) {
+        delivered = true;
+        return Effect.succeed([helloText] as const);
       }
-      return Effect.void;
+      const lastClose = writtenCloses.at(-1);
+      return Effect.fail(
+        new Socket.SocketError({
+          reason: new Socket.SocketCloseError({
+            code: lastClose?.code ?? 1000,
+            closeReason: lastClose?.reason,
+          }),
+        }),
+      );
+    },
+  );
+  const socket = Socket.make({
+    reader: Effect.succeed({ pull, upgrade: Socket.SocketUpgradeError.unsupported }),
+    writer: Effect.succeed({
+      write: (chunk) => {
+        if (Socket.isCloseEvent(chunk)) {
+          writtenCloses.push({ code: chunk.code, reason: chunk.reason ?? "" });
+        }
+        return Effect.void;
+      },
+      writeAll: () => Effect.void,
     }),
   });
   return { socket, writtenCloses };
@@ -768,6 +790,11 @@ function makeHandlerAfterOnOpenSocket(helloText: string): {
  * `catchIf` recovers a rejection into a successful void — so a `hello`
  * processed right after `onOpen` settles could register an unauthenticated
  * or unscoped editor identity, broadcasting it to every subscriber.
+ *
+ * (The investigation below was run against effect beta.103's `runRaw`. Since
+ * rc.115 the connection runs through `./socketReadLoop.ts`, which buffers
+ * any frame that arrives during `onOpen` and handles it only afterwards —
+ * exactly the ordering the fake socket below reproduces.)
  *
  * NOT proven here over a real WebSocket, unlike every other test in this
  * file — that was tried first and abandoned after a real investigation, not
@@ -814,8 +841,9 @@ it.effect(
         registrySpy.registry,
         Effect.succeed(session),
       ).pipe(
-        // The fake socket's `runRaw` always completes normally (never a real
-        // close/error) — nothing to catch, this just runs to completion.
+        // The fake socket ends by echoing the connection's own 4401 close,
+        // which the read loop treats as a normal end — this just runs to
+        // completion.
         Effect.scoped,
       );
 

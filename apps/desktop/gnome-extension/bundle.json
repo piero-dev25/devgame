@@ -1,0 +1,10 @@
+{
+  "uuid": "snap-shot@devgame.fun",
+  "files": [
+    "metadata.json",
+    "extension.js",
+    "captureService.js",
+    "captureFeedback.js",
+    "feedbackGeometry.js"
+  ]
+}

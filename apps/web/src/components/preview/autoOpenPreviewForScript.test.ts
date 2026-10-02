@@ -1,15 +1,19 @@
-import type {
-  DiscoveredLocalServer,
-  PreviewOpenInput,
-  PreviewSessionSnapshot,
-  ProjectScript,
-  ScopedThreadRef,
-  ThreadId,
+import {
+  DEFAULT_BROWSER_PROFILE_ID,
+  DEFAULT_CLIENT_SETTINGS,
+  FILL_PREVIEW_VIEWPORT,
+  type DiscoveredLocalServer,
+  type PreviewOpenInput,
+  type PreviewSessionSnapshot,
+  type ProjectScript,
+  type ScopedThreadRef,
+  type ThreadId,
 } from "@t3tools/contracts";
 import { AsyncResult } from "effect/unstable/reactivity";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { BROWSER_PANEL_ID, registerChatDockHandle } from "~/dock/chatDockHandle";
+import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { readThreadPreviewState, resetPreviewStateForTests } from "~/previewStateStore";
 
 import { resolveAutoOpenPreviewUrl, triggerAutoOpenPreview } from "./autoOpenPreviewForScript";
@@ -51,6 +55,9 @@ const snapshot = (tabId: string): PreviewSessionSnapshot => ({
 });
 
 beforeEach(() => {
+  // Upstream's openUrlInPreview waits for hydrated client settings and opens
+  // with the configured browser defaults (viewport, profile).
+  __setClientSettingsForTests(DEFAULT_CLIENT_SETTINGS);
   resetPreviewStateForTests();
 });
 afterEach(() => {
@@ -192,6 +199,8 @@ describe("triggerAutoOpenPreview — autoOpenPreview: true, terminal listening",
     expect(openPreview).toHaveBeenCalledWith({
       threadId: THREAD_ID,
       url: "http://localhost:5173",
+      viewport: FILL_PREVIEW_VIEWPORT,
+      profileId: DEFAULT_BROWSER_PROFILE_ID,
     });
     expect(readThreadPreviewState(threadRef).activeTabId).toBe("tab-auto");
     expect(openPanel).toHaveBeenCalledExactlyOnceWith(BROWSER_PANEL_ID);

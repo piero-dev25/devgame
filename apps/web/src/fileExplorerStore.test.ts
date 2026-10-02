@@ -2,7 +2,12 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
-import { selectThreadFileExplorerState, useFileExplorerStore } from "./fileExplorerStore";
+import {
+  fileExplorerAttachmentEntry,
+  selectFileExplorerAttachment,
+  selectThreadFileExplorerState,
+  useFileExplorerStore,
+} from "./fileExplorerStore";
 
 const refA = scopeThreadRef(EnvironmentId.make("environment-1"), ThreadId.make("thread-A"));
 const refB = scopeThreadRef(EnvironmentId.make("environment-1"), ThreadId.make("thread-B"));
@@ -189,6 +194,103 @@ describe("fileExplorerStore — removeThread", () => {
   it("clears a thread's entry entirely", () => {
     useFileExplorerStore.getState().openFile(refA, "a.ts");
     useFileExplorerStore.getState().removeThread(refA);
+
+    expect(useFileExplorerStore.getState().byThreadKey).toEqual({});
+  });
+});
+
+// Ported from upstream rightPanelStore.test.ts: in DevGame, workspace files and
+// chat attachments open in the Files dock panel, so the file-surface cases
+// live here.
+describe("fileExplorerStore — workspace-root and folder links", () => {
+  it("opens a workspace-root link as the explorer view without closing open files", () => {
+    const store = useFileExplorerStore.getState();
+    store.openFile(refA, "README.md");
+    store.openFile(refA, ".");
+    store.openFile(refA, ".");
+
+    const state = selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA);
+    expect(state.activePath).toBeNull();
+    expect(state.openPaths).toEqual(["README.md"]);
+  });
+
+  it.each([
+    ["docs/", "docs"],
+    ["docs///", "docs"],
+    ["/", "/"],
+    ["C:/", "C:/"],
+  ])("reuses the folder entry for %j and %j", (linkPath, treePath) => {
+    useFileExplorerStore.getState().openFile(refA, linkPath);
+    useFileExplorerStore.getState().openFile(refA, treePath);
+
+    const state = selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA);
+    expect(state.openPaths).toEqual([treePath]);
+    expect(state.revealRequestId).toBe(2);
+  });
+
+  it.each([
+    ["generated\\", "generated"],
+    ["notes/meeting ", "notes/meeting"],
+    [" notes/meeting", "notes/meeting"],
+  ])("keeps %j and %j as separate entries", (firstPath, secondPath) => {
+    useFileExplorerStore.getState().openFile(refA, firstPath);
+    useFileExplorerStore.getState().openFile(refA, secondPath);
+
+    expect(
+      selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA).openPaths,
+    ).toEqual([firstPath, secondPath]);
+  });
+});
+
+describe("fileExplorerStore — openAttachment", () => {
+  const attachment = {
+    type: "file" as const,
+    id: "thread-A-attachment-pdf",
+    name: "report.pdf",
+    mimeType: "application/pdf",
+    sizeBytes: 42,
+  };
+
+  it("opens an attachment as an active entry that resolves back to the attachment", () => {
+    useFileExplorerStore.getState().openFile(refA, "src/app.ts");
+    useFileExplorerStore.getState().openAttachment(refA, attachment);
+    useFileExplorerStore.getState().openAttachment(refA, attachment);
+
+    const state = selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA);
+    const entry = fileExplorerAttachmentEntry(attachment.id);
+    expect(state.openPaths).toEqual(["src/app.ts", entry]);
+    expect(state.activePath).toBe(entry);
+    expect(selectFileExplorerAttachment(state, state.activePath)).toEqual(attachment);
+    expect(selectFileExplorerAttachment(state, "src/app.ts")).toBeNull();
+  });
+
+  it("keeps attachment and workspace file entries disjoint", () => {
+    useFileExplorerStore.getState().openFile(refA, "attachment:shared-id");
+    useFileExplorerStore.getState().openAttachment(refA, { ...attachment, id: "shared-id" });
+
+    const state = selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA);
+    expect(state.openPaths).toEqual([
+      "attachment:shared-id",
+      fileExplorerAttachmentEntry("shared-id"),
+    ]);
+    expect(selectFileExplorerAttachment(state, "attachment:shared-id")).toBeNull();
+  });
+
+  it("keeps attachment previews when the workspace becomes unavailable", () => {
+    useFileExplorerStore.getState().openAttachment(refA, attachment);
+    useFileExplorerStore.getState().openFile(refA, "README.md");
+    useFileExplorerStore.getState().reconcileFiles(refA, false);
+
+    const state = selectThreadFileExplorerState(useFileExplorerStore.getState().byThreadKey, refA);
+    const entry = fileExplorerAttachmentEntry(attachment.id);
+    expect(state.openPaths).toEqual([entry]);
+    expect(state.activePath).toBe(entry);
+    expect(selectFileExplorerAttachment(state, entry)).toEqual(attachment);
+  });
+
+  it("forgets a closed attachment and prunes the thread once nothing is open", () => {
+    useFileExplorerStore.getState().openAttachment(refA, attachment);
+    useFileExplorerStore.getState().closeFile(refA, fileExplorerAttachmentEntry(attachment.id));
 
     expect(useFileExplorerStore.getState().byThreadKey).toEqual({});
   });

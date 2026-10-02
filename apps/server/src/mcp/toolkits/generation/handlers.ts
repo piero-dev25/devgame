@@ -37,14 +37,13 @@ import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import { GenerationStandardToolkit } from "./tools.ts";
 
 /**
- * Task #116's fork-owned `McpCapabilityUnavailableError` already covers
- * "generation" (McpInvocationContext.ts's own comment says a future
- * generation toolkit does its own translation, never widens that error's
- * shape). Translate it into the generation toolkit's OWN fork-owned error
- * — mirrors the preview toolkit's `invoke` doing the same translation into
- * the vendor `PreviewAutomationUnavailableError`, except this toolkit's
- * failure type is fork-owned end to end, so there is nothing vendor to
- * translate back into.
+ * A missing "generation" capability surfaces from `requireMcpCapability` as
+ * the contracts `McpCapabilityUnavailableError` (upstream's neutral error for
+ * every non-preview capability; DevGame only widened `McpCapability`).
+ * Translate it into the generation toolkit's own
+ * `GenerationCapabilityUnavailableError`, which is the producer that keeps
+ * that contracts error alive. Mirrors the preview toolkit's `invoke` doing the
+ * same translation into `PreviewAutomationUnavailableError`.
  */
 export const requireGenerationScope = Effect.fn("GenerationToolkit.requireScope")(function* () {
   return yield* McpInvocationContext.requireMcpCapability("generation").pipe(
@@ -161,7 +160,7 @@ const MANIFEST_FILE_NAME = "unity-import-manifest.json";
  * for this file. */
 const MAX_FBX_BYTES = 100 * 1_024 * 1_024;
 
-export class FbxDownloadTooLargeError extends Schema.TaggedErrorClass<FbxDownloadTooLargeError>()(
+export class FbxDownloadTooLargeError extends Schema.TaggedError<FbxDownloadTooLargeError>()(
   "FbxDownloadTooLargeError",
   { byteLength: Schema.Number, maxBytes: Schema.Number },
 ) {

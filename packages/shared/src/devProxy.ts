@@ -47,7 +47,14 @@ export const DEV_PROXIED_PATH_PREFIXES = [
  * presents as "the app cannot reach its own backend", which is nowhere near
  * where anyone would look.
  */
-export const DEV_PROXIED_WEBSOCKET_PREFIXES = ["/ws", "/editor-presence", "/space-events"] as const;
+// `/api` also carries upstream's device-hub stream sockets (upstream's Vite
+// config marks it `ws: true` too); its plain HTTP routes are unaffected.
+export const DEV_PROXIED_WEBSOCKET_PREFIXES = [
+  "/ws",
+  "/api",
+  "/editor-presence",
+  "/space-events",
+] as const;
 
 export function isDevProxiedWebSocketPath(prefix: string): boolean {
   return (DEV_PROXIED_WEBSOCKET_PREFIXES as readonly string[]).includes(prefix);

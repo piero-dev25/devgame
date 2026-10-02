@@ -88,6 +88,44 @@ describe("resolveFilesDockPanelView — server thread, not ready yet", () => {
   });
 });
 
+describe("resolveFilesDockPanelView — attachment tab without a workspace", () => {
+  it("is ready with an empty cwd when an attachment is open and the project is unavailable", () => {
+    const view = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject: null,
+      attachmentOpen: true,
+    });
+    expect(view).toMatchObject({
+      kind: "ready",
+      environmentId: ENVIRONMENT_ID,
+      cwd: "",
+      projectName: "",
+      threadRef: { environmentId: ENVIRONMENT_ID, threadId: THREAD_ID },
+    });
+  });
+
+  it("still returns draft-empty for a draft route with an attachment open", () => {
+    const view = resolveFilesDockPanelView({
+      routeContext: draftRouteContext,
+      activeThread: null,
+      activeProject: null,
+      attachmentOpen: true,
+    });
+    expect(view).toEqual({ kind: "draft-empty" });
+  });
+
+  it("keeps the workspace cwd when the workspace is available", () => {
+    const view = resolveFilesDockPanelView({
+      routeContext: serverRouteContext,
+      activeThread,
+      activeProject,
+      attachmentOpen: true,
+    });
+    expect(view).toMatchObject({ kind: "ready", cwd: "/repo/worktree" });
+  });
+});
+
 describe("resolveFilesDockPanelView — server thread, ready", () => {
   it("prefers the thread's worktreePath as cwd over the project's workspaceRoot", () => {
     const view = resolveFilesDockPanelView({

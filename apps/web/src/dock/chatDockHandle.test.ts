@@ -1,3 +1,5 @@
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { type EnvironmentId, type PreviewAnnotationPayload, ThreadId } from "@t3tools/contracts";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
@@ -5,7 +7,9 @@ import {
   getChatDockSidebarVisible,
   openChatDockPanel,
   registerChatDockHandle,
+  registerChatPreviewAnnotationSender,
   reportChatDockSidebarVisibleChange,
+  sendPreviewAnnotationToChat,
   subscribeChatDockSidebarVisible,
   toggleChatDockPanel,
   toggleChatDockSidebarVisibility,
@@ -160,5 +164,60 @@ describe("chatDockHandle — sidebar visibility mirror", () => {
     expect(getChatDockSidebarVisible()).toBe(false);
     expect(listener).toHaveBeenCalledOnce();
     unsubscribe();
+  });
+});
+
+describe("chatDockHandle — preview annotations from the Browser dock panel", () => {
+  const threadA = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-A"));
+  const threadB = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-B"));
+  const annotation: PreviewAnnotationPayload = {
+    id: "annotation_1",
+    pageUrl: "http://localhost:3000",
+    pageTitle: "Example",
+    comment: "Make the jump feel heavier.",
+    elements: [],
+    regions: [],
+    strokes: [],
+    styleChanges: [],
+    screenshot: null,
+    createdAt: "2026-06-11T00:00:00.000Z",
+  };
+
+  it("delivers to the chat registered for the same thread", () => {
+    const send = vi.fn();
+    const unregister = registerChatPreviewAnnotationSender(threadA, send);
+
+    expect(sendPreviewAnnotationToChat(threadA, annotation, null)).toBe(true);
+    expect(send).toHaveBeenCalledExactlyOnceWith(annotation, null);
+    unregister();
+  });
+
+  it("never sends into another thread's chat", () => {
+    const send = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const unregister = registerChatPreviewAnnotationSender(threadA, send);
+
+    expect(sendPreviewAnnotationToChat(threadB, annotation, null)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    unregister();
+    warn.mockRestore();
+  });
+
+  it("stops delivering once the chat unregisters, without dropping a newer registration", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const first = vi.fn();
+    const second = vi.fn();
+    const unregisterFirst = registerChatPreviewAnnotationSender(threadA, first);
+    const unregisterSecond = registerChatPreviewAnnotationSender(threadA, second);
+
+    // A stale cleanup from the previous chat must not clear the live one.
+    unregisterFirst();
+    expect(sendPreviewAnnotationToChat(threadA, annotation, null)).toBe(true);
+    expect(second).toHaveBeenCalledOnce();
+    expect(first).not.toHaveBeenCalled();
+
+    unregisterSecond();
+    expect(sendPreviewAnnotationToChat(threadA, annotation, null)).toBe(false);
+    warn.mockRestore();
   });
 });

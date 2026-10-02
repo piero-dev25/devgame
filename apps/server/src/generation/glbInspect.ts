@@ -15,7 +15,7 @@ import * as Schema from "effect/Schema";
 const GLB_MAGIC = 0x46546c67; // "glTF" read as a little-endian uint32
 const CHUNK_TYPE_JSON = 0x4e4f534a; // "JSON" read as a little-endian uint32
 
-export class GlbInspectionError extends Schema.TaggedErrorClass<GlbInspectionError>()(
+export class GlbInspectionError extends Schema.TaggedError<GlbInspectionError>()(
   "GlbInspectionError",
   { detail: Schema.String },
 ) {

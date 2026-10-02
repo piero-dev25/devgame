@@ -64,7 +64,7 @@ const PREVIEW_MANIFEST_FILE_NAME = "generation-preview-manifest.json";
  * `downloadAndCachePreview`'s own `Effect.orElseSucceed(() => null)`
  * degrades either one to a 404 anyway, so this type is never inspected by a
  * caller — it exists only to keep the failure channel typed. */
-class PreviewImageTooLargeError extends Schema.TaggedErrorClass<PreviewImageTooLargeError>()(
+class PreviewImageTooLargeError extends Schema.TaggedError<PreviewImageTooLargeError>()(
   "PreviewImageTooLargeError",
   { detail: Schema.String },
 ) {
@@ -86,7 +86,7 @@ class PreviewImageTooLargeError extends Schema.TaggedErrorClass<PreviewImageTooL
  * allowlist already enforces for workspace-file extensions, applied here to
  * the CONTENT-TYPE dimension `downloadAndCachePreview` derives from an
  * external, untrusted response. */
-class PreviewImageContentTypeNotAllowedError extends Schema.TaggedErrorClass<PreviewImageContentTypeNotAllowedError>()(
+class PreviewImageContentTypeNotAllowedError extends Schema.TaggedError<PreviewImageContentTypeNotAllowedError>()(
   "PreviewImageContentTypeNotAllowedError",
   { contentType: Schema.String },
 ) {

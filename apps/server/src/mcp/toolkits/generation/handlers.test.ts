@@ -102,6 +102,16 @@ const unreachableProjectionSnapshotQuery = (
   overrides: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>,
 ): ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"] => ({
   getCommandReadModel: () => Effect.die("unexpected getCommandReadModel call"),
+  getUserInputActivity: () => Effect.die("unexpected getUserInputActivity call"),
+  listActivitiesByKind: () => Effect.die("unexpected listActivitiesByKind call"),
+  listThreadsWithPullRequests: () => Effect.die("unexpected listThreadsWithPullRequests call"),
+  getDeletedWorktreeThreads: () => Effect.die("unexpected getDeletedWorktreeThreads call"),
+  getEventReplayStats: () => Effect.die("unexpected getEventReplayStats call"),
+  getProjectShells: () => Effect.die("unexpected getProjectShells call"),
+  getImportedAgentSessionSources: () =>
+    Effect.die("unexpected getImportedAgentSessionSources call"),
+  getThreadRuntimeContext: () => Effect.die("unexpected getThreadRuntimeContext call"),
+  getTurnStartMessage: () => Effect.die("unexpected getTurnStartMessage call"),
   getSnapshot: () => Effect.die("unexpected getSnapshot call"),
   getShellSnapshot: () => Effect.die("unexpected getShellSnapshot call"),
   getArchivedShellSnapshot: () => Effect.die("unexpected getArchivedShellSnapshot call"),

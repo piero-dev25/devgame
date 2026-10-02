@@ -76,11 +76,17 @@ const VARIANT_CONFIG = {
 
 type RuntimeVersionPolicy = "appVersion" | "fingerprint" | "nativeVersion" | "sdkVersion";
 
-function resolveRuntimeVersionPolicy(value: string | undefined): RuntimeVersionPolicy {
+function resolveRuntimeVersionPolicy(
+  value: string | undefined,
+  appVariant: AppVariant,
+): RuntimeVersionPolicy {
   const policy = optionalSetting(value);
   switch (policy) {
     case undefined:
-      return "fingerprint";
+      // Development manifests resolve on every launch, so avoid fingerprint's
+      // expensive native-project calculation there. Preview and production stay
+      // fingerprinted so OTAs only reach binaries with matching native projects.
+      return appVariant === "development" ? "appVersion" : "fingerprint";
     case "appVersion":
     case "fingerprint":
     case "nativeVersion":
@@ -151,6 +157,9 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
   const appleTeamId = optionalSetting(env.T3CODE_APPLE_TEAM_ID);
   const relyingParty = optionalSetting(env.T3CODE_PASSKEY_RELYING_PARTY);
   const updateUrl = resolveUpdateUrl(env);
+  // An explicit "0" switches OTA off even when an update URL is configured.
+  const updatesEnabled = updateUrl !== undefined && env.T3CODE_MOBILE_UPDATES_ENABLED !== "0";
+  const androidGoogleServicesFile = optionalSetting(env.T3CODE_ANDROID_GOOGLE_SERVICES_FILE);
   const isShowcaseCaptureBuild = env.T3_SHOWCASE_CAPTURE_BUILD === "1";
 
   const widgetsPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
@@ -162,12 +171,66 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
       // Agent activity can update many times an hour; without the
       // frequent-updates entitlement iOS throttles the update budget sooner.
       frequentUpdates: true,
+      enableAndroid: true,
       widgets: [
         {
           name: "AgentActivity",
           displayName: "Agent Activity",
           description: "Shows the current state of active DevGame agents.",
-          supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"],
+          // Live Activity companion; there is no Android presentation for it.
+          android: null,
+          ios: { supportedFamilies: ["systemSmall", "systemMedium", "accessoryRectangular"] },
+        },
+        {
+          name: "SubscriptionUsage",
+          displayName: "Subscription usage",
+          description: "Subscription quotas from your connected DevGame environments.",
+          ios: {
+            configuration: {
+              title: "Subscription usage",
+              description:
+                "Both shows Session and Weekly when available. The Lock Screen shows the tightest selected limit.",
+              parameters: {
+                codexPeriod: {
+                  title: "Codex limits",
+                  type: "enum",
+                  default: "auto",
+                  values: [
+                    { name: "Both", value: "auto" },
+                    { name: "Session", value: "session" },
+                    { name: "Weekly", value: "weekly" },
+                  ],
+                },
+                claudePeriod: {
+                  title: "Claude limits",
+                  type: "enum",
+                  default: "auto",
+                  values: [
+                    { name: "Both", value: "auto" },
+                    { name: "Session", value: "session" },
+                    { name: "Weekly", value: "weekly" },
+                  ],
+                },
+              },
+            },
+            supportedFamilies: [
+              "systemSmall",
+              "systemMedium",
+              "systemLarge",
+              "systemExtraLarge",
+              "accessoryRectangular",
+            ],
+          },
+          android: {
+            minWidth: 250,
+            minHeight: 180,
+            targetCellWidth: 4,
+            targetCellHeight: 3,
+            resizeMode: "both",
+            // Embeds the layout in the APK so the widget renders before the app
+            // has run once; the app replaces it with stored props on publish.
+            initialLayout: "./src/widgets/SubscriptionUsage.android.tsx",
+          },
         },
       ],
     },
@@ -187,12 +250,14 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
           supportsText: true,
           supportsWebUrlWithMaxCount: 1,
           supportsImageWithMaxCount: 8,
+          supportsMovieWithMaxCount: 8,
+          supportsFileWithMaxCount: 8,
         },
       },
       android: {
         enabled: true,
-        singleShareMimeTypes: ["text/plain", "image/*"],
-        multipleShareMimeTypes: ["image/*"],
+        singleShareMimeTypes: ["*/*"],
+        multipleShareMimeTypes: ["*/*"],
       },
     },
   ];
@@ -206,18 +271,18 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
     slug: "devgame",
     platforms: ["ios", "android"],
     scheme: variant.scheme,
-    version: "1.0.2",
+    version: "1.3.1",
     runtimeVersion: {
-      // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
-      // project — native deps, config plugins, AND patches/ — matches the update.
-      // With appVersion, every 0.1.0 build shares a runtime version, so a JS update
-      // could land on a binary missing the native changes it needs and crash.
-      policy: resolveRuntimeVersionPolicy(env.MOBILE_VERSION_POLICY),
+      // Fingerprint (not appVersion) for preview/production so an OTA only reaches
+      // binaries whose native project — native deps, config plugins, AND patches/ —
+      // matches the update. Development defaults to appVersion (see
+      // resolveRuntimeVersionPolicy).
+      policy: resolveRuntimeVersionPolicy(env.MOBILE_VERSION_POLICY, APP_VARIANT),
     },
     orientation: "portrait",
     icon: variant.assets.appIcon,
     userInterfaceStyle: "automatic",
-    updates: updateUrl
+    updates: updatesEnabled
       ? {
           enabled: true,
           url: updateUrl,
@@ -244,12 +309,16 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
             associatedDomains: [`applinks:${relyingParty}`, `webcredentials:${relyingParty}`],
           }
         : {}),
+      entitlements: {
+        "keychain-access-groups": [`$(AppIdentifierPrefix)${iosBundleIdentifier}`],
+      },
       infoPlist: {
         NSAppTransportSecurity: {
           NSAllowsArbitraryLoads: true,
         },
         NSLocalNetworkUsageDescription:
           "Allow DevGame to connect to DevGame servers on your local network or tailnet.",
+        NSPhotoLibraryAddUsageDescription: "Allow DevGame to save images to your photo library.",
         ITSAppUsesNonExemptEncryption: false,
         // The App Store screenshot harness rotates the iPad interface from
         // inside the app (CI denies osascript the Accessibility access that
@@ -271,6 +340,7 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
     android: {
       icon: variant.assets.appIcon,
       package: variant.androidPackage,
+      ...(androidGoogleServicesFile ? { googleServicesFile: androidGoogleServicesFile } : {}),
       adaptiveIcon: {
         backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
         foregroundImage: variant.assets.androidAdaptiveForeground,
@@ -349,6 +419,15 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
           recordAudioAndroid: false,
         },
       ],
+      [
+        "expo-audio",
+        {
+          microphonePermission: "Allow DevGame to use your microphone for voice input.",
+          recordAudioAndroid: false,
+          enableBackgroundPlayback: false,
+          enableBackgroundRecording: false,
+        },
+      ],
       ["expo-image-picker", { photosPermission: false, microphonePermission: false }],
       [
         "expo-splash-screen",
@@ -374,6 +453,13 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
               { name: "RecaptchaInterop", modular_headers: true },
             ],
           },
+          android: {
+            // Keep the supported floor explicit and covered by native notification tests.
+            minSdkVersion: 24,
+            // kotlinx-io uses Kotlin 2.3's return-value checker annotation, while
+            // SDK 58 builds with Kotlin 2.2. It has no runtime behavior.
+            extraProguardRules: "-dontwarn kotlin.MustUseReturnValues",
+          },
         },
       ],
       "./plugins/withIosCocoaPodsUuidCache.cjs",
@@ -383,12 +469,13 @@ export function resolveMobileAppConfig(env: MobileEnv): ExpoConfig {
       // would delete the asset catalog) and its xcodeproj mod creates the widget
       // target (which must exist before the compile phase can be attached).
       ...(!isIosPersonalTeamBuild ? ["./plugins/withWidgetLogoAsset.cjs", widgetsPlugin] : []),
-      "./plugins/withIosSceneLifecycle.cjs",
       "./plugins/withAndroidCleartextTraffic.cjs",
       "./plugins/withAndroidGradleHeap.cjs",
+      "./plugins/withAndroidInputBackground.cjs",
       "./plugins/withAndroidModernPopupMenu.cjs",
       "./plugins/withAndroidModernAlertDialog.cjs",
       "./plugins/withAndroidPredictiveBackCompat.cjs",
+      "./plugins/withAndroidTabletOrientation.cjs",
       ...(isIosPersonalTeamBuild ? ["./plugins/withoutIosPersonalTeamCapabilities.cjs"] : []),
     ],
     extra: {

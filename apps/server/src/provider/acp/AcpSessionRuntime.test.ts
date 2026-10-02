@@ -8,8 +8,9 @@ import {
   handleSessionUpdate,
   type AcpAssistantSegmentState,
   type AcpSessionRuntimeEvent,
+  type AcpToolCallTrackedState,
 } from "./AcpSessionRuntime.ts";
-import type { AcpSessionModeState, AcpToolCallState } from "./AcpRuntimeModel.ts";
+import type { AcpSessionModeState } from "./AcpRuntimeModel.ts";
 
 // Task #67 tool_call_update path: `extractToolCallImageDeltas` (unit-tested
 // and mutation-proven in AcpRuntimeModel.test.ts) is the decision logic;
@@ -19,7 +20,11 @@ import type { AcpSessionModeState, AcpToolCallState } from "./AcpRuntimeModel.ts
 function makeHarness() {
   const queue = Effect.runSync(Queue.unbounded<AcpSessionRuntimeEvent>());
   const modeStateRef = Effect.runSync(Ref.make<AcpSessionModeState | undefined>(undefined));
-  const toolCallsRef = Effect.runSync(Ref.make(new Map<string, AcpToolCallState>()));
+  const configOptionsRef = Effect.runSync(
+    Ref.make<ReadonlyArray<EffectAcpSchema.SessionConfigOption>>([]),
+  );
+  const toolCallsRef = Effect.runSync(Ref.make(new Map<string, AcpToolCallTrackedState>()));
+  const shownToolCallIds = new Set<string>();
   const emittedToolCallImageIdsRef = Effect.runSync(Ref.make(new Set<string>()));
   const assistantSegmentRef = Effect.runSync(
     Ref.make<AcpAssistantSegmentState>({ nextSegmentIndex: 0 }),
@@ -30,7 +35,9 @@ function makeHarness() {
       handleSessionUpdate({
         queue,
         modeStateRef,
+        configOptionsRef,
         toolCallsRef,
+        shownToolCallIds,
         emittedToolCallImageIdsRef,
         assistantSegmentRef,
         assistantItemRuntimeId: "runtime-1",
@@ -78,6 +85,39 @@ describe("AcpSessionRuntime handleSessionUpdate — tool_call_update images", ()
     const imageDeltas = events.filter((event) => event._tag === "ImageDelta");
     expect(imageDeltas).toHaveLength(1);
     expect(imageDeltas[0]).toMatchObject({ data: "iVBORw0KGgo=", mimeType: "image/png" });
+  });
+
+  // The image must open an assistant segment AFTER the tool call, not land in
+  // the prose segment the tool call closes, so the completed ToolCallUpdated is
+  // queued before the ImageDelta it carries.
+  it("queues the completed ToolCallUpdated before its ImageDelta", async () => {
+    const harness = makeHarness();
+
+    await harness.send({
+      sessionUpdate: "tool_call",
+      toolCallId: "tool-screenshot-1",
+      title: "Capture",
+      kind: "fetch",
+      status: "pending",
+    });
+    await harness.drain();
+    await harness.send({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tool-screenshot-1",
+      status: "completed",
+      content: [
+        {
+          type: "content",
+          content: { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+        },
+      ],
+    });
+
+    const tags = (await harness.drain()).map((event) => event._tag);
+    const completedIndex = tags.indexOf("ToolCallUpdated");
+    const imageIndex = tags.indexOf("ImageDelta");
+    expect(completedIndex).toBeGreaterThanOrEqual(0);
+    expect(imageIndex).toBeGreaterThan(completedIndex);
   });
 
   // The hazard team-lead flagged: a provider that (incorrectly) sends a

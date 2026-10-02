@@ -1,16 +1,17 @@
 /**
- * MigrationsLive - Migration runner with inline loader
+ * Migration runner with an inline loader.
  *
  * Uses Migrator.make with fromRecord to define migrations inline.
  * All migrations are statically imported - no dynamic file system loading.
  *
- * Migrations run automatically when the MigrationLayer is provided,
- * ensuring the database schema is always up-to-date before the application starts.
+ * `runMigrations` is called by the SQLite persistence layer at startup, so the
+ * schema is always up to date before the application starts.
  */
 
 import * as Migrator from "effect/unstable/sql/Migrator";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as Effect from "effect/Effect";
-import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 
 // Import all migrations statically
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
@@ -50,15 +51,32 @@ import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
 import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
 import Migration0036 from "./Migrations/036_ProjectionThreadsSpaceAndTaskRef.ts";
 import Migration0037 from "./Migrations/037_ProjectionSpaces.ts";
-import Migration0038 from "./Migrations/038_ProjectionThreadsPinned.ts";
 // The fork's 036/037 claimed ids upstream later reused, so every upstream
-// migration from upstream-036 on is shifted by +2 here. The id in
-// `migrationEntries` is authoritative — a file's numeric prefix is the
-// upstream id it was born with, not the id it runs under. Ids already applied
-// to fork databases can never be renumbered (Migrator only runs id >
-// max(applied)), so new upstream migrations are appended, never inserted.
+// migration from upstream-036 on runs at upstream id + 2 here. Each file's
+// numeric prefix is renamed to the runtime id it runs under (038-040 in the
+// 2026-08-08 merge, 041-056 = upstream 039-054 in the 2026-10-02 merge); the
+// id in `migrationEntries` stays authoritative. Ids already applied to fork
+// databases can never be renumbered (Migrator only runs id > max(applied)),
+// so new upstream migrations are appended, never inserted.
+import Migration0038 from "./Migrations/038_ProjectionThreadsPinned.ts";
 import Migration0039 from "./Migrations/039_ProjectionTurnsKeysetIndex.ts";
 import Migration0040 from "./Migrations/040_ProjectionThreadsPinOrderKey.ts";
+import Migration0041 from "./Migrations/041_ProjectionProjectsDefaultThreadEnvMode.ts";
+import Migration0042 from "./Migrations/042_ProjectionProjectFaviconPath.ts";
+import Migration0043 from "./Migrations/043_AuthSessionClientConnection.ts";
+import Migration0044 from "./Migrations/044_ProjectionThreadLinkedPullRequest.ts";
+import Migration0045 from "./Migrations/045_ProjectionThreadsUnsettledAt.ts";
+import Migration0046 from "./Migrations/046_ClearAutomaticProjectModelDefaults.ts";
+import Migration0047 from "./Migrations/047_ProjectionProjectsAutoPull.ts";
+import Migration0048 from "./Migrations/048_RepairAutomaticSettlementTimestamps.ts";
+import Migration0049 from "./Migrations/049_ProjectionProjectIcon.ts";
+import Migration0050 from "./Migrations/050_ProjectionThreadBranchPullRequest.ts";
+import Migration0051 from "./Migrations/051_ProjectionThreadsActiveOrderKey.ts";
+import Migration0052 from "./Migrations/052_ProjectionThreadPullRequests.ts";
+import Migration0053 from "./Migrations/053_ProjectionThreadMessageContext.ts";
+import Migration0054 from "./Migrations/054_ProjectionThreadTitleState.ts";
+import Migration0055 from "./Migrations/055_PullRequestFilesViewed.ts";
+import Migration0056 from "./Migrations/056_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -70,7 +88,7 @@ import Migration0040 from "./Migrations/040_ProjectionThreadsPinOrderKey.ts";
  * Uses Migrator.fromRecord which parses the key format and
  * returns migrations sorted by ID.
  */
-export const migrationEntries = [
+const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
   [2, "OrchestrationCommandReceipts", Migration0002],
   [3, "CheckpointDiffBlobs", Migration0003],
@@ -106,26 +124,40 @@ export const migrationEntries = [
   [33, "ProjectionThreadsSettled", Migration0033],
   [34, "ProjectionThreadsSnoozed", Migration0034],
   [35, "ProjectionThreadTitleRegeneration", Migration0035],
-  // ID-SPACE RULING (2026-08-08 upstream merge): the fork and upstream both
-  // minted ids 36-38 independently. The fork's ids stay where every
-  // actually-deployed DevGame database already recorded them (36/37 spaces,
-  // and 38 was free here), and upstream's three arrivals take 38/39/40 --
-  // their FILES were renamed to match these runtime ids. KNOWN CROSSOVER
-  // HAZARD, accepted pre-release: a database produced by STOCK T3 Code
-  // v0.0.32+ (its own 36-38 applied) that later meets this manifest would
-  // silently skip the fork's space migrations. That is only reachable by
-  // pointing DevGame at a stock T3 data dir -- the storage-isolation task
-  // (#98) is the real fix and must land before any public release.
+  // ID-SPACE RULING (2026-08-08 upstream merge, extended 2026-10-02): the
+  // fork and upstream both minted ids 36-38 independently. The fork's ids
+  // stay where every actually-deployed DevGame database already recorded them
+  // (36/37 spaces), and every upstream migration from upstream-036 on runs at
+  // upstream id + 2 (upstream 036-038 -> 38-40, upstream 039-054 -> 41-56).
+  // A database migrated by STOCK T3 Code records different names under the
+  // same ids; `runMigrations` refuses such a ledger up front
+  // (MigrationLedgerMismatchError) instead of silently skipping migrations.
   [36, "ProjectionThreadsSpaceAndTaskRef", Migration0036],
   [37, "ProjectionSpaces", Migration0037],
   [38, "ProjectionThreadsPinned", Migration0038],
   [39, "ProjectionTurnsKeysetIndex", Migration0039],
   [40, "ProjectionThreadsPinOrderKey", Migration0040],
+  [41, "ProjectionProjectsDefaultThreadEnvMode", Migration0041],
+  [42, "ProjectionProjectFaviconPath", Migration0042],
+  [43, "AuthSessionClientConnection", Migration0043],
+  [44, "ProjectionThreadLinkedPullRequest", Migration0044],
+  [45, "ProjectionThreadsUnsettledAt", Migration0045],
+  [46, "ClearAutomaticProjectModelDefaults", Migration0046],
+  [47, "ProjectionProjectsAutoPull", Migration0047],
+  [48, "RepairAutomaticSettlementTimestamps", Migration0048],
+  [49, "ProjectionProjectIcon", Migration0049],
+  [50, "ProjectionThreadBranchPullRequest", Migration0050],
+  [51, "ProjectionThreadsActiveOrderKey", Migration0051],
+  [52, "ProjectionThreadPullRequests", Migration0052],
+  [53, "ProjectionThreadMessageContext", Migration0053],
+  [54, "ProjectionThreadTitleState", Migration0054],
+  [55, "PullRequestFilesViewed", Migration0055],
+  [56, "ProjectionThreadsAutoSettleDisabledAt", Migration0056],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
 
-export const makeMigrationLoader = (throughId?: number) =>
+const makeMigrationLoader = (throughId?: number) =>
   Migrator.fromRecord(
     Object.fromEntries(
       migrationEntries
@@ -140,6 +172,76 @@ export const makeMigrationLoader = (throughId?: number) =>
  */
 const run = Migrator.make({});
 
+const MIGRATIONS_TABLE = "effect_sql_migrations";
+
+const MigrationLedgerMismatch = Schema.Struct({
+  id: Schema.Number,
+  recordedName: Schema.String,
+  expectedName: Schema.String,
+});
+type MigrationLedgerMismatch = typeof MigrationLedgerMismatch.Type;
+
+/**
+ * The database's migration ledger records a different migration under an id
+ * this build's manifest uses. Migrator only runs ids above the highest
+ * recorded one, so continuing would silently skip this build's migrations at
+ * those ids — the typical cause is a database last migrated by stock T3 Code,
+ * whose ids 36+ name different migrations than DevGame's (see the ID-SPACE
+ * RULING above). Nothing is migrated or rewritten when this fails.
+ */
+export class MigrationLedgerMismatchError extends Schema.TaggedError<MigrationLedgerMismatchError>()(
+  "MigrationLedgerMismatchError",
+  {
+    mismatches: Schema.Array(MigrationLedgerMismatch),
+  },
+) {
+  override get message(): string {
+    const details = this.mismatches
+      .map(
+        (mismatch) =>
+          `id ${mismatch.id}: database recorded "${mismatch.recordedName}", this build expects "${mismatch.expectedName}"`,
+      )
+      .join("; ");
+    return `Refusing to migrate: the database's migration ledger does not match this build (${details}). It was likely migrated by a stock upstream build; point DevGame at its own data directory.`;
+  }
+}
+
+/** Pure comparison of recorded ledger rows against the manifest. Ids the
+ * manifest does not know are not compared: there is no expected name. */
+export const findMigrationLedgerMismatches = (
+  recorded: ReadonlyArray<{ readonly id: number; readonly name: string }>,
+): ReadonlyArray<MigrationLedgerMismatch> => {
+  const expectedById = new Map<number, string>(migrationManifest);
+  return recorded.flatMap(({ id, name }) => {
+    const expectedName = expectedById.get(id);
+    return expectedName !== undefined && expectedName !== name
+      ? [{ id, recordedName: name, expectedName }]
+      : [];
+  });
+};
+
+/** Read-only check of an existing ledger; a fresh database has no table. */
+const assertMigrationLedgerMatchesManifest = Effect.fn("assertMigrationLedgerMatchesManifest")(
+  function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const ledgerTables = yield* sql<{ readonly name: string }>`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = ${MIGRATIONS_TABLE}
+    `;
+    if (ledgerTables.length === 0) {
+      return;
+    }
+    const recorded = yield* sql<{ readonly migrationId: number; readonly name: string }>`
+      SELECT migration_id AS "migrationId", name FROM effect_sql_migrations ORDER BY migration_id
+    `;
+    const mismatches = findMigrationLedgerMismatches(
+      recorded.map((row) => ({ id: Number(row.migrationId), name: row.name })),
+    );
+    if (mismatches.length > 0) {
+      return yield* new MigrationLedgerMismatchError({ mismatches });
+    }
+  },
+);
+
 export interface RunMigrationsOptions {
   readonly toMigrationInclusive?: number | undefined;
 }
@@ -147,8 +249,11 @@ export interface RunMigrationsOptions {
 /**
  * Run all pending migrations.
  *
- * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
- * then runs any migrations with ID greater than the latest recorded migration.
+ * First verifies that every migration already recorded in the tracking table
+ * (effect_sql_migrations) carries the name this build expects for its id, and
+ * fails with `MigrationLedgerMismatchError` otherwise. Then creates the
+ * tracking table if it doesn't exist and runs any migrations with ID greater
+ * than the latest recorded migration.
  *
  * Returns array of [id, name] tuples for migrations that were run.
  *
@@ -157,6 +262,7 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  yield* assertMigrationLedgerMatchesManifest();
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0
@@ -164,22 +270,3 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
   return executedMigrations;
 });
-
-/**
- * Layer that runs migrations when the layer is built.
- *
- * Use this to ensure migrations run before your application starts.
- * Migrations are run automatically - no separate script is needed.
- *
- * @example
- * ```typescript
- * import { MigrationsLive } from "@acme/db/Migrations"
- * import * as SqliteClient from "@acme/db/SqliteClient"
- *
- * // Migrations run automatically when SqliteClient is provided
- * const AppLayer = MigrationsLive.pipe(
- *   Layer.provideMerge(SqliteClient.layer({ filename: "database.sqlite" }))
- * )
- * ```
- */
-export const MigrationsLive = Layer.effectDiscard(runMigrations());

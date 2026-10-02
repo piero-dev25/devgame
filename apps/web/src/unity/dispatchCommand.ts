@@ -8,29 +8,25 @@
 // `packages/contracts/src/unity.ts`'s own "same overall shape, different
 // contents, kept as its own file" choice.
 //
-// Modeled closely on `editorPresence/dispatchCommand.ts` — same
-// `buildEnvironmentAuthHeaders`/`withEnvironmentCredentials` plumbing, same
-// `runtime.runPromise` boundary — the two differ only in path, input shape,
+// Modeled closely on `editorPresence/dispatchCommand.ts`: both post through
+// `../lib/forkEnvironmentRoute.ts` (upstream's
+// `executeAuthenticatedEnvironmentHttpRequest`) at the same
+// `runtime.runPromise` boundary. The two differ only in path, input shape,
 // and (critically) in what a caller does with the result: Unity's
 // `UnityCommandResult` is a four-tag union (`ok` / `notReady` /
-// `cliUnavailable` / `error`), not a two-tag `{ok:boolean}` — see that
+// `cliUnavailable` / `error`), not a two-tag `{ok:boolean}`. See that
 // type's own doc comment for why collapsing it would be wrong.
 import {
   UNITY_COMMAND_PATH,
   type UnityCommandAction,
   UnityCommandResult,
 } from "@t3tools/contracts";
-import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
-import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
-import { ManagedRelay } from "@t3tools/client-runtime/relay";
-import {
-  buildEnvironmentAuthHeaders,
-  withEnvironmentCredentials,
-} from "@t3tools/client-runtime/state/environmentHttpAuth";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/unstable/http";
 
+import { postForkEnvironmentRoute } from "../lib/forkEnvironmentRoute";
 import { runtime } from "../lib/runtime";
 
 // Pre-composed once at module scope — same convention as
@@ -39,34 +35,24 @@ import { runtime } from "../lib/runtime";
 // straight into the toolbar's state (#101).
 const decodeUnityCommandResult = Schema.decodeUnknownEffect(UnityCommandResult);
 
+/** Bounds the whole authenticated call. The server caps its own `unity
+ * command` run at 35s and then re-reads editor status, so this leaves
+ * headroom over that instead of tracking the happy path. */
+const UNITY_COMMAND_TIMEOUT_MS = 60_000;
+
 function dispatchEffect(input: {
-  readonly httpBaseUrl: string;
-  readonly httpAuthorization: PreparedHttpAuthorization | null;
+  readonly prepared: PreparedConnection;
   readonly workspaceRoot: string;
   readonly action: UnityCommandAction;
 }) {
-  const url = environmentEndpointUrl(input.httpBaseUrl, UNITY_COMMAND_PATH);
   return Effect.gen(function* () {
-    const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
-    const headers = yield* buildEnvironmentAuthHeaders(
-      input.httpAuthorization,
-      "POST",
-      url,
-      signer,
-    );
-    const request = HttpClientRequest.post(url).pipe(
-      HttpClientRequest.setHeaders({ ...headers }),
-      HttpClientRequest.bodyJsonUnsafe({
-        workspaceRoot: input.workspaceRoot,
-        action: input.action,
-      }),
-    );
-    const client = yield* HttpClient.HttpClient;
-    const response = yield* withEnvironmentCredentials(
-      input.httpAuthorization,
-      client.execute(request),
-    );
-    return yield* decodeUnityCommandResult(yield* response.json);
+    const body = yield* postForkEnvironmentRoute({
+      prepared: input.prepared,
+      path: UNITY_COMMAND_PATH,
+      body: { workspaceRoot: input.workspaceRoot, action: input.action },
+      timeoutMs: UNITY_COMMAND_TIMEOUT_MS,
+    });
+    return yield* decodeUnityCommandResult(body);
   }).pipe(Effect.provide(FetchHttpClient.layer));
 }
 
@@ -81,13 +67,14 @@ function dispatchEffect(input: {
  * `UnityPipelineClient` re-reads status before returning), so a caller
  * never needs to separately poll to know the resulting play state.
  *
- * Rejects (a plain thrown value) on a transport-level failure only — no
- * response at all, an unparseable body — as distinct from any of the four
- * well-formed tags the server can send back.
+ * Rejects on a transport-level failure (no response at all, an unparseable
+ * body), on an environment-level refusal (a typed `EnvironmentHttpCommonError`
+ * such as a rejected credential, or an undeclared non-2xx status), or on a
+ * body that does not decode. None of these is one of the four well-formed tags
+ * the server can send back.
  */
 export function dispatchUnityCommand(input: {
-  readonly httpBaseUrl: string;
-  readonly httpAuthorization: PreparedHttpAuthorization | null;
+  readonly prepared: PreparedConnection;
   readonly workspaceRoot: string;
   readonly action: UnityCommandAction;
 }): Promise<UnityCommandResult> {

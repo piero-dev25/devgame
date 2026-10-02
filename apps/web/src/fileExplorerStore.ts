@@ -37,7 +37,7 @@
  * "explorer view" and "which open file is active."
  */
 import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { ChatFileAttachment, ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -61,6 +61,30 @@ export interface FileExplorerThreadState {
    * deliberate "pending is project-scoped" design this store needs to
    * preserve). */
   pendingPaths: string[];
+  /** Chat attachments open as file tabs (upstream's `attachment:` file
+   * surfaces), keyed by their `openPaths` entry (see
+   * `fileExplorerAttachmentEntry`). Optional so state persisted before
+   * attachments existed still reads as-is. An entry present here is an
+   * attachment, not a workspace path. */
+  attachments?: Readonly<Record<string, ChatFileAttachment>>;
+}
+
+/**
+ * The `openPaths` entry for a chat attachment. The NUL prefix cannot occur in
+ * a workspace path, so attachment and workspace entries never collide (a
+ * workspace file literally named `attachment:<id>` stays its own tab).
+ */
+export function fileExplorerAttachmentEntry(attachmentId: string): string {
+  return `\u0000attachment:${attachmentId}`;
+}
+
+/** The attachment behind an `openPaths` entry, or `null` for a workspace path. */
+export function selectFileExplorerAttachment(
+  state: FileExplorerThreadState,
+  entry: string | null,
+): ChatFileAttachment | null {
+  if (entry === null) return null;
+  return state.attachments?.[entry] ?? null;
 }
 
 const EMPTY_THREAD_STATE: FileExplorerThreadState = {
@@ -79,6 +103,9 @@ interface FileExplorerStoreState {
    * same file with a new `line` must still trigger a scroll-to-line,
    * mirroring the old `rightPanelStore.openFile`'s identical behaviour). */
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
+  /** Opens a chat attachment as a file tab (upstream rightPanelStore's
+   * `openAttachment`). Reopening the same attachment just reactivates it. */
+  openAttachment: (ref: ScopedThreadRef, attachment: ChatFileAttachment) => void;
   /** Switches to the explorer view WITHOUT closing any open file tabs —
    * unlike the old `rightPanelStore` model, where the explorer surface was
    * removed the instant a file opened. */
@@ -90,11 +117,33 @@ interface FileExplorerStoreState {
   closeFile: (ref: ScopedThreadRef, relativePath: string) => void;
   setPending: (ref: ScopedThreadRef, relativePath: string, pending: boolean) => void;
   /** Drops every open/pending path when the thread's workspace becomes
-   * unavailable — same trigger and intent as `rightPanelStore`'s old
+   * unavailable (attachments survive: they live in the thread's attachment
+   * store, not the workspace) — same trigger and intent as `rightPanelStore`'s old
    * `reconcileFileSurfaces`, relocated here since "which files are open" is
    * now this store's concern, not the right panel's. */
   reconcileFiles: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
   removeThread: (ref: ScopedThreadRef) => void;
+}
+
+/** Workspace entry paths use '/', including on Windows: a folder link with
+ * trailing slashes reuses the folder's tab, while a bare root ("/", "C:/")
+ * stays as-is. Same rule as upstream rightPanelStore.openFile. */
+function normalizeWorkspaceEntryPath(requestedPath: string): string {
+  if (/^[A-Za-z]:\/+$/.test(requestedPath)) return requestedPath;
+  return requestedPath.replace(/\/+$/, "") || requestedPath;
+}
+
+/** `current` without the attachment behind `entry`; drops the map once empty. */
+function withoutAttachment(
+  current: FileExplorerThreadState,
+  entry: string,
+): FileExplorerThreadState {
+  const attachments = current.attachments;
+  if (!attachments || !(entry in attachments)) return current;
+  const { [entry]: _removed, ...rest } = attachments;
+  if (Object.keys(rest).length > 0) return { ...current, attachments: rest };
+  const { attachments: _dropped, ...withoutMap } = current;
+  return withoutMap;
 }
 
 function normalizeRevealLine(line: number | undefined): number | null {
@@ -114,6 +163,7 @@ const updateThread = (
     next.openPaths.length === 0 &&
     next.activePath === null &&
     next.pendingPaths.length === 0 &&
+    Object.keys(next.attachments ?? {}).length === 0 &&
     next.revealLine === null &&
     next.revealRequestId === 0
   ) {
@@ -128,17 +178,40 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
   persist(
     (set) => ({
       byThreadKey: {},
-      openFile: (ref, relativePath, line) =>
+      openFile: (ref, requestedPath, line) =>
         set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => ({
-            ...current,
-            openPaths: current.openPaths.includes(relativePath)
-              ? current.openPaths
-              : [...current.openPaths, relativePath],
-            activePath: relativePath,
-            revealLine: normalizeRevealLine(line),
-            revealRequestId: current.revealRequestId + 1,
-          })),
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            // A workspace-root link opens the explorer view (upstream opens
+            // its singleton "files" surface for ".").
+            if (requestedPath === ".") {
+              return current.activePath === null ? current : { ...current, activePath: null };
+            }
+            const relativePath = normalizeWorkspaceEntryPath(requestedPath);
+            return {
+              ...current,
+              openPaths: current.openPaths.includes(relativePath)
+                ? current.openPaths
+                : [...current.openPaths, relativePath],
+              activePath: relativePath,
+              revealLine: normalizeRevealLine(line),
+              revealRequestId: current.revealRequestId + 1,
+            };
+          }),
+        })),
+      openAttachment: (ref, attachment) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            const entry = fileExplorerAttachmentEntry(attachment.id);
+            return {
+              ...current,
+              openPaths: current.openPaths.includes(entry)
+                ? current.openPaths
+                : [...current.openPaths, entry],
+              activePath: entry,
+              attachments: { ...current.attachments, [entry]: attachment },
+              revealLine: null,
+            };
+          }),
         })),
       showExplorer: (ref) =>
         set((state) => ({
@@ -153,12 +226,13 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
             if (index < 0) return current;
             const openPaths = current.openPaths.filter((path) => path !== relativePath);
             const pendingPaths = current.pendingPaths.filter((path) => path !== relativePath);
+            const remaining = withoutAttachment(current, relativePath);
             if (current.activePath !== relativePath) {
-              return { ...current, openPaths, pendingPaths };
+              return { ...remaining, openPaths, pendingPaths };
             }
             const fallback = openPaths[Math.min(index, openPaths.length - 1)] ?? null;
             return {
-              ...current,
+              ...remaining,
               openPaths,
               pendingPaths,
               activePath: fallback,
@@ -194,9 +268,29 @@ export const useFileExplorerStore = create<FileExplorerStoreState>()(
         set((state) => {
           if (workspaceAvailable) return state;
           const threadKey = scopedThreadKey(ref);
-          if (!(threadKey in state.byThreadKey)) return state;
-          const { [threadKey]: _removed, ...byThreadKey } = state.byThreadKey;
-          return { byThreadKey };
+          const current = state.byThreadKey[threadKey];
+          if (!current) return state;
+          const attachments = current.attachments ?? {};
+          const openPaths = current.openPaths.filter((entry) => entry in attachments);
+          if (openPaths.length === 0) {
+            const { [threadKey]: _removed, ...byThreadKey } = state.byThreadKey;
+            return { byThreadKey };
+          }
+          if (openPaths.length === current.openPaths.length) return state;
+          const activeStillOpen =
+            current.activePath !== null && openPaths.includes(current.activePath);
+          return {
+            byThreadKey: {
+              ...state.byThreadKey,
+              [threadKey]: {
+                ...current,
+                openPaths,
+                pendingPaths: [],
+                activePath: activeStillOpen ? current.activePath : (openPaths.at(-1) ?? null),
+                revealLine: activeStillOpen ? current.revealLine : null,
+              },
+            },
+          };
         }),
       removeThread: (ref) =>
         set((state) => {

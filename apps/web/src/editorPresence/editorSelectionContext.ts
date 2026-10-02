@@ -10,6 +10,13 @@
 // bullet-plus-indented-fields format — so this reads as the same pattern
 // as the existing `<element_context>` / `<terminal_context>` attachments,
 // not a new one.
+import type {
+  ComposerContextId,
+  ComposerContextRecord,
+  UnknownContextRecord,
+} from "@t3tools/contracts";
+import { sanitizeComposerContextLabel } from "@t3tools/shared/composerContextReferences";
+
 import type { EditorPresenceRenderChip } from "./store";
 
 /**
@@ -77,6 +84,142 @@ export function buildEditorSelectionBlock(chips: ReadonlyArray<EditorPresenceRen
   return ["<editor_selection>", ...lines, "</editor_selection>"].join("\n");
 }
 
+// --------------------------------------------------------------------------
+// Structured transport: an "editor-selection" composer context record
+// --------------------------------------------------------------------------
+//
+// Upstream moved every composer attachment onto structured context records
+// referenced inline from the message text (`t3-context://v1/<kind>/<id>`).
+// The server renders an unknown kind's payload into the provider prompt
+// (shared/composerContextReferences.ts `projectComposerContextForProvider`),
+// so the selection rides as one record instead of a trailing text block.
+// Every send path that goes through `buildMessageContext` carries it. The
+// `<editor_selection>` text format above stays only as the legacy READ path
+// for messages sent before this change, and as the shape this record's
+// payload mirrors (same entries, same truncation contract).
+
+export const EDITOR_SELECTION_CONTEXT_KIND = "editor-selection";
+/** One selection per message, so a fixed producer id is enough. */
+const EDITOR_SELECTION_CONTEXT_ID = "editor-selection_current";
+/** Stays below the 64,000-char JSON bound the contracts schema enforces. */
+const EDITOR_SELECTION_PAYLOAD_MAX_CHARS = 60_000;
+
+interface EditorSelectionContextPayload {
+  readonly version: 1;
+  readonly entries: ReadonlyArray<ExtractedEditorSelectionEntry>;
+  readonly truncatedCount: number;
+}
+
+/** Publisher-supplied strings are unbounded; one entry must never fill the payload. */
+const EDITOR_SELECTION_FIELD_MAX_CHARS = 4_000;
+
+function clampField(value: string): string {
+  return value.length <= EDITOR_SELECTION_FIELD_MAX_CHARS
+    ? value
+    : `${value.slice(0, EDITOR_SELECTION_FIELD_MAX_CHARS - 1)}…`;
+}
+
+function clampNullableField(value: string | null): string | null {
+  return value === null ? null : clampField(value);
+}
+
+function toSelectionEntry(chip: EditorPresenceRenderChip): ExtractedEditorSelectionEntry {
+  return {
+    label: clampField(chip.label),
+    kind: clampField(chip.kind),
+    pinned: chip.pinned,
+    id: clampNullableField(chip.id),
+    path: clampNullableField(chip.path),
+    detail: clampNullableField(chip.detail),
+  };
+}
+
+function editorSelectionRecordLabel(entries: ReadonlyArray<ExtractedEditorSelectionEntry>) {
+  const first = entries[0]!;
+  const rest = entries.length - 1;
+  return rest > 0 ? `${first.label} +${rest}` : first.label;
+}
+
+/**
+ * The selection as a context record, or `null` when nothing is selected or
+ * pinned (same empty-input contract as `buildEditorSelectionBlock`: no record,
+ * never an empty one). Pinned items survive truncation first, and the
+ * truncated count rides in the payload so the agent and the transcript both
+ * see that fewer objects rode along than were selected.
+ */
+export function buildEditorSelectionContextRecord(
+  chips: ReadonlyArray<EditorPresenceRenderChip>,
+): UnknownContextRecord | null {
+  if (chips.length === 0) return null;
+  const prioritized = prioritizeForAttachment(chips).map(toSelectionEntry);
+  const entries = prioritized.slice(0, EDITOR_SELECTION_ATTACHMENT_MAX_ITEMS);
+  // Item details are publisher-supplied strings; keep the payload inside the
+  // schema bound by dropping trailing (live before pinned) entries, counted.
+  while (
+    entries.length > 1 &&
+    JSON.stringify(entries).length > EDITOR_SELECTION_PAYLOAD_MAX_CHARS
+  ) {
+    entries.pop();
+  }
+  const payload: EditorSelectionContextPayload = {
+    version: 1,
+    entries,
+    truncatedCount: prioritized.length - entries.length,
+  };
+  return {
+    version: 1,
+    kind: EDITOR_SELECTION_CONTEXT_KIND,
+    contextId: EDITOR_SELECTION_CONTEXT_ID as ComposerContextId,
+    label: sanitizeComposerContextLabel(
+      editorSelectionRecordLabel(entries),
+      EDITOR_SELECTION_CONTEXT_KIND,
+    ),
+    payload,
+  };
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function readSelectionEntry(value: unknown): ExtractedEditorSelectionEntry | null {
+  if (typeof value !== "object" || value === null) return null;
+  const entry = value as Record<string, unknown>;
+  if (typeof entry.label !== "string" || typeof entry.kind !== "string") return null;
+  if (typeof entry.pinned !== "boolean") return null;
+  const id = entry.id ?? null;
+  const path = entry.path ?? null;
+  const detail = entry.detail ?? null;
+  if (!isNullableString(id) || !isNullableString(path) || !isNullableString(detail)) return null;
+  return { label: entry.label, kind: entry.kind, pinned: entry.pinned, id, path, detail };
+}
+
+/**
+ * Reads a sent message's editor-selection record back for the transcript
+ * chips. Returns `null` for any other kind or a payload this build does not
+ * recognize, so the caller leaves that record to the generic presentation.
+ */
+export function readEditorSelectionContextRecord(
+  record: ComposerContextRecord,
+): ExtractedEditorSelection | null {
+  if (record.kind !== EDITOR_SELECTION_CONTEXT_KIND || !("payload" in record)) return null;
+  const payload = record.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  const { entries, truncatedCount } = payload as Record<string, unknown>;
+  if (!Array.isArray(entries)) return null;
+  const parsed = entries.map(readSelectionEntry);
+  if (parsed.length === 0 || parsed.some((entry) => entry === null)) return null;
+  return {
+    promptText: "",
+    entries: parsed as ExtractedEditorSelectionEntry[],
+    truncatedCount:
+      typeof truncatedCount === "number" && Number.isInteger(truncatedCount) && truncatedCount > 0
+        ? truncatedCount
+        : 0,
+  };
+}
+
+/** Legacy text format writer; production sends the record above instead. */
 export function appendEditorSelectionToPrompt(
   prompt: string,
   chips: ReadonlyArray<EditorPresenceRenderChip>,

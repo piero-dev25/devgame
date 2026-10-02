@@ -30,8 +30,7 @@ const liveEnabled = process.env.DEVGAME_GENERATION_LIVE === "1";
 // The real server provides ServerSecretStore (where TripoProvider reads/seeds
 // the key) + Crypto; wire the same real layers here.
 const InfraLayer = Layer.mergeAll(
-  ServerSecretStore.layer,
-  NodeCrypto.layer,
+  ServerSecretStore.layer.pipe(Layer.provideMerge(NodeCrypto.layer)),
   FetchHttpClient.layer,
 ).pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-generation-live-" })),

@@ -15,7 +15,7 @@ import type { ThreadSyncPhase } from "~/threadSync";
 
 import type { PanelProps } from "./lib/types";
 
-export type ThreadRouteContextValue =
+export type ThreadRouteContextValue = (
   | {
       routeKind: "server";
       environmentId: EnvironmentId;
@@ -27,7 +27,20 @@ export type ThreadRouteContextValue =
       environmentId: EnvironmentId;
       threadId: ThreadId;
       draftId: DraftId;
-    };
+    }
+) & {
+  /**
+   * Upstream's `ThreadRouteView` keys its ChatView per draft, and keeps that
+   * key on the server thread a draft promotes into, so the instance that
+   * carried the draft survives the route swap (a background send's state
+   * stays with its draft, and the timeline never paints an empty frame).
+   * The key lands on the ChatView inside this panel, never on `ChatDock`
+   * itself: keying the dock would remount dockview and reload the layout on
+   * every draft. Absent or `null` leaves ChatView unkeyed, so plain server threads
+   * reuse one instance as ChatView expects.
+   */
+  chatViewKey?: string | null | undefined;
+};
 
 /**
  * How `ChatPanel` below satisfies the spec's design constraint: "`ChatPanel`
@@ -126,6 +139,7 @@ export function ChatPanel(_props: PanelProps) {
     return (
       <div className="flex h-full min-h-0 flex-col">
         <ChatView
+          key={value.chatViewKey ?? undefined}
           environmentId={value.environmentId}
           threadId={value.threadId}
           routeKind="draft"
@@ -143,6 +157,7 @@ export function ChatPanel(_props: PanelProps) {
   return (
     <div className="flex h-full min-h-0 flex-col">
       <ChatView
+        key={value.chatViewKey ?? undefined}
         environmentId={value.environmentId}
         threadId={value.threadId}
         routeKind="server"

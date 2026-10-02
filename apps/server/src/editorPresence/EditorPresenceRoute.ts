@@ -121,6 +121,7 @@ import {
   type EditorPresenceCommandOutcome,
   parseEditorPresenceInboundFrame,
 } from "./protocol.ts";
+import { runSocketTextReadLoop } from "./socketReadLoop.ts";
 
 const EDITOR_PRESENCE_PATH = "/editor-presence";
 
@@ -175,7 +176,7 @@ export const runPublisherConnection = (
   >,
 ) =>
   Effect.gen(function* () {
-    const write = yield* socket.writer;
+    const { write } = yield* socket.writer;
 
     const rejectUpgrade = (code: number, reason: string) =>
       write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
@@ -220,151 +221,140 @@ export const runPublisherConnection = (
       );
     });
 
-    yield* socket
-      .runString(
-        (raw) =>
-          Effect.gen(function* () {
-            // A connection still authenticating, or already rejected, has
-            // nothing to process — the close written from `onOpen` below is
-            // already on its way out.
-            if (connectionToken === null) return;
-            const token = connectionToken;
-            const claimantSessionIdForHello = claimantSessionId ?? undefined;
+    yield* runSocketTextReadLoop(socket, {
+      onMessage: (raw) =>
+        Effect.gen(function* () {
+          // A connection already rejected has nothing to process — the
+          // close written from `onOpen` below is already on its way out.
+          // (`onOpen` always finishes before the first frame is handled, so
+          // "still authenticating" can no longer happen here.)
+          if (connectionToken === null) return;
+          const token = connectionToken;
+          const claimantSessionIdForHello = claimantSessionId ?? undefined;
 
-            const frame = parseEditorPresenceInboundFrame(raw);
-            if (!frame) {
-              // Not parseable as ANY known frame — but it might specifically
-              // be a `hello` that fails validation, which needs to be loud:
-              // a publisher that thinks it said hello has no other way to
-              // learn it was never registered (ping still works, since ping
-              // doesn't require a prior hello, so the connection looks
-              // perfectly healthy while no subscriber ever sees it — a live
-              // critic pass measured exactly this). Any OTHER malformed
-              // frame keeps the previous silent-drop behavior; that's a
-              // deliberate scope line, not an oversight — see protocol.ts's
-              // "KNOWN GAP" notes on item-level drops and `v` mismatches.
-              const helloFailure = describeHelloValidationFailure(raw);
-              if (helloFailure !== null) {
-                yield* rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.malformedHello, helloFailure);
-              }
-              return;
+          const frame = parseEditorPresenceInboundFrame(raw);
+          if (!frame) {
+            // Not parseable as ANY known frame — but it might specifically
+            // be a `hello` that fails validation, which needs to be loud:
+            // a publisher that thinks it said hello has no other way to
+            // learn it was never registered (ping still works, since ping
+            // doesn't require a prior hello, so the connection looks
+            // perfectly healthy while no subscriber ever sees it — a live
+            // critic pass measured exactly this). Any OTHER malformed
+            // frame keeps the previous silent-drop behavior; that's a
+            // deliberate scope line, not an oversight — see protocol.ts's
+            // "KNOWN GAP" notes on item-level drops and `v` mismatches.
+            const helloFailure = describeHelloValidationFailure(raw);
+            if (helloFailure !== null) {
+              yield* rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.malformedHello, helloFailure);
             }
+            return;
+          }
 
-            switch (frame.type) {
-              case "hello": {
-                registeredSessionIds.add(frame.session.id);
-                yield* registry.registerPublisher(
-                  frame.session.id,
-                  token,
-                  {
-                    editor: frame.editor,
-                    workspace: frame.workspace,
-                    capabilities: frame.capabilities,
-                  },
-                  {
-                    close: (code, reason) => rejectUpgrade(code, reason),
-                    send: (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
-                    claimantSessionId: claimantSessionIdForHello,
-                  },
-                );
-                return;
-              }
-              case "selection": {
-                if (registeredSessionIds.size === 0) return;
-                // Selections apply to whichever session this connection
-                // most recently said hello as — the same "last hello wins
-                // for new frames" semantics as before; only CLEANUP now
-                // covers every id, not just the latest.
-                const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
-                yield* registry.updatePublisherSelection(latestSessionId, token, frame.selection);
-                return;
-              }
-              case "ping": {
-                yield* write(buildPongFrame()).pipe(Effect.catch(() => Effect.void));
-                return;
-              }
-              case "commandResult": {
-                // No `registeredSessionIds` gate, unlike `selection` — this
-                // doesn't need a known session id at all. `resolveCommand`
-                // looks the pending command up by `frame.id` and checks it
-                // against `token` (this connection's own identity, already
-                // gated non-null above) directly; a forged or stale id
-                // simply misses and is a silent no-op, same as any other
-                // unrecognised frame.
-                yield* registry.resolveCommand(
-                  frame.id,
-                  token,
-                  frame.ok ? { ok: true } : { ok: false, error: frame.error },
-                );
-                return;
-              }
-              case "playState": {
-                // Same "applies to whichever session this connection most
-                // recently said hello as" semantics as `selection` above —
-                // see spec-unity-play-stop.md's ruling: play state is a
-                // level reported through presence, not correlated to any
-                // one command.
-                if (registeredSessionIds.size === 0) return;
-                const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
-                yield* registry.updatePublisherPlayState(latestSessionId, token, frame.playState);
-                return;
-              }
-            }
-          }),
-        {
-          // The writer is only actually pumped once the read loop is
-          // running (see `runSubscriberConnection`'s comment on the same
-          // point) — a write issued before that sits in an internal queue
-          // that nothing ever drains and hangs indefinitely. So
-          // authentication, and the rejecting close write on failure, both
-          // have to happen from inside `onOpen` rather than before
-          // `runString` is called.
-          onOpen: Effect.gen(function* () {
-            const session = yield* authenticate;
-            // Scope check, not just authentication — see the module doc's
-            // SECURITY NOTE. A publisher is about to be able to cause real
-            // engine side effects, so it needs the operate-level scope, the
-            // same one `RPC_REQUIRED_SCOPES` requires for every other
-            // state-changing orchestration RPC. Rejected with the SAME
-            // close code as a bad token (`invalidCredential`, 4401): the
-            // token authenticated fine, but retrying with it can never
-            // self-heal a missing scope, so a well-behaved client must
-            // treat this as credential-class and stop, not hammer.
-            if (!session.scopes.includes(AuthOrchestrationOperateScope)) {
-              yield* rejectUpgrade(
-                EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
-                `insufficient_scope: publisher requires ${AuthOrchestrationOperateScope}`,
+          switch (frame.type) {
+            case "hello": {
+              registeredSessionIds.add(frame.session.id);
+              yield* registry.registerPublisher(
+                frame.session.id,
+                token,
+                {
+                  editor: frame.editor,
+                  workspace: frame.workspace,
+                  capabilities: frame.capabilities,
+                },
+                {
+                  close: (code, reason) => rejectUpgrade(code, reason),
+                  send: (outbound) => write(outbound).pipe(Effect.catch(() => Effect.void)),
+                  claimantSessionId: claimantSessionIdForHello,
+                },
               );
               return;
             }
-            connectionToken = registry.newConnectionToken();
-            claimantSessionId = session.sessionId;
-          }).pipe(
-            Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-              rejectUpgrade(
-                credentialCloseCode(error),
-                EnvironmentAuth.serverAuthCredentialReason(error),
-              ),
-            ),
-            Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
-              rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
-            ),
+            case "selection": {
+              if (registeredSessionIds.size === 0) return;
+              // Selections apply to whichever session this connection
+              // most recently said hello as — the same "last hello wins
+              // for new frames" semantics as before; only CLEANUP now
+              // covers every id, not just the latest.
+              const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
+              yield* registry.updatePublisherSelection(latestSessionId, token, frame.selection);
+              return;
+            }
+            case "ping": {
+              yield* write(buildPongFrame()).pipe(Effect.catch(() => Effect.void));
+              return;
+            }
+            case "commandResult": {
+              // No `registeredSessionIds` gate, unlike `selection` — this
+              // doesn't need a known session id at all. `resolveCommand`
+              // looks the pending command up by `frame.id` and checks it
+              // against `token` (this connection's own identity, already
+              // gated non-null above) directly; a forged or stale id
+              // simply misses and is a silent no-op, same as any other
+              // unrecognised frame.
+              yield* registry.resolveCommand(
+                frame.id,
+                token,
+                frame.ok ? { ok: true } : { ok: false, error: frame.error },
+              );
+              return;
+            }
+            case "playState": {
+              // Same "applies to whichever session this connection most
+              // recently said hello as" semantics as `selection` above —
+              // see spec-unity-play-stop.md's ruling: play state is a
+              // level reported through presence, not correlated to any
+              // one command.
+              if (registeredSessionIds.size === 0) return;
+              const latestSessionId = Array.from(registeredSessionIds).at(-1)!;
+              yield* registry.updatePublisherPlayState(latestSessionId, token, frame.playState);
+              return;
+            }
+          }
+        }),
+      // A write only reaches the peer once the reader has completed the
+      // upgrade (see `./socketReadLoop.ts`), so authentication, and the
+      // rejecting close write on failure, both happen from inside `onOpen`,
+      // which runs after that and before any inbound frame is handled.
+      onOpen: Effect.gen(function* () {
+        const session = yield* authenticate;
+        // Scope check, not just authentication — see the module doc's
+        // SECURITY NOTE. A publisher is about to be able to cause real
+        // engine side effects, so it needs the operate-level scope, the
+        // same one `RPC_REQUIRED_SCOPES` requires for every other
+        // state-changing orchestration RPC. Rejected with the SAME
+        // close code as a bad token (`invalidCredential`, 4401): the
+        // token authenticated fine, but retrying with it can never
+        // self-heal a missing scope, so a well-behaved client must
+        // treat this as credential-class and stop, not hammer.
+        if (!session.scopes.includes(AuthOrchestrationOperateScope)) {
+          yield* rejectUpgrade(
+            EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+            `insufficient_scope: publisher requires ${AuthOrchestrationOperateScope}`,
+          );
+          return;
+        }
+        connectionToken = registry.newConnectionToken();
+        claimantSessionId = session.sessionId;
+      }).pipe(
+        Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+          rejectUpgrade(
+            credentialCloseCode(error),
+            EnvironmentAuth.serverAuthCredentialReason(error),
           ),
-        },
-      )
-      .pipe(
-        // A close we initiate ourselves (one of the codes above) surfaces as
-        // a FAILURE of the read loop, not a clean completion —
-        // `closeCodeIsError` defaults to treating every close code as an
-        // error. Recognise our own deliberate close and treat it as normal
-        // so a routine rejection doesn't read as a crash; any other close
-        // (peer-initiated, network error) still propagates as-is.
-        Effect.catchFilter(
-          Socket.SocketCloseError.filterClean(isServerInitiatedCloseCode),
-          () => Effect.void,
         ),
-        Effect.ensuring(cleanup),
-      );
+        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
+          rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
+        ),
+      ),
+      // A close we initiate ourselves (one of the codes above) surfaces as
+      // a FAILURE of the read loop, not a clean completion — every close
+      // fails the socket's reader. Recognise our own deliberate close and
+      // treat it as normal so a routine rejection doesn't read as a crash;
+      // any other close (peer-initiated, network error) still propagates
+      // as-is.
+      isServerInitiatedCloseCode,
+    }).pipe(Effect.ensuring(cleanup));
   });
 
 const runSubscriberConnection = (
@@ -376,77 +366,69 @@ const runSubscriberConnection = (
   >,
 ) =>
   Effect.gen(function* () {
-    const write = yield* socket.writer;
+    const { write } = yield* socket.writer;
     const send = (frame: string) => write(frame).pipe(Effect.catch(() => Effect.void));
     const rejectUpgrade = (code: number, reason: string) =>
       write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
 
-    // The writer is only actually pumped once the read loop is running (see
-    // `run*`'s `onOpen` option below) — a write issued before that point
-    // sits in an internal queue that nothing ever drains and hangs
-    // indefinitely. Sending the initial `presence` frame — or the scope
-    // rejection's close, below — from `onOpen` rather than before
-    // `runString` is not a style choice, it is required for either write to
-    // complete at all.
+    // A write only reaches the peer once the reader has completed the
+    // upgrade (see `./socketReadLoop.ts`). Sending the initial `presence`
+    // frame — or the scope rejection's close, below — from `onOpen` rather
+    // than before the read loop starts is not a style choice, it is
+    // required for either write to complete at all.
     //
     // Subscribers don't send anything meaningful themselves; the message
     // handler is a no-op and the read loop only exists to hold the
     // connection open and observe close/error so we can deregister.
-    yield* socket
-      .runString(() => Effect.void, {
-        onOpen: Effect.gen(function* () {
-          // CREDENTIAL check, post-upgrade — see the route's AUTH ORDERING
-          // NOTE. Identical in shape to the publisher's, and for a measured
-          // reason: a browser cannot observe a refused upgrade at all.
-          const session = yield* authenticate;
-          // Scope check — see the route's SECURITY NOTE and the comment at
-          // this function's call site for why this runs here, post-upgrade,
-          // instead of as a pre-upgrade HTTP rejection. Mirrors the
-          // publisher's own scope check exactly: same required-scope
-          // pattern, same reused close code, and the same shape that
-          // guarantees nothing is ever registered before the check passes
-          // — there is no `connectionToken`-like flag to race here because
-          // the check and the registration both happen sequentially inside
-          // this one `onOpen`, never split across a separate pipeline
-          // stage the way the publisher's used to be (see the "rejected
-          // publishers never register" tests for the bug that shape had).
-          if (!session.scopes.includes(AuthOrchestrationReadScope)) {
-            yield* rejectUpgrade(
-              EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
-              `insufficient_scope: subscriber requires ${AuthOrchestrationReadScope}`,
-            );
-            return;
-          }
-          const initialFrame = yield* registry.addSubscriber(send);
-          yield* send(initialFrame);
-        }).pipe(
-          // Same two rejection arms as the publisher's `onOpen`, using the
-          // same shared `credentialCloseCode` mapping (4400 missing / 4401
-          // invalid). A rejected subscriber never reaches `addSubscriber`,
-          // so nothing is registered before the credential check passes.
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            rejectUpgrade(
-              credentialCloseCode(error),
-              EnvironmentAuth.serverAuthCredentialReason(error),
-            ),
-          ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
-            rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
+    yield* runSocketTextReadLoop(socket, {
+      onMessage: () => Effect.void,
+      onOpen: Effect.gen(function* () {
+        // CREDENTIAL check, post-upgrade — see the route's AUTH ORDERING
+        // NOTE. Identical in shape to the publisher's, and for a measured
+        // reason: a browser cannot observe a refused upgrade at all.
+        const session = yield* authenticate;
+        // Scope check — see the route's SECURITY NOTE and the comment at
+        // this function's call site for why this runs here, post-upgrade,
+        // instead of as a pre-upgrade HTTP rejection. Mirrors the
+        // publisher's own scope check exactly: same required-scope
+        // pattern, same reused close code, and the same shape that
+        // guarantees nothing is ever registered before the check passes
+        // — there is no `connectionToken`-like flag to race here because
+        // the check and the registration both happen sequentially inside
+        // this one `onOpen`, never split across a separate pipeline
+        // stage the way the publisher's used to be (see the "rejected
+        // publishers never register" tests for the bug that shape had).
+        if (!session.scopes.includes(AuthOrchestrationReadScope)) {
+          yield* rejectUpgrade(
+            EDITOR_PRESENCE_CLOSE_CODE.invalidCredential,
+            `insufficient_scope: subscriber requires ${AuthOrchestrationReadScope}`,
+          );
+          return;
+        }
+        const initialFrame = yield* registry.addSubscriber(send);
+        yield* send(initialFrame);
+      }).pipe(
+        // Same two rejection arms as the publisher's `onOpen`, using the
+        // same shared `credentialCloseCode` mapping (4400 missing / 4401
+        // invalid). A rejected subscriber never reaches `addSubscriber`,
+        // so nothing is registered before the credential check passes.
+        Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+          rejectUpgrade(
+            credentialCloseCode(error),
+            EnvironmentAuth.serverAuthCredentialReason(error),
           ),
         ),
-      })
-      .pipe(
-        // Same reasoning as the publisher's read loop (see
-        // `runPublisherConnection` above): a close WE initiate (the scope
-        // rejection above) surfaces as a read-loop FAILURE, not a clean
-        // completion, unless recognised here — otherwise a routine
-        // rejection would log like a crash.
-        Effect.catchFilter(
-          Socket.SocketCloseError.filterClean(isServerInitiatedCloseCode),
-          () => Effect.void,
+        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
+          rejectUpgrade(EDITOR_PRESENCE_CLOSE_CODE.internalError, "internal_error"),
         ),
-        Effect.ensuring(registry.removeSubscriber(send)),
-      );
+      ),
+      // Same reasoning as the publisher's read loop (see
+      // `runPublisherConnection` above): a close WE initiate (the scope
+      // rejection above) surfaces as a read-loop FAILURE, not a clean
+      // completion, unless recognised here — otherwise a routine
+      // rejection would log like a crash.
+      isServerInitiatedCloseCode,
+    }).pipe(Effect.ensuring(registry.removeSubscriber(send)));
   });
 
 /**
@@ -615,7 +597,10 @@ export const editorPresenceCommandRouteLayer = HttpRouter.add(
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
       Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-        failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+        failEnvironmentAuthInvalid(
+          EnvironmentAuth.serverAuthCredentialReason(error),
+          EnvironmentAuth.serverAuthDpopFailureReason(error),
+        ),
       ),
       Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
         failEnvironmentInternal("internal_error", error),

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { describeUnityRaiseFailure, postUnityRaise } from "./postUnityRaise";
 
 afterEach(() => {
@@ -14,8 +15,7 @@ describe("postUnityRaise", () => {
 
     await postUnityRaise({
       projectId: ProjectId.make("project-unity"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -30,8 +30,7 @@ describe("postUnityRaise", () => {
     await expect(
       postUnityRaise({
         projectId: ProjectId.make("project-unity"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
     ).rejects.toBeTruthy();
   });

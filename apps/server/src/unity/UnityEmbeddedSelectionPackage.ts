@@ -16,7 +16,7 @@ export const UNITY_SELECTION_PACKAGE_ID = "com.devgame.editor-presence";
  * do not resurrect this as a source-resolution or destination candidate. */
 export const LEGACY_UNITY_SELECTION_PACKAGE_ID = "com.ironmind.editor-presence";
 
-export class UnitySelectionPackageSourceMissingError extends Schema.TaggedErrorClass<UnitySelectionPackageSourceMissingError>()(
+export class UnitySelectionPackageSourceMissingError extends Schema.TaggedError<UnitySelectionPackageSourceMissingError>()(
   "UnitySelectionPackageSourceMissingError",
   { packageId: Schema.Literal(UNITY_SELECTION_PACKAGE_ID) },
 ) {

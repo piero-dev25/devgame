@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   migratePersistedRightPanelState,
+  pullRequestSurface,
+  pullRequestSurfaceId,
   selectActiveRightPanel,
   selectActiveRightPanelSurface,
+  selectSelectedRightPanelSurface,
   selectThreadRightPanelState,
   useRightPanelStore,
 } from "./rightPanelStore";
@@ -14,43 +17,46 @@ const refA = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-A"))
 const refB = scopeThreadRef("env-1" as EnvironmentId, ThreadId.make("thread-B"));
 
 beforeEach(() => {
-  useRightPanelStore.setState({ byThreadKey: {} });
+  useRightPanelStore.setState({ byThreadKey: {}, userActionRevisionByThreadKey: {} });
 });
 
-describe("rightPanelStore", () => {
-  // Every migration fixture below now shows "agents" as the surviving
-  // surface. It used to be a browser tab, then "plan" — as of v11 (task
-  // #53's fourth slice) "preview" became a retired kind (see the "drops a
-  // stale preview surface" test), and as of v12 so did "plan", which
-  // upstream retired on its own side when plans moved inline into the
-  // transcript. "agents" is the only kind left that can play the "prove the
-  // stripped surface's SIBLINGS survive" role at all.
-  it("drops a stale terminal surface during migration (terminal moved to a dock panel, task #53)", () => {
-    // Covers BOTH shapes a persisted "terminal" surface could be — the
-    // legacy singleton (`{id:"terminal",kind:"terminal"}`, no
-    // terminalIds/activeTerminalId) and the split-capable shape v9 already
-    // normalized (`{id:"terminal:term-1",kind:"terminal",terminalIds:[...],
-    // activeTerminalId:...}`) — both are simply STRIPPED as of v10, same as
-    // "diff"/"files"/"file" before it. There is nothing left to normalize;
-    // the equivalent state (which terminal groups are open, split layout)
-    // moved to terminalDockStore.ts, with its own equivalent coverage in
-    // terminalDockStore.test.ts.
+const linkedPullRequest = pullRequestSurface({
+  projectId: "project-a",
+  repository: "acme/game",
+  number: 42,
+});
+const pullRequestsList = { id: "pull-requests", kind: "pull-requests" } as const;
+
+describe("rightPanelStore migration", () => {
+  // Diff, Files, File, Terminal and Browser are dock panels in DevGame (task
+  // #53, #61); plan renders inline in the transcript (upstream #5558). A
+  // persisted entry of any of those kinds is stripped, never coerced, and its
+  // surviving siblings keep their place.
+  it.each([
+    ["terminal (legacy singleton)", { id: "terminal", kind: "terminal" }],
+    [
+      "terminal (split-capable)",
+      {
+        id: "terminal:term-1",
+        kind: "terminal",
+        resourceId: "term-1",
+        terminalIds: ["term-1"],
+        activeTerminalId: "term-1",
+      },
+    ],
+    ["browser tab", { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" }],
+    ["browser placeholder", { id: "browser:new", kind: "preview", resourceId: null }],
+    ["diff", { id: "diff", kind: "diff" }],
+    ["files explorer", { id: "files", kind: "files" }],
+    ["file", { id: "file:src/index.ts", kind: "file", relativePath: "src/index.ts" }],
+    ["plan", { id: "plan", kind: "plan" }],
+  ])("drops a stale %s surface and keeps its siblings", (_label, retired) => {
     expect(
       migratePersistedRightPanelState({
         byThreadKey: {
           "env-1:thread-A": {
-            activeSurfaceId: "terminal",
-            surfaces: [
-              { id: "agents", kind: "agents" },
-              { id: "terminal", kind: "terminal" },
-              {
-                id: "terminal:term-1",
-                kind: "terminal",
-                resourceId: "term-1",
-                terminalIds: ["term-1"],
-                activeTerminalId: "term-1",
-              },
-            ],
+            activeSurfaceId: retired.id,
+            surfaces: [{ id: "agents", kind: "agents" }, retired],
           },
         },
       }),
@@ -65,69 +71,10 @@ describe("rightPanelStore", () => {
     });
   });
 
-  it("drops a stale preview (browser) surface during migration (browser moved to a dock panel, task #53)", () => {
-    // v11's own addition, following the exact template every prior kind
-    // set: strip, don't coerce — `previewStateStore.ts` already carries
-    // the equivalent "which tab is open/active" state independently (see
-    // BrowserDockPanel.tsx's own doc comment for why this migration needs
-    // no coercion logic at all, unlike Terminal's v10 pass).
-    expect(
-      migratePersistedRightPanelState({
-        byThreadKey: {
-          "env-1:thread-A": {
-            activeSurfaceId: "browser:tab-a",
-            surfaces: [
-              { id: "agents", kind: "agents" },
-              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
-              { id: "browser:new", kind: "preview", resourceId: null },
-            ],
-          },
-        },
-      }),
-    ).toEqual({
-      byThreadKey: {
-        "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [{ id: "agents", kind: "agents" }],
-        },
-      },
-    });
-  });
-
-  it("drops a stale diff surface during migration (diff moved to a dock panel)", () => {
-    expect(
-      migratePersistedRightPanelState({
-        byThreadKey: {
-          "env-1:thread-A": {
-            activeSurfaceId: "diff",
-            surfaces: [
-              { id: "agents", kind: "agents" },
-              { id: "diff", kind: "diff" },
-            ],
-          },
-        },
-      }),
-    ).toEqual({
-      byThreadKey: {
-        "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [{ id: "agents", kind: "agents" }],
-        },
-      },
-    });
-  });
-
-  it("closes the panel when the ONLY surface was diff — a persisted isOpen: true must not survive its one surface being stripped", () => {
-    // Review fix (#56): the v8 migration used to carry `isOpen` straight
-    // through from what was persisted, so a thread whose sole surface was
-    // "diff" migrated to {isOpen: true, activeSurfaceId: null, surfaces:
-    // []} — a visibly-open, silently-empty right panel on resume, since
-    // ChatView.tsx's `rightPanelOpen` reads `isOpen` with no surfaces-length
-    // guard. This fixture is deliberately the single-surface case the
-    // earlier "drops a stale diff surface" test (with an agents surface
-    // still present) doesn't exercise.
+  it("prunes a record whose only surface was retired instead of reopening an empty panel", () => {
+    // A persisted isOpen: true must not survive its one surface being
+    // stripped (#56), and an emptied record is pruned rather than kept as a
+    // dead localStorage row per legacy thread.
     expect(
       migratePersistedRightPanelState({
         byThreadKey: {
@@ -136,80 +83,20 @@ describe("rightPanelStore", () => {
             activeSurfaceId: "diff",
             surfaces: [{ id: "diff", kind: "diff" }],
           },
-        },
-      }),
-      // Merge-gate hardening (2026-08-08): a record migration emptied is now
-      // PRUNED, not kept as {isOpen:false, surfaces:[]} — absent and empty
-      // mean the same thing to every reader, and the empty rows leaked in
-      // localStorage forever. The claim under test is unchanged and now
-      // holds even more strongly: no trace of the open-and-empty panel
-      // survives at all.
-    ).toEqual({ byThreadKey: {} });
-  });
-
-  it("drops a stale files (explorer) surface during migration (files moved to a dock panel, task #61)", () => {
-    expect(
-      migratePersistedRightPanelState({
-        byThreadKey: {
-          "env-1:thread-A": {
-            activeSurfaceId: "files",
-            surfaces: [
-              { id: "agents", kind: "agents" },
-              { id: "files", kind: "files" },
-            ],
-          },
-        },
-      }),
-    ).toEqual({
-      byThreadKey: {
-        "env-1:thread-A": {
-          isOpen: false,
-          activeSurfaceId: null,
-          surfaces: [{ id: "agents", kind: "agents" }],
-        },
-      },
-    });
-  });
-
-  it("drops a stale file surface during migration — the old upgrade-with-neutral-reveal-state behaviour is retired, not preserved (task #61)", () => {
-    // This used to be "upgrades saved file surfaces with neutral reveal
-    // state," coercing revealLine/revealRequestId to safe defaults on an
-    // old save. As of v9, "file" is a retired kind (like "files"/"diff"
-    // before it) — there is nothing left to coerce, only to strip. The
-    // equivalent "which file was open" state, for a build new enough to
-    // have used fileExplorerStore.ts in the first place, is that store's
-    // own concern now, not this migration's.
-    expect(
-      migratePersistedRightPanelState({
-        byThreadKey: {
-          "env-1:thread-A": {
+          "env-1:thread-B": {
             isOpen: true,
             activeSurfaceId: "file:src/index.ts",
             surfaces: [{ id: "file:src/index.ts", kind: "file", relativePath: "src/index.ts" }],
           },
         },
       }),
-      // Pruned-not-kept, same as the diff-only test above (2026-08-08).
     ).toEqual({ byThreadKey: {} });
   });
 
-  it("drops persisted plan surfaces and does not reopen an empty panel", () => {
-    // Upstream's own v9 test (plans render inline in the transcript now),
-    // kept for the behaviour it proves rather than the fixture it shipped
-    // with: thread B's surviving sibling was "diff" upstream, which this
-    // fork retired to a dock panel, so it is "agents" here — the only kind
-    // that survives migration in the merged build. The claim under test is
-    // upstream's and unchanged: when migration drops the surface that was
-    // ACTIVE but others survive, the panel stays open and falls back to the
-    // first survivor instead of rendering open-and-empty.
+  it("falls back to the first survivor when the active surface was retired", () => {
     expect(
       migratePersistedRightPanelState({
         byThreadKey: {
-          "env-1:thread-A": {
-            isOpen: true,
-            activeSurfaceId: "plan",
-            surfaces: [{ id: "plan", kind: "plan" }],
-          },
           "env-1:thread-B": {
             isOpen: true,
             activeSurfaceId: "plan",
@@ -222,9 +109,6 @@ describe("rightPanelStore", () => {
       }),
     ).toEqual({
       byThreadKey: {
-        // thread-A (every surface stripped) is pruned outright — see the
-        // diff-only test above (2026-08-08) — while thread-B proves the
-        // open-panel fallback to the first surviving surface.
         "env-1:thread-B": {
           isOpen: true,
           activeSurfaceId: "agents",
@@ -234,26 +118,361 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("keeps upstream's device and pull-request surfaces from a v13 save while stripping its dock-owned ones", () => {
+    const deviceTarget = {
+      hostId: "nucbox",
+      deviceId: "emulator-5580",
+      platform: "android",
+      name: "Pixel",
+    } as const;
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: linkedPullRequest.id,
+            surfaces: [
+              { id: "browser:tab-a", kind: "preview", resourceId: "tab-a" },
+              { id: "device:nucbox:emulator-5580", kind: "device", target: deviceTarget },
+              linkedPullRequest,
+              pullRequestsList,
+              { id: "files", kind: "files" },
+            ],
+            dismissedDeviceSurfaceIds: ["device:macmini:ios-1", 7],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: linkedPullRequest.id,
+          surfaces: [
+            { id: "device:nucbox:emulator-5580", kind: "device", target: deviceTarget },
+            linkedPullRequest,
+            pullRequestsList,
+          ],
+          dismissedDeviceSurfaceIds: ["device:macmini:ios-1"],
+        },
+      },
+    });
+  });
+
+  it("drops malformed entries instead of rejecting the whole rehydrate", () => {
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "agents",
+            surfaces: [
+              null,
+              { id: "device:host:dev", kind: "device", target: { hostId: "host" } },
+              { id: "unknown", kind: "something-new" },
+              { id: "pull-request:x", kind: "pull-request", projectId: "p", number: 0 },
+              { id: "agents", kind: "agents" },
+            ],
+          },
+          "env-1:thread-B": null,
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: "agents",
+          surfaces: [{ id: "agents", kind: "agents" }],
+        },
+      },
+    });
+  });
+
+  it("keeps a record that only remembers dismissed devices", () => {
+    // Pruning it would let an automatic device open bring back a tab the
+    // user closed.
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: false,
+            activeSurfaceId: null,
+            surfaces: [{ id: "diff", kind: "diff" }],
+            dismissedDeviceSurfaceIds: ["device:nucbox:emulator-5580"],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: false,
+          activeSurfaceId: null,
+          surfaces: [],
+          dismissedDeviceSurfaceIds: ["device:nucbox:emulator-5580"],
+        },
+      },
+    });
+  });
+
+  it("upgrades the legacy singleton pull request surface to a reference-keyed tab", () => {
+    const id = pullRequestSurfaceId({
+      projectId: "project-a",
+      repository: "acme/game",
+      number: 4909,
+    });
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:thread-A": {
+            isOpen: true,
+            activeSurfaceId: "pull-request",
+            surfaces: [
+              {
+                id: "pull-request",
+                kind: "pull-request",
+                projectId: "project-a",
+                repository: "acme/game",
+                number: 4909,
+              },
+            ],
+          },
+        },
+      }),
+    ).toEqual({
+      byThreadKey: {
+        "env-1:thread-A": {
+          isOpen: true,
+          activeSurfaceId: id,
+          surfaces: [
+            {
+              id,
+              kind: "pull-request",
+              projectId: "project-a",
+              repository: "acme/game",
+              number: 4909,
+            },
+          ],
+        },
+      },
+    });
+  });
+
+  it("drops the pull-request list's shared panel so a restart opens the page fresh", () => {
+    const id = pullRequestSurfaceId({
+      projectId: "project-a",
+      repository: "acme/game",
+      number: 4909,
+    });
+    const panelState = {
+      isOpen: true,
+      activeSurfaceId: id,
+      surfaces: [
+        {
+          id,
+          kind: "pull-request" as const,
+          projectId: "project-a",
+          repository: "acme/game",
+          number: 4909,
+        },
+      ],
+    };
+    expect(
+      migratePersistedRightPanelState({
+        byThreadKey: {
+          "env-1:pull-requests-panel": panelState,
+          "env-1:thread-A": panelState,
+        },
+      }),
+    ).toEqual({ byThreadKey: { "env-1:thread-A": panelState } });
+  });
+});
+
+describe("rightPanelStore", () => {
+  it("gives each host/device its own tab and preserves renamed tabs", () => {
+    const store = useRightPanelStore.getState();
+    const android = {
+      hostId: "nucbox",
+      deviceId: "emulator-5580",
+      name: "Pixel",
+      platform: "android",
+    } as const;
+    const ios = { hostId: "macmini", deviceId: "ios-1", name: "iPhone", platform: "ios" } as const;
+    store.open(refA, "device");
+    store.openDevice(refA, android);
+    store.open(refA, "device");
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toHaveLength(2);
+    store.openDevice(refA, ios);
+    let state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces.map((surface) => surface.id)).toEqual([
+      "device:nucbox:emulator-5580",
+      "device:macmini:ios-1",
+    ]);
+    store.renameDevice(refA, "device:nucbox:emulator-5580", "Android test");
+    store.openDevice(refA, android);
+    state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces).toHaveLength(2);
+    expect(state.surfaces[0]).toMatchObject({ title: "Android test", target: android });
+    expect(state.activeSurfaceId).toBe("device:nucbox:emulator-5580");
+    store.closeSurface(refA, state.activeSurfaceId!);
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toEqual([expect.objectContaining({ target: ios })]);
+  });
+
+  it("does not collide when two hosts expose the same device id", () => {
+    const store = useRightPanelStore.getState();
+    const device = { deviceId: "emulator-5554", name: "Pixel", platform: "android" } as const;
+    store.openDevice(refA, { ...device, hostId: "a:b" });
+    store.openDevice(refA, { ...device, hostId: "a" });
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toHaveLength(2);
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refB).surfaces,
+    ).toHaveLength(0);
+  });
+
+  it.each(["one", "all", "others", "right"])(
+    "keeps device tabs dismissed across reload after closing %s",
+    (mode) => {
+      const store = useRightPanelStore.getState();
+      const target = {
+        hostId: "nucbox",
+        deviceId: "emulator-5580",
+        name: "Pixel",
+        platform: "android",
+      } as const;
+      store.open(refA, "agents");
+      store.openDevice(refA, target);
+      if (mode === "one") store.closeSurface(refA, "device:nucbox:emulator-5580");
+      if (mode === "all") store.closeAllSurfaces(refA);
+      if (mode === "others") store.closeOtherSurfaces(refA, "agents");
+      if (mode === "right") store.closeSurfacesToRight(refA, "agents");
+      const persisted = JSON.parse(
+        JSON.stringify({ byThreadKey: useRightPanelStore.getState().byThreadKey }),
+      );
+      useRightPanelStore.setState(migratePersistedRightPanelState(persisted));
+      store.openDevice(refA, target, true);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces.some(
+          (surface) => surface.kind === "device",
+        ),
+      ).toBe(false);
+      store.openDevice(refA, target);
+      expect(
+        selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces.some(
+          (surface) => surface.kind === "device",
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each([
+    {
+      choice: "pull request",
+      choose: () =>
+        useRightPanelStore.getState().openPullRequest(refA, { ...linkedPullRequest, number: 41 }),
+    },
+    {
+      choice: "device",
+      choose: () =>
+        useRightPanelStore.getState().openDevice(refA, {
+          hostId: "nucbox",
+          deviceId: "emulator-5580",
+          name: "Pixel",
+          platform: "android",
+        }),
+    },
+    {
+      choice: "same tab",
+      choose: () => useRightPanelStore.getState().activateSurface(refA, "agents"),
+    },
+    { choice: "hide", choose: () => useRightPanelStore.getState().close(refA) },
+    { choice: "toggle", choose: () => useRightPanelStore.getState().toggle(refA, "agents") },
+    { choice: "close all", choose: () => useRightPanelStore.getState().closeAllSurfaces(refA) },
+  ])("keeps a later $choice choice when automatic requests arrive", ({ choose }) => {
+    const store = useRightPanelStore.getState();
+    store.open(refA, "agents");
+    const revision = store.getUserActionRevision(refA);
+    choose();
+    const chosen = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+
+    expect(store.openProactive(refA, linkedPullRequest, revision)).toBe(false);
+    expect(store.openProactive(refA, pullRequestsList, revision)).toBe(false);
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      chosen,
+    );
+  });
+
+  it("allows automatic panels for a later turn after a manual choice", () => {
+    const store = useRightPanelStore.getState();
+    const firstTurnRevision = store.getUserActionRevision(refA);
+    store.open(refA, "agents");
+    expect(store.openProactive(refA, linkedPullRequest, firstTurnRevision)).toBe(false);
+
+    const nextTurnRevision = store.getUserActionRevision(refA);
+    expect(store.openProactive(refA, linkedPullRequest, nextTurnRevision)).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      "pull-request",
+    );
+  });
+
+  it("keeps manual choices scoped to their thread and environment", () => {
+    const otherEnvironment = scopeThreadRef("env-2" as EnvironmentId, refA.threadId);
+    const store = useRightPanelStore.getState();
+    const revision = store.getUserActionRevision(refA);
+    store.open(refB, "agents");
+    store.open(otherEnvironment, "agents");
+
+    expect(store.openProactive(refA, pullRequestsList, revision)).toBe(true);
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refB)).toBe("agents");
+    expect(
+      selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, otherEnvironment),
+    ).toBe("agents");
+  });
+
+  it("does not count an automatic device open as a manual choice", () => {
+    const store = useRightPanelStore.getState();
+    const revision = store.getUserActionRevision(refA);
+    store.openDevice(
+      refA,
+      { hostId: "nucbox", deviceId: "emulator-5580", name: "Pixel", platform: "android" },
+      true,
+    );
+
+    expect(store.getUserActionRevision(refA)).toBe(revision);
+    expect(store.openProactive(refA, linkedPullRequest, revision)).toBe(true);
+  });
+
   it("open sets the active panel for a thread", () => {
     useRightPanelStore.getState().open(refA, "agents");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("agents");
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refB)).toBeNull();
   });
 
-  // "opening a different kind keeps both surfaces and activates the new
-  // one" and "reopening an inactive singleton activates its existing
-  // surface" used to live here, both leaning on a SECOND kind ("preview",
-  // then "diff") to interpose alongside the first — DELETED, not ported, as
-  // of task #53's fourth slice, and the upstream merge only widened the
-  // reason: every kind those tests used is retired (see RIGHT_PANEL_KINDS's
-  // own comment), and "agents" is the ONLY kind left. There is no second
-  // kind this store's public API can produce anymore to exercise "two
-  // different surfaces coexisting" with — `open`/`toggle` only ever resolve
-  // to the one singleton surface `{id:"agents",kind:"agents"}`. This is
-  // exactly the "collapse" signal flagged to the owner, not an oversight:
-  // keeping these tests would mean either deleting real coverage silently
-  // or fabricating an impossible surface via a type cast, and neither is
-  // honest about what this store can do today.
+  it("opening a different kind keeps both surfaces and activates the new one", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().open(refA, "pull-requests");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe(
+      "pull-requests",
+    );
+    expect(
+      selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA).surfaces,
+    ).toHaveLength(2);
+  });
+
+  it("reopening an inactive singleton activates its existing surface", () => {
+    useRightPanelStore.getState().open(refA, "pull-requests");
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().open(refA, "pull-requests");
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "pull-requests",
+      surfaces: [pullRequestsList, { id: "agents", kind: "agents" }],
+    });
+  });
 
   it("keeps agents as a singleton surface", () => {
     useRightPanelStore.getState().open(refA, "agents");
@@ -265,27 +484,13 @@ describe("rightPanelStore", () => {
     });
   });
 
-  // "replaces the standalone explorer with peer file surfaces", "updates
-  // line reveal requests when reopening a file surface", and "removes
-  // persisted file surfaces when their workspace no longer exists" used to
-  // live here — DELETED, not just moved, as of task #61: "files"/"file"
-  // are retired kinds this store no longer models at all (see
-  // RIGHT_PANEL_KINDS's own comment). The capability itself (which file is
-  // open, revealLine/revealRequestId, reconciling on workspace loss) moved
-  // to fileExplorerStore.ts, with its own equivalent coverage in
-  // fileExplorerStore.test.ts — "keeps an already-open path's position but
-  // still bumps revealRequestId" for the reveal-request case, and the
-  // "reconcileFiles" describe block for the workspace-loss case. The
-  // standalone-explorer-removal assertion specifically is NOT ported: the
-  // new store deliberately does NOT remove the explorer when a file opens
-  // (an explicit, documented simplification — see fileExplorerStore.ts's
-  // own module doc), so porting that exact assertion would just assert the
-  // OLD, now-wrong behaviour.
-
   it("close hides the panel without clearing its selected surface", () => {
     useRightPanelStore.getState().open(refA, "agents");
     useRightPanelStore.getState().close(refA);
     expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBeNull();
+    expect(
+      selectSelectedRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+    ).toEqual({ id: "agents", kind: "agents" });
     expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
       isOpen: false,
       activeSurfaceId: "agents",
@@ -317,12 +522,11 @@ describe("rightPanelStore", () => {
     });
   });
 
-  // "toggle to a different kind switches active" used to live here (toggle
-  // one kind, then another, assert the second wins) — DELETED for the same
-  // reason as the two `open`-based tests above: there is no second kind
-  // left to toggle between. Upstream still ships this test against
-  // "preview" and "agents"; it is not portable here, because "preview" is
-  // one of the kinds this fork moved to a dock panel.
+  it("toggle to a different kind switches active", () => {
+    useRightPanelStore.getState().toggle(refA, "pull-requests");
+    useRightPanelStore.getState().toggle(refA, "agents");
+    expect(selectActiveRightPanel(useRightPanelStore.getState().byThreadKey, refA)).toBe("agents");
+  });
 
   it("removeThread clears persisted state", () => {
     useRightPanelStore.getState().open(refA, "agents");
@@ -335,44 +539,67 @@ describe("rightPanelStore", () => {
     expect(useRightPanelStore.getState().byThreadKey).toEqual({});
   });
 
-  // "tracks one surface per browser session" (openBrowser) and "reconciles
-  // browser surfaces without deleting other surface kinds"
-  // (reconcileBrowserSurfaces) used to live here — DELETED, not moved: both
-  // functions are gone from this store as of task #53's fourth slice.
-  // `BrowserDockPanel.tsx` needs neither — see its own doc comment for why
-  // `previewStateStore.ts` already carried everything a browser tab strip
-  // needs, with no reconciliation into this store required at all.
+  it("tracks one surface per pull request", () => {
+    const first = { projectId: "project-a", repository: "acme/game", number: 4909 };
+    const second = { projectId: "project-a", repository: "acme/game", number: 4910 };
+    useRightPanelStore.getState().openPullRequest(refA, first);
+    useRightPanelStore.getState().openPullRequest(refA, second);
+    const url = "https://gitlab.example.com/acme/game/-/merge_requests/4909";
+    useRightPanelStore.getState().openPullRequest(refA, { ...first, url });
+    useRightPanelStore.getState().openPullRequest(refA, first);
 
-  // "tracks one surface per terminal session", "tracks split panes and the
-  // active pane within a terminal surface", "tracks vertical layout for a
-  // terminal surface", and "closing the final terminal pane removes its
-  // surface and closes the panel" used to live here — DELETED, not just
-  // moved, as of task #53: "terminal" is a retired kind this store no
-  // longer models at all (see RIGHT_PANEL_KINDS's own comment). The
-  // capability itself (which terminal groups are open, split layout, which
-  // pane is active) moved to terminalDockStore.ts, with its own equivalent
-  // coverage in terminalDockStore.test.ts.
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces.map((surface) => surface.id)).toEqual([
+      pullRequestSurfaceId(first),
+      pullRequestSurfaceId(second),
+    ]);
+    expect(state.activeSurfaceId).toBe(pullRequestSurfaceId(first));
+    expect(
+      selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA),
+    ).toMatchObject({ url });
+    expect(state.surfaces[1]).not.toHaveProperty("url");
+  });
 
-  // "closing the active surface activates a neighboring surface", "closing
-  // other surfaces keeps the selected surface active", and "closing
-  // surfaces to the right activates the selected surface when active was
-  // removed" used to live here, each seeding a SECOND surface (a browser
-  // tab, then later a plan surface after Terminal's own promotion) to
-  // exercise `closeSurface`'s neighbor-fallback, `closeOtherSurfaces`, and
-  // `closeSurfacesToRight`. DELETED, not ported to a synthetic two-surface
-  // state: with "agents" as the only kind left AND a singleton, this
-  // store's real public API (`open`/`toggle`) can never produce more than
-  // one surface at a time — `surfaces` physically cannot exceed length 1
-  // through any type-safe call. Constructing a second surface here would
-  // mean type-casting past `RightPanelSurface` to fabricate a kind that
-  // cannot exist, which would test an impossible state rather than real
-  // behaviour. `closeOtherSurfaces` and `closeSurfacesToRight` are
-  // therefore DEAD CODE as of this slice — still exported, still callable,
-  // but unreachable from any real UI action, since `RightPanelTabs`' own
-  // multi-surface tab strip (its context menu's "close others"/"close to
-  // the right" items) can equally never see more than one tab. This is
-  // exactly the "collapse" signal flagged to the owner in
-  // rightPanelStore.ts's own top comment, not an oversight.
+  it("keeps matching repository and number on different hosts as separate tabs", () => {
+    const first = { projectId: "project-a", repository: "acme/api", number: 7, host: "github.com" };
+    const second = { ...first, host: "github.example.com" };
+    useRightPanelStore.getState().openPullRequest(refA, first);
+    useRightPanelStore.getState().openPullRequest(refA, second);
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces).toEqual([pullRequestSurface(first), pullRequestSurface(second)]);
+    expect(pullRequestSurfaceId({ ...first, host: "GITHUB.COM" })).toBe(
+      pullRequestSurfaceId(first),
+    );
+  });
+
+  it("keeps one pull request read from two servers as two tabs", () => {
+    const local = {
+      environmentId: "local",
+      projectId: "project-a",
+      repository: "acme/game",
+      number: 4909,
+    };
+    const remote = { ...local, environmentId: "remote" };
+
+    useRightPanelStore.getState().openPullRequest(refA, local);
+    useRightPanelStore.getState().openPullRequest(refA, remote);
+
+    const state = selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA);
+    expect(state.surfaces.map((surface) => surface.id)).toEqual([
+      pullRequestSurfaceId(local),
+      pullRequestSurfaceId(remote),
+    ]);
+  });
+
+  it("closing the active surface activates a neighboring surface", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().openPullRequest(refA, linkedPullRequest);
+    useRightPanelStore.getState().closeSurface(refA, linkedPullRequest.id);
+
+    expect(selectActiveRightPanelSurface(useRightPanelStore.getState().byThreadKey, refA)?.id).toBe(
+      "agents",
+    );
+  });
 
   it("closing the final surface closes the panel", () => {
     useRightPanelStore.getState().open(refA, "agents");
@@ -385,8 +612,37 @@ describe("rightPanelStore", () => {
     });
   });
 
+  it("closing other surfaces keeps the selected surface active", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().openPullRequest(refA, linkedPullRequest);
+    useRightPanelStore.getState().open(refA, "pull-requests");
+
+    useRightPanelStore.getState().closeOtherSurfaces(refA, linkedPullRequest.id);
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: linkedPullRequest.id,
+      surfaces: [linkedPullRequest],
+    });
+  });
+
+  it("closing surfaces to the right activates the selected surface when active was removed", () => {
+    useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().openPullRequest(refA, linkedPullRequest);
+    useRightPanelStore.getState().open(refA, "pull-requests");
+
+    useRightPanelStore.getState().closeSurfacesToRight(refA, "agents");
+
+    expect(selectThreadRightPanelState(useRightPanelStore.getState().byThreadKey, refA)).toEqual({
+      isOpen: true,
+      activeSurfaceId: "agents",
+      surfaces: [{ id: "agents", kind: "agents" }],
+    });
+  });
+
   it("closing all surfaces closes the panel", () => {
     useRightPanelStore.getState().open(refA, "agents");
+    useRightPanelStore.getState().openPullRequest(refA, linkedPullRequest);
 
     useRightPanelStore.getState().closeAllSurfaces(refA);
 

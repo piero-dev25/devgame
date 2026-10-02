@@ -48,7 +48,7 @@ const THREE_JS_PACKAGE_NAME = "three";
 const DEFAULT_ENGINE_TYPE_CACHE_CAPACITY = 512;
 const DEFAULT_ENGINE_TYPE_CACHE_TTL = Duration.minutes(1);
 
-export class EngineTypeDetectionError extends Schema.TaggedErrorClass<EngineTypeDetectionError>()(
+export class EngineTypeDetectionError extends Schema.TaggedError<EngineTypeDetectionError>()(
   "EngineTypeDetectionError",
   {
     operation: Schema.Literals([

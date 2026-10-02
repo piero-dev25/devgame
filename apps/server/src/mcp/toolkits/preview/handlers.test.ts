@@ -1,111 +1,23 @@
-import { expect, it } from "@effect/vitest";
-import {
-  EnvironmentId,
-  PreviewAutomationUnavailableError,
-  PreviewTabId,
-  ProviderInstanceId,
-  ThreadId,
-  type PreviewAutomationStatus,
-} from "@t3tools/contracts";
+import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { describe } from "vite-plus/test";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 
-import * as McpInvocationContext from "../../McpInvocationContext.ts";
-import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
-import { invoke, normalizePreviewOpenInput } from "./handlers.ts";
-
-const scope: McpInvocationContext.McpInvocationScope = {
-  environmentId: EnvironmentId.make("environment-1"),
-  threadId: ThreadId.make("thread-1"),
-  providerSessionId: "provider-session-1",
-  providerInstanceId: ProviderInstanceId.make("codex"),
-  capabilities: new Set(["preview"]),
-  issuedAt: 1,
-};
-
-// Minimal test double for the broker service. `respond`/`connect`/`focusHost`
-// are unused by `invoke` and are asserted unreachable via `Effect.die`.
-const unreachable = (label: string) => () => Effect.die(`${label} should not be called`);
-
-// task #116 — the two behaviors that prove `invoke`'s McpCapabilityUnavailableError
-// → PreviewAutomationUnavailableError translation is correct and total for the
-// preview call site: (a) a denied capability still surfaces the ORIGINAL vendor
-// error every preview tool's `failure: PreviewAutomationError` declares, and
-// (b) the granted-case behavior — scope reaches the broker unchanged — is pinned.
-describe("PreviewToolkit.invoke", () => {
-  it.effect(
-    "translates a denied preview capability into the vendor PreviewAutomationUnavailableError",
-    () => {
-      const deniedScope: McpInvocationContext.McpInvocationScope = {
-        ...scope,
-        capabilities: new Set(),
-      };
-      const fakeBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"] = {
-        connect: unreachable("connect"),
-        focusHost: unreachable("focusHost"),
-        respond: unreachable("respond"),
-        invoke: unreachable("invoke"),
-      };
-
-      return Effect.gen(function* () {
-        const error = yield* invoke<PreviewAutomationStatus>("status", {}).pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, deniedScope),
-          Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, fakeBroker),
-          Effect.flip,
-        );
-
-        expect(error).toBeInstanceOf(PreviewAutomationUnavailableError);
-        expect(error).toMatchObject({
-          capability: "preview",
-          environmentId: deniedScope.environmentId,
-          threadId: deniedScope.threadId,
-          providerSessionId: deniedScope.providerSessionId,
-          providerInstanceId: deniedScope.providerInstanceId,
-        });
-        expect(error.message).toBe("MCP credential does not grant the preview capability.");
-      });
-    },
-  );
-
-  it.effect(
-    "passes the scope through to the broker and returns its result unchanged when preview is granted",
-    () => {
-      let capturedRequest: PreviewAutomationBroker.PreviewAutomationInvokeInput | undefined;
-      const fakeBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"] = {
-        connect: unreachable("connect"),
-        focusHost: unreachable("focusHost"),
-        respond: unreachable("respond"),
-        invoke: <A>(request: PreviewAutomationBroker.PreviewAutomationInvokeInput) => {
-          capturedRequest = request;
-          return Effect.succeed({ ok: true } as A);
-        },
-      };
-      const tabId = PreviewTabId.make("tab-1");
-
-      return Effect.gen(function* () {
-        const result = yield* invoke<{ ok: true }>("status", { some: "input" }, 5000, tabId).pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
-          Effect.provideService(PreviewAutomationBroker.PreviewAutomationBroker, fakeBroker),
-        );
-
-        expect(result).toEqual({ ok: true });
-        expect(capturedRequest?.scope).toBe(scope);
-        expect(capturedRequest?.operation).toBe("status");
-        expect(capturedRequest?.input).toEqual({ some: "input" });
-        expect(capturedRequest?.timeoutMs).toBe(5000);
-        expect(capturedRequest?.tabId).toBe(tabId);
-      });
-    },
-  );
-});
+import {
+  createPendingAttachmentId,
+  parseThreadSegmentFromAttachmentId,
+} from "../../../attachmentStore.ts";
+import * as ServerConfig from "../../../config.ts";
+import { claimPreviewRecording, normalizePreviewOpenInput } from "./handlers.ts";
 
 describe("normalizePreviewOpenInput", () => {
-  it("opens the inline preview and reuses the current tab by default", () => {
-    expect(normalizePreviewOpenInput({})).toEqual({
-      open: true,
-      reuseExistingTab: true,
-      show: true,
-    });
+  it("leaves an unstated visibility for the client preference to decide", () => {
+    // Filling `open` in here would outrank `browserAutoShowFloatingPreview`,
+    // which is desktop-local and cannot be read from the server.
+    expect(normalizePreviewOpenInput({})).toEqual({ reuseExistingTab: true });
   });
 
   it("preserves an explicit background-only opt-out", () => {
@@ -128,4 +40,116 @@ describe("normalizePreviewOpenInput", () => {
       show: true,
     });
   });
+});
+
+describe("claimPreviewRecording", () => {
+  it.effect("overlapping and repeated claims return the same retained recording", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const uploadedAttachmentId = createPendingAttachmentId(".webm");
+      const pendingPath = path.join(config.attachmentsDir, `${uploadedAttachmentId}.webm`);
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      yield* fileSystem.writeFileString(pendingPath, "video!");
+      const response = {
+        id: "desktop-recording",
+        tabId: "tab-1",
+        path: "/desktop/recording.webm",
+        mimeType: "video/webm",
+        sizeBytes: 6,
+        createdAt: "2026-09-07T00:00:00.000Z",
+        uploadedAttachmentId,
+      };
+      const claim = claimPreviewRecording(ThreadId.make("thread-1"), response);
+      const [first, second] = yield* Effect.all([claim, claim], { concurrency: "unbounded" });
+      expect(first).toEqual(second);
+      expect(yield* claim).toEqual(first);
+      expect(yield* fileSystem.readFileString(first.path)).toBe("video!");
+      expect(yield* fileSystem.exists(pendingPath)).toBe(false);
+      const wrongThread = yield* claimPreviewRecording(ThreadId.make("thread-2"), response).pipe(
+        Effect.result,
+      );
+      expect(wrongThread._tag).toBe("Failure");
+      const wrongPath = yield* claimPreviewRecording(ThreadId.make("thread-1"), {
+        ...response,
+        uploadedAttachmentId: `../${uploadedAttachmentId}`,
+      }).pipe(Effect.result);
+      expect(wrongPath._tag).toBe("Failure");
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-recording-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
+
+  it.effect.each([6, 5])(
+    "claims only a complete uploaded recording (reported bytes: %s)",
+    (sizeBytes) =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const uploadedAttachmentId = createPendingAttachmentId(".webm");
+        const pendingPath = path.join(config.attachmentsDir, `${uploadedAttachmentId}.webm`);
+        yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+        yield* fileSystem.writeFileString(pendingPath, "video!");
+        const response = {
+          id: "desktop-recording",
+          tabId: "tab-1",
+          path: "/desktop/recording.webm",
+          mimeType: "video/webm",
+          sizeBytes,
+          createdAt: "2026-09-07T00:00:00.000Z",
+          uploadedAttachmentId,
+        };
+        const result = yield* claimPreviewRecording(ThreadId.make("thread-1"), response).pipe(
+          Effect.result,
+        );
+        if (sizeBytes === 6) {
+          expect(result._tag).toBe("Success");
+          if (result._tag !== "Success") return;
+          expect(result.success.path).not.toBe(response.path);
+          expect(parseThreadSegmentFromAttachmentId(result.success.id)).toBe("thread-1");
+          expect(yield* fileSystem.readFileString(result.success.path)).toBe("video!");
+          expect(yield* fileSystem.exists(pendingPath)).toBe(false);
+        } else {
+          expect(result._tag).toBe("Failure");
+          if (result._tag !== "Failure") return;
+          expect(result.failure._tag).toBe("PreviewAutomationRecordingTransferError");
+          expect(yield* fileSystem.exists(pendingPath)).toBe(true);
+        }
+      }).pipe(
+        Effect.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-recording-" }).pipe(
+            Layer.provideMerge(NodeServices.layer),
+          ),
+        ),
+      ),
+  );
+
+  it.effect("reports an older desktop without returning its inaccessible path", () =>
+    Effect.gen(function* () {
+      const result = yield* claimPreviewRecording(ThreadId.make("thread-1"), {
+        id: "desktop-recording",
+        tabId: "tab-1",
+        path: "/desktop/recording.webm",
+        mimeType: "video/webm",
+        sizeBytes: 6,
+        createdAt: "2026-09-07T00:00:00.000Z",
+      }).pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      if (result._tag !== "Failure") return;
+      expect(result.failure._tag).toBe("PreviewAutomationRecordingDesktopUpdateRequiredError");
+      expect(result.failure.message).toContain("Update the desktop app");
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-preview-recording-" }).pipe(
+          Layer.provideMerge(NodeServices.layer),
+        ),
+      ),
+    ),
+  );
 });

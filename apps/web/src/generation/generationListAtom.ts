@@ -46,7 +46,7 @@ export const GENERATION_LIST_CONNECTION_WAIT_TIMEOUT_MS = 15_000;
  * than a job's own progress can possibly have changed since the last read. */
 export const GENERATION_LIST_POLL_INTERVAL_MS = 5_000;
 
-export class GenerationListConnectionWaitTimeoutError extends Schema.TaggedErrorClass<GenerationListConnectionWaitTimeoutError>()(
+export class GenerationListConnectionWaitTimeoutError extends Schema.TaggedError<GenerationListConnectionWaitTimeoutError>()(
   "GenerationListConnectionWaitTimeoutError",
   {},
 ) {
@@ -59,7 +59,7 @@ export class GenerationListConnectionWaitTimeoutError extends Schema.TaggedError
  * bare global `Error` (this codebase's own Effect lint rule flags an
  * untagged `Error` in the failure channel), matching
  * `unitySetupProbeAtom.ts`'s identical `UnitySetupProbeFetchError`. */
-export class GenerationListFetchError extends Schema.TaggedErrorClass<GenerationListFetchError>()(
+export class GenerationListFetchError extends Schema.TaggedError<GenerationListFetchError>()(
   "GenerationListFetchError",
   { cause: Schema.Defect() },
 ) {
@@ -96,8 +96,7 @@ export function createGenerationListAtom(input: {
   readonly fetchList: (input: {
     readonly environmentId: EnvironmentId;
     readonly projectId: ProjectId;
-    readonly httpBaseUrl: string;
-    readonly httpAuthorization: PreparedConnection["httpAuthorization"];
+    readonly prepared: PreparedConnection;
   }) => Promise<GenerationListSuccess>;
   readonly connectionWaitTimeoutMs?: number;
 }) {
@@ -120,8 +119,7 @@ export function createGenerationListAtom(input: {
               input.fetchList({
                 environmentId,
                 projectId,
-                httpBaseUrl: prepared.httpBaseUrl,
-                httpAuthorization: prepared.httpAuthorization,
+                prepared,
               }),
             catch: (cause) => new GenerationListFetchError({ cause }),
           });

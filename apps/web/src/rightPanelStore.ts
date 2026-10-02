@@ -3,78 +3,130 @@
  *
  * This is intentionally a shallow workspace model: it owns an ordered set of
  * surface descriptors and the active surface, while each feature continues to
- * own its durable resource state. Agents is a singleton surface — after this
- * merge with upstream it is the ONLY surface kind left, from two independent
- * directions. Diff, Files ("files"/"file"), Terminal, and Browser ("preview")
- * used to live here — all are gone as of spec-surfaces-as-dock-panels.md,
- * Part B: each moved to a first-class dock panel, with its own visibility
- * owned by the dock and its own in-panel selection state owned by a dedicated
- * store where one was needed (`fileExplorerStore.ts` for Files,
- * `terminalDockStore.ts` for Terminal — Browser needed none, since
- * `previewStateStore.ts` already carried its equivalent state; see
- * `BrowserDockPanel.tsx`'s own doc comment). Plan is gone for an unrelated
- * upstream reason: plans stopped hijacking the UI and now render inline in
- * the transcript (upstream #5558), so upstream retired the kind on its side
- * while the fork was retiring the other five on ours. See
- * `RIGHT_PANEL_KINDS`'s own comment for why each kind is DELETED here rather
- * than left unused.
+ * own its durable resource state.
  *
- * `RIGHT_PANEL_KINDS` having exactly one member is a real signal, not an
- * oversight left for a future pass to notice: this store could plausibly
- * collapse into a plain per-thread boolean (agents open/closed) instead of a
- * general surface-array model built for N kinds. NOT done here — that's a
- * bigger, separate decision than "finish the migration template," and the
- * owner asked to be told before it happens rather than have it happen
- * silently inside a slice that was framed as "move Browser." The upstream
- * merge only strengthened that signal: the one kind that had survived the
- * fork's migration is exactly the one upstream then deleted.
+ * In DevGame the dock is the single layout owner. Diff, Files ("files"/
+ * "file"), Terminal and Browser ("preview") are first-class dock panels
+ * (spec-surfaces-as-dock-panels.md, Part B), with in-panel selection owned by
+ * `fileExplorerStore.ts`, `terminalDockStore.ts` and `previewStateStore.ts`.
+ * None of those kinds exist here. Plan is gone for upstream's own reason:
+ * plans render inline in the transcript (upstream #5558).
+ *
+ * What remains are the surfaces the dock has no panel for: Agents, plus
+ * upstream's Device, Pull request and Pull requests surfaces, which stay
+ * right-panel surfaces so upstream's PR and device features keep working.
  */
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ThreadId, type ScopedThreadRef } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-// "diff", as of task #61 "files"/"file", as of task #53's third slice
-// "terminal", and as of task #53's fourth slice "preview" are deliberately
-// NOT members — spec-surfaces-as-dock-panels.md, Part B moved each to a
-// first-class dock panel (see dock/ChatDock.tsx's registrations), and
-// removing a kind from this union (rather than leaving it unused) is what
-// let the compiler find every stale call site on the Diff pass — six of
-// them across two files, including onToggleDiff's Cmd+D binding, none of
-// which a runtime check alone would have flagged; on Files it found 36
-// across 7 files; on Browser more still, since "open a preview" has far
-// more entry points than any other surface (chat markdown links, script
-// auto-open, terminal links, discovered ports, the mini-player's
-// "restore"). "plan" is not a member either, for upstream's own reason
-// rather than the dock migration's: plans render inline in the transcript
-// now (upstream #5558), so there is no plan SURFACE to open at all. The
-// persisted-data side of every retired kind still exists — see
-// migratePersistedRightPanelState's own comment on why those spots are
-// exempt.
-export const RIGHT_PANEL_KINDS = ["agents"] as const;
+// "diff", "files", "file", "terminal" and "preview" are deliberately NOT
+// members: each moved to a dock panel (see dock/ChatDock.tsx's
+// registrations). Removing a kind from this union, rather than leaving it
+// unused, is what lets the compiler find every stale call site that would
+// otherwise open a surface nothing renders. "plan" is not a member either
+// (upstream #5558). The persisted-data side of every retired kind is handled
+// in migratePersistedRightPanelState.
+const RIGHT_PANEL_KINDS = ["device", "pull-request", "pull-requests", "agents"] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
 
-export type RightPanelSurface = { id: "agents"; kind: "agents" };
+export interface DeviceTabTarget {
+  hostId: string;
+  deviceId: string;
+  platform: "ios" | "android";
+  name: string;
+}
+
+export type RightPanelSurface =
+  | { id: "device" | `device:${string}`; kind: "device"; target?: DeviceTabTarget; title?: string }
+  | {
+      /**
+       * A change request opened beside a thread or in the pull-request list's shared panel.
+       * The reference lives in the id so several pull requests can remain open as peer tabs.
+       */
+      id: `pull-request:${string}`;
+      kind: "pull-request";
+      /**
+       * Which server the change request was read from. The list spans every connected one, so
+       * two of them can hold the same project id; a panel beside a thread leaves this out and
+       * takes the environment from its own ref.
+       */
+      environmentId?: string;
+      projectId: string;
+      host?: string;
+      repository: string;
+      number: number;
+      url?: string;
+    }
+  /** The thread's linked pull requests, one singleton tab beside any number of `pull-request` tabs. */
+  | { id: "pull-requests"; kind: "pull-requests" }
+  | { id: "agents"; kind: "agents" };
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
-// v12: the fork reached v11 by retiring diff/files/file/terminal/preview;
-// upstream independently reached v9 by retiring "plan". The merged build
-// retires strictly more than either, so it needs a version above BOTH —
-// a v11 save still holds plan surfaces this build cannot render, and
-// leaving the version at 11 would skip the migration that strips them.
-const RIGHT_PANEL_STORAGE_VERSION = 12;
+// v12 (DevGame): retired diff/files/file/terminal/preview (dock panels) and
+// plan. Upstream independently reached v13: v10 keys pull-request surfaces by
+// reference, v11 stops persisting the pull-request list's shared panel, v12
+// adds the device surface. v14 is above both so that every save from either
+// line runs the merged migration below: a DevGame v12 save must not skip it,
+// and an upstream v13 save still holds dock-owned kinds this build cannot
+// render.
+const RIGHT_PANEL_STORAGE_VERSION = 14;
+
+/** A fixed workspace-level ref: each PR surface carries its own real environment. */
+export const PULL_REQUESTS_PANEL_REF = scopeThreadRef(
+  EnvironmentId.make("pull-requests-panel"),
+  ThreadId.make("pull-requests-panel"),
+);
+
+/**
+ * The pull-request list's shared panel is session
+ * state: reopening the app should show the list, not last session's tabs and detail fetches.
+ */
+const isPullRequestsPanelKey = (threadKey: string) => threadKey.endsWith(":pull-requests-panel");
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
   activeSurfaceId: string | null;
   surfaces: RightPanelSurface[];
+  dismissedDeviceSurfaceIds?: string[];
 }
+
+type ProactiveSurface = Extract<RightPanelSurface, { kind: "pull-request" | "pull-requests" }>;
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  open: (ref: ScopedThreadRef, kind: RightPanelKind) => void;
+  /** Session-only count of user panel choices per thread. Automatic updates do not advance it. */
+  userActionRevisionByThreadKey: Record<string, number>;
+  getUserActionRevision: (ref: ScopedThreadRef) => number;
+  /**
+   * Open a surface on behalf of the app, not the user. Refused when the user
+   * made a panel choice after `expectedUserActionRevision` was read.
+   *
+   * Upstream also opens a completed-turn diff proactively; in DevGame Diff is
+   * a dock panel, so only pull-request surfaces come through here.
+   */
+  openProactive: (
+    ref: ScopedThreadRef,
+    surface: ProactiveSurface,
+    expectedUserActionRevision: number,
+  ) => boolean;
+  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "pull-request">) => void;
+  openDevice: (ref: ScopedThreadRef, target: DeviceTabTarget, automatic?: boolean) => void;
+  renameDevice: (ref: ScopedThreadRef, surfaceId: string, title: string) => void;
+  openPullRequest: (
+    ref: ScopedThreadRef,
+    target: {
+      environmentId?: string;
+      projectId: string;
+      host?: string;
+      repository: string;
+      number: number;
+      url?: string;
+    },
+  ) => void;
   activateSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeSurface: (ref: ScopedThreadRef, surfaceId: string) => void;
   closeOtherSurfaces: (ref: ScopedThreadRef, surfaceId: string) => void;
@@ -83,7 +135,7 @@ interface RightPanelStoreState {
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
-  toggle: (ref: ScopedThreadRef, kind: RightPanelKind) => void;
+  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "pull-request">) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -93,12 +145,53 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
   surfaces: [],
 };
 
-const singletonSurface = (kind: RightPanelKind): RightPanelSurface => {
+const singletonSurface = (kind: Exclude<RightPanelKind, "pull-request">): RightPanelSurface => {
   switch (kind) {
+    case "pull-requests":
+      return { id: "pull-requests", kind };
     case "agents":
       return { id: "agents", kind };
+    case "device":
+      return { id: "device", kind };
   }
 };
+
+export type PullRequestSurface = Extract<RightPanelSurface, { kind: "pull-request" }>;
+
+export function pullRequestSurfaceId(target: {
+  environmentId?: string;
+  projectId: string;
+  host?: string;
+  repository: string;
+  number: number;
+}): PullRequestSurface["id"] {
+  // The environment leads the id where there is one, so the same change request read from two
+  // servers is two tabs rather than one tab that changes its mind about which server it is on.
+  const scope =
+    target.environmentId === undefined ? "" : `${encodeURIComponent(target.environmentId)}:`;
+  const host = target.host === undefined ? "" : `${encodeURIComponent(target.host.toLowerCase())}:`;
+  return `pull-request:${scope}${encodeURIComponent(target.projectId)}:${host}${encodeURIComponent(target.repository)}:${target.number}`;
+}
+
+export function pullRequestSurface(target: {
+  environmentId?: string;
+  projectId: string;
+  host?: string;
+  repository: string;
+  number: number;
+  url?: string;
+}): PullRequestSurface {
+  return {
+    id: pullRequestSurfaceId(target),
+    kind: "pull-request",
+    ...(target.environmentId === undefined ? {} : { environmentId: target.environmentId }),
+    projectId: target.projectId,
+    ...(typeof target.host === "string" ? { host: target.host.toLowerCase() } : {}),
+    repository: target.repository,
+    number: target.number,
+    ...(typeof target.url === "string" ? { url: target.url } : {}),
+  };
+}
 
 const upsertSurface = (
   current: ThreadRightPanelState,
@@ -119,7 +212,12 @@ const updateThread = (
 ): Record<string, ThreadRightPanelState> => {
   const current = byThreadKey[threadKey] ?? EMPTY_THREAD_STATE;
   const next = updater(current);
-  if (!next.isOpen && next.activeSurfaceId === null && next.surfaces.length === 0) {
+  if (
+    !next.isOpen &&
+    next.activeSurfaceId === null &&
+    next.surfaces.length === 0 &&
+    !next.dismissedDeviceSurfaceIds?.length
+  ) {
     if (!(threadKey in byThreadKey)) return byThreadKey;
     const { [threadKey]: _removed, ...rest } = byThreadKey;
     return rest;
@@ -128,135 +226,272 @@ const updateThread = (
   return { ...byThreadKey, [threadKey]: next };
 };
 
+// Every store action is a user choice unless it goes through `automaticUpdate`.
+// Only `openProactive` and automatic device opens are automatic, so a new
+// action counts as a user choice by default.
+const automaticUpdate = (
+  state: RightPanelStoreState,
+  threadKey: string,
+  updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
+): Partial<RightPanelStoreState> => ({
+  byThreadKey: updateThread(state.byThreadKey, threadKey, updater),
+});
+
+const userAction = (
+  state: RightPanelStoreState,
+  threadKey: string,
+  updater: (current: ThreadRightPanelState) => ThreadRightPanelState,
+): Partial<RightPanelStoreState> => ({
+  byThreadKey: updateThread(state.byThreadKey, threadKey, (current) => {
+    const next = updater(current);
+    const removed = current.surfaces.filter(
+      (surface) =>
+        surface.kind === "device" &&
+        surface.target &&
+        !next.surfaces.some((entry) => entry.id === surface.id),
+    );
+    if (removed.length === 0) return next;
+    return {
+      ...next,
+      dismissedDeviceSurfaceIds: [
+        ...new Set([
+          ...(next.dismissedDeviceSurfaceIds ?? []),
+          ...removed.map((surface) => surface.id),
+        ]),
+      ],
+    };
+  }),
+  userActionRevisionByThreadKey: {
+    ...state.userActionRevisionByThreadKey,
+    [threadKey]: (state.userActionRevisionByThreadKey[threadKey] ?? 0) + 1,
+  },
+});
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object";
+}
+
+function migrateDeviceTarget(value: unknown): DeviceTabTarget | null {
+  if (!isRecord(value)) return null;
+  const { hostId, deviceId, platform, name } = value;
+  if (
+    typeof hostId !== "string" ||
+    typeof deviceId !== "string" ||
+    (platform !== "ios" && platform !== "android") ||
+    typeof name !== "string"
+  ) {
+    return null;
+  }
+  return { hostId, deviceId, platform, name };
+}
+
+/**
+ * Allowlist, not denylist: a persisted entry survives only when it is a
+ * well-formed member of the CURRENT union. Retired kinds (diff, files, file,
+ * terminal, preview, plan) fall out here, and so do a null entry (a corrupted
+ * save used to throw on `.kind`, which rejected the whole rehydrate and reset
+ * every thread's panel state) and any kind this build does not know.
+ */
+function migratePersistedSurface(surface: unknown): RightPanelSurface[] {
+  if (!isRecord(surface)) return [];
+  switch (surface.kind) {
+    case "agents":
+      return surface.id === "agents" ? [{ id: "agents", kind: "agents" }] : [];
+    case "pull-requests":
+      return surface.id === "pull-requests" ? [{ id: "pull-requests", kind: "pull-requests" }] : [];
+    case "pull-request": {
+      const { environmentId, projectId, host, repository, number, url } = surface;
+      if (
+        typeof projectId !== "string" ||
+        typeof repository !== "string" ||
+        typeof number !== "number" ||
+        !Number.isSafeInteger(number) ||
+        number < 1
+      ) {
+        return [];
+      }
+      // Anything else stored under these names is not an environment, host or url.
+      return [
+        pullRequestSurface({
+          projectId,
+          repository,
+          number,
+          ...(typeof environmentId === "string" ? { environmentId } : {}),
+          ...(typeof host === "string" ? { host } : {}),
+          ...(typeof url === "string" ? { url } : {}),
+        }),
+      ];
+    }
+    case "device": {
+      const title = typeof surface.title === "string" ? { title: surface.title } : {};
+      if (surface.id === "device") return [{ id: "device", kind: "device", ...title }];
+      const target = migrateDeviceTarget(surface.target);
+      if (typeof surface.id !== "string" || !surface.id.startsWith("device:") || !target) {
+        return [];
+      }
+      return [{ id: surface.id as `device:${string}`, kind: "device", target, ...title }];
+    }
+    default:
+      return [];
+  }
+}
+
 export function migratePersistedRightPanelState(persistedState: unknown): {
   byThreadKey: Record<string, ThreadRightPanelState>;
 } {
-  if (!persistedState || typeof persistedState !== "object") {
+  const persistedByThreadKey = isRecord(persistedState) ? persistedState.byThreadKey : undefined;
+  if (!isRecord(persistedByThreadKey)) {
     return { byThreadKey: {} };
   }
-  const byThreadKey =
-    "byThreadKey" in persistedState &&
-    persistedState.byThreadKey &&
-    typeof persistedState.byThreadKey === "object"
-      ? Object.fromEntries(
-          Object.entries(
-            persistedState.byThreadKey as Record<string, ThreadRightPanelState>,
-          ).flatMap(([threadKey, threadState]) => {
-            const validThreadState =
-              threadState && typeof threadState === "object" ? threadState : null;
-            const surfaces = Array.isArray(validThreadState?.surfaces)
-              ? validThreadState.surfaces.flatMap<RightPanelSurface>((surface) => {
-                  // v8 added "diff"; v9 (task #61) added "files" (the
-                  // browser) and "file" (one opened file); v10 (task #53,
-                  // third slice) added "terminal"; v11 (task #53, fourth
-                  // and final slice) added "preview" — each moved to a
-                  // first-class dock panel (spec-surfaces-as-dock-
-                  // panels.md, Part B) and no longer a right-panel surface
-                  // kind ChatView renders; visibility for each now lives
-                  // in the dock's own layout state. "Preview"'s own
-                  // payload (which tab was active) needs no coercion
-                  // either — it was already duplicated in
-                  // previewStateStore.ts's own activeTabId (see
-                  // BrowserDockPanel.tsx's own doc comment), so there is
-                  // nothing here worth preserving that isn't already live
-                  // elsewhere. v12 adds "plan" to the same list from the
-                  // OTHER direction: upstream retired it (its own v9)
-                  // because plans render inline in the transcript now,
-                  // and this build merges both retirements. Drop any
-                  // persisted entry of a retired kind rather than
-                  // resurrect a tab with nothing behind it; isOpen and
-                  // activeSurfaceId below are both recomputed from the
-                  // SURVIVING surfaces, so this is a non-destructive
-                  // strip — no underlying session or PTY is destroyed by
-                  // any of this, only client-side tab position resets.
-                  //
-                  // Cast past RightPanelSurface's CURRENT union
-                  // deliberately: a persisted surface can be an OLDER
-                  // shape than what this build's type allows — that is
-                  // the entire reason migration exists — and each of
-                  // these is exactly such a shape, real in an
-                  // earlier-versioned save, no longer a member of
-                  // RightPanelSurface at all as of this type's own
-                  // narrowing (see its comment). This is the one spot in
-                  // the file deliberately exempt from the compiler proof
-                  // the rest of the union now gets — a review specifically
-                  // asked for that proof everywhere ELSE, which is what
-                  // caught the two stale ChatView.tsx call sites this same
-                  // migration doesn't touch.
-                  // Merge-gate hardening (2026-08-08): allowlist, not
-                  // denylist. The retired kinds named above are WHY
-                  // entries drop out, but the survival test is
-                  // membership in the CURRENT union — a null entry (a
-                  // corrupted save used to throw on `.kind` here, which
-                  // rejected the whole rehydrate and silently reset every
-                  // thread's panel state) and any unrecognised kind fall
-                  // out the same way instead of resurrecting a tab this
-                  // build cannot render.
-                  const candidate = surface as { kind?: unknown; id?: unknown } | null;
-                  if (candidate?.kind === "agents" && candidate.id === "agents") {
-                    return [surface];
-                  }
-                  return [];
-                })
-              : [];
-            const persistedActiveSurfaceId = surfaces.some(
-              (surface) => surface.id === validThreadState?.activeSurfaceId,
-            )
-              ? (validThreadState?.activeSurfaceId ?? null)
+  const byThreadKey = Object.fromEntries(
+    Object.entries(persistedByThreadKey)
+      .filter(([threadKey]) => !isPullRequestsPanelKey(threadKey))
+      .flatMap(([threadKey, threadState]): Array<[string, ThreadRightPanelState]> => {
+        const validThreadState = isRecord(threadState) ? threadState : null;
+        const surfaces = Array.isArray(validThreadState?.surfaces)
+          ? validThreadState.surfaces.flatMap(migratePersistedSurface)
+          : [];
+        const rawActiveSurfaceId = validThreadState?.activeSurfaceId;
+        const persistedActiveSurfaceId =
+          typeof rawActiveSurfaceId === "string" &&
+          surfaces.some((surface) => surface.id === rawActiveSurfaceId)
+            ? rawActiveSurfaceId
+            : rawActiveSurfaceId === "pull-request"
+              ? (surfaces.find((surface) => surface.kind === "pull-request")?.id ?? null)
               : null;
-            // A migration that dropped every surface must not reopen an
-            // empty panel: a thread whose only surface was "diff" (or
-            // "plan") would otherwise keep whatever `isOpen: true` it was
-            // saved with even though `surfaces` is now empty — the exact
-            // shape that resumed a user into a visibly-open,
-            // silently-empty right panel they never asked for. Zero
-            // surviving surfaces means never open, full stop.
-            const isOpen =
-              surfaces.length > 0 &&
-              (typeof validThreadState?.isOpen === "boolean"
-                ? validThreadState.isOpen
-                : persistedActiveSurfaceId !== null);
-            // An open panel needs an active surface: if migration dropped
-            // the persisted one (e.g. plan was active), fall back to the
-            // first survivor instead of rendering an open empty panel.
-            const activeSurfaceId =
-              persistedActiveSurfaceId ?? (isOpen ? (surfaces[0]?.id ?? null) : null);
-            // Prune records migration emptied: an absent record and a
-            // zero-surface record mean the same thing to every reader,
-            // and keeping one per legacy thread would leak a dead
-            // localStorage row per thread forever (merge-gate finding,
-            // 2026-08-08).
-            if (surfaces.length === 0) {
-              return [];
-            }
-            return [[threadKey, { isOpen, surfaces, activeSurfaceId }]];
-          }),
-        )
-      : {};
+        // A migration that dropped every surface must not reopen an empty
+        // panel: a thread whose only surface was "diff" (or "plan") would
+        // otherwise keep the `isOpen: true` it was saved with even though
+        // `surfaces` is now empty. Zero surviving surfaces means never open.
+        const isOpen =
+          surfaces.length > 0 &&
+          (typeof validThreadState?.isOpen === "boolean"
+            ? validThreadState.isOpen
+            : persistedActiveSurfaceId !== null);
+        // An open panel needs an active surface: if migration dropped the
+        // persisted one (e.g. diff was active), fall back to the first
+        // survivor instead of rendering an open empty panel.
+        const activeSurfaceId =
+          persistedActiveSurfaceId ?? (isOpen ? (surfaces[0]?.id ?? null) : null);
+        const dismissedDeviceSurfaceIds = Array.isArray(validThreadState?.dismissedDeviceSurfaceIds)
+          ? validThreadState.dismissedDeviceSurfaceIds.filter(
+              (id): id is string => typeof id === "string",
+            )
+          : [];
+        // Prune records migration emptied: an absent record and a
+        // zero-surface record mean the same thing to every reader, and
+        // keeping one per legacy thread would leak a dead localStorage row
+        // per thread forever. A record that still remembers dismissed
+        // devices is not empty: it keeps an automatic device open from
+        // reopening a tab the user closed.
+        if (surfaces.length === 0 && dismissedDeviceSurfaceIds.length === 0) {
+          return [];
+        }
+        return [
+          [
+            threadKey,
+            {
+              isOpen,
+              surfaces,
+              activeSurfaceId,
+              ...(Array.isArray(validThreadState?.dismissedDeviceSurfaceIds)
+                ? { dismissedDeviceSurfaceIds }
+                : {}),
+            },
+          ],
+        ];
+      }),
+  );
   return { byThreadKey };
 }
 
 export const useRightPanelStore = create<RightPanelStoreState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       byThreadKey: {},
+      userActionRevisionByThreadKey: {},
+      getUserActionRevision: (ref) =>
+        get().userActionRevisionByThreadKey[scopedThreadKey(ref)] ?? 0,
+      openProactive: (ref, surface, expectedUserActionRevision) => {
+        let opened = false;
+        set((state) => {
+          const threadKey = scopedThreadKey(ref);
+          if (
+            (state.userActionRevisionByThreadKey[threadKey] ?? 0) !== expectedUserActionRevision
+          ) {
+            return state;
+          }
+          opened = true;
+          return automaticUpdate(state, threadKey, (current) => upsertSurface(current, surface));
+        });
+        return opened;
+      },
       open: (ref, kind) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) =>
             upsertSurface(current, singletonSurface(kind)),
           ),
-        })),
+        ),
+      openDevice: (ref, target, automatic = false) =>
+        set((state) =>
+          (automatic ? automaticUpdate : userAction)(state, scopedThreadKey(ref), (current) => {
+            const id =
+              `device:${encodeURIComponent(target.hostId)}:${encodeURIComponent(target.deviceId)}` as const;
+            if (automatic && current.dismissedDeviceSurfaceIds?.includes(id)) return current;
+            const surface: RightPanelSurface = { id, kind: "device", target };
+            const existing = current.surfaces.find((entry) => entry.id === id);
+            const surfaces = existing
+              ? current.surfaces.filter((entry) => entry.id !== "device")
+              : current.surfaces.map((entry) => (entry.id === "device" ? surface : entry));
+            return upsertSurface(
+              {
+                ...current,
+                surfaces,
+                dismissedDeviceSurfaceIds: (current.dismissedDeviceSurfaceIds ?? []).filter(
+                  (entry) => entry !== id,
+                ),
+              },
+              existing ?? surface,
+            );
+          }),
+        ),
+      renameDevice: (ref, surfaceId, title) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => ({
+            ...current,
+            surfaces: current.surfaces.map((surface) =>
+              surface.id === surfaceId && surface.kind === "device"
+                ? { ...surface, title: title.trim() || surface.target?.name || "Device" }
+                : surface,
+            ),
+          })),
+        ),
+      openPullRequest: (ref, target) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
+            const surface = pullRequestSurface(target);
+            const next = upsertSurface(current, surface);
+            return target.url
+              ? {
+                  ...next,
+                  surfaces: next.surfaces.map((entry) =>
+                    entry.id === surface.id ? surface : entry,
+                  ),
+                }
+              : next;
+          }),
+        ),
       activateSurface: (ref, surfaceId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) =>
             current.surfaces.some((surface) => surface.id === surfaceId)
               ? { ...current, isOpen: true, activeSurfaceId: surfaceId }
               : current,
           ),
-        })),
+        ),
       closeSurface: (ref, surfaceId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
             const index = current.surfaces.findIndex((surface) => surface.id === surfaceId);
             if (index < 0) return current;
             const surfaces = current.surfaces.filter((surface) => surface.id !== surfaceId);
@@ -271,10 +506,10 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               activeSurfaceId: fallback?.id ?? null,
             };
           }),
-        })),
+        ),
       closeOtherSurfaces: (ref, surfaceId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
             const surface = current.surfaces.find((entry) => entry.id === surfaceId);
             if (!surface || current.surfaces.length === 1) return current;
             return {
@@ -284,10 +519,10 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               activeSurfaceId: surface.id,
             };
           }),
-        })),
+        ),
       closeSurfacesToRight: (ref, surfaceId) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
             const index = current.surfaces.findIndex((surface) => surface.id === surfaceId);
             if (index < 0 || index === current.surfaces.length - 1) return current;
             const surfaces = current.surfaces.slice(0, index + 1);
@@ -300,37 +535,37 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               activeSurfaceId: activeStillExists ? current.activeSurfaceId : surfaceId,
             };
           }),
-        })),
+        ),
       closeAllSurfaces: (ref) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) =>
             current.surfaces.length === 0
               ? current
               : { ...current, isOpen: false, surfaces: [], activeSurfaceId: null },
           ),
-        })),
+        ),
       show: (ref) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) =>
             current.isOpen ? current : { ...current, isOpen: true },
           ),
-        })),
+        ),
       close: (ref) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) =>
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) =>
             current.isOpen ? { ...current, isOpen: false } : current,
           ),
-        })),
+        ),
       toggleVisibility: (ref) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => ({
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => ({
             ...current,
             isOpen: !current.isOpen,
           })),
-        })),
+        ),
       toggle: (ref, kind) =>
-        set((state) => ({
-          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+        set((state) =>
+          userAction(state, scopedThreadKey(ref), (current) => {
             const active = current.surfaces.find(
               (surface) => surface.id === current.activeSurfaceId,
             );
@@ -339,13 +574,20 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
             }
             return upsertSurface(current, singletonSurface(kind));
           }),
-        })),
+        ),
       removeThread: (ref) =>
         set((state) => {
           const threadKey = scopedThreadKey(ref);
-          if (!(threadKey in state.byThreadKey)) return state;
+          if (
+            !(threadKey in state.byThreadKey) &&
+            !(threadKey in state.userActionRevisionByThreadKey)
+          ) {
+            return state;
+          }
           const { [threadKey]: _removed, ...rest } = state.byThreadKey;
-          return { byThreadKey: rest };
+          const { [threadKey]: _revision, ...userActionRevisionByThreadKey } =
+            state.userActionRevisionByThreadKey;
+          return { byThreadKey: rest, userActionRevisionByThreadKey };
         }),
     }),
     {
@@ -354,7 +596,13 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
-      partialize: (state) => ({ byThreadKey: state.byThreadKey }),
+      partialize: (state) => ({
+        byThreadKey: Object.fromEntries(
+          Object.entries(state.byThreadKey).filter(
+            ([threadKey]) => !isPullRequestsPanelKey(threadKey),
+          ),
+        ),
+      }),
       migrate: migratePersistedRightPanelState,
     },
   ),
@@ -383,5 +631,14 @@ export function selectActiveRightPanelSurface(
 ): RightPanelSurface | null {
   const state = selectThreadRightPanelState(byThreadKey, ref);
   if (!state.isOpen) return null;
+  return selectSelectedRightPanelSurface(byThreadKey, ref);
+}
+
+/** The selected surface even while the panel is hidden, so a layout control can restore it. */
+export function selectSelectedRightPanelSurface(
+  byThreadKey: Record<string, ThreadRightPanelState>,
+  ref: ScopedThreadRef | null | undefined,
+): RightPanelSurface | null {
+  const state = selectThreadRightPanelState(byThreadKey, ref);
   return state.surfaces.find((surface) => surface.id === state.activeSurfaceId) ?? null;
 }

@@ -76,6 +76,16 @@ const projectionSnapshotQueryLayer = Layer.succeed(
   ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   {
     getCommandReadModel: () => Effect.die("unexpected getCommandReadModel call"),
+    getUserInputActivity: () => Effect.die("unexpected getUserInputActivity call"),
+    listActivitiesByKind: () => Effect.die("unexpected listActivitiesByKind call"),
+    listThreadsWithPullRequests: () => Effect.die("unexpected listThreadsWithPullRequests call"),
+    getDeletedWorktreeThreads: () => Effect.die("unexpected getDeletedWorktreeThreads call"),
+    getEventReplayStats: () => Effect.die("unexpected getEventReplayStats call"),
+    getProjectShells: () => Effect.die("unexpected getProjectShells call"),
+    getImportedAgentSessionSources: () =>
+      Effect.die("unexpected getImportedAgentSessionSources call"),
+    getThreadRuntimeContext: () => Effect.die("unexpected getThreadRuntimeContext call"),
+    getTurnStartMessage: () => Effect.die("unexpected getTurnStartMessage call"),
     getSnapshot: () => Effect.die("unexpected getSnapshot call"),
     getShellSnapshot: () => Effect.die("unexpected getShellSnapshot call"),
     getArchivedShellSnapshot: () => Effect.die("unexpected getArchivedShellSnapshot call"),
@@ -166,9 +176,9 @@ describe("GenerationService registry sharing (the increment's #1 trap)", () => {
         Effect.provide(
           generationServiceLayer({ pollIntervalMs: 50_000 }).pipe(
             Layer.provide(inertProviderLayer),
+            Layer.provideMerge(InfraLayer),
           ),
         ),
-        Effect.provide(InfraLayer),
       ),
   );
 
@@ -197,13 +207,16 @@ describe("GenerationService registry sharing (the increment's #1 trap)", () => {
             prompt: "registry sharing barrel (should be invisible)",
             parameters: {},
           });
-        }).pipe(Effect.provide(writeLayer), Effect.provide(InfraLayer));
+        }).pipe(Effect.provide(writeLayer.pipe(Layer.provideMerge(InfraLayer))));
 
         const outcome = yield* dispatchGenerationList(readSession, projectId).pipe(
           Effect.provide(
-            Layer.mergeAll(readLayer, projectionSnapshotQueryLayer, fakeServerSecretStoreLayer),
+            Layer.mergeAll(
+              readLayer,
+              projectionSnapshotQueryLayer,
+              fakeServerSecretStoreLayer,
+            ).pipe(Layer.provideMerge(InfraLayer)),
           ),
-          Effect.provide(InfraLayer),
         );
 
         expect(outcome._tag).toBe("ok");

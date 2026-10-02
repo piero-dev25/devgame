@@ -11,9 +11,13 @@ import {
   ThreadId,
   type GeneratedAsset,
 } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { McpProtocol, McpSchema, McpServer } from "effect/unstable/ai";
 import {
@@ -24,8 +28,11 @@ import {
   HttpServerResponse,
 } from "effect/unstable/http";
 
+import * as ServerConfig from "../config.ts";
+import * as DeviceService from "../device/DeviceService.ts";
 import * as GenerationService from "../generation/GenerationService.ts";
-import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
@@ -35,6 +42,7 @@ const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
 const tabId = PreviewTabId.make("tab-mcp-test");
 const alternateTabId = PreviewTabId.make("tab-mcp-alternate");
+const decodeJsonText = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 const invocation = {
   environmentId,
   threadId,
@@ -45,6 +53,8 @@ const invocation = {
 };
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
+  clientCapabilities: {},
+  clientInfo: { name: "mcp-test", version: "1.0.0" },
   protocolVersion: "2025-06-18",
   initializePayload: {
     protocolVersion: "2025-06-18",
@@ -55,8 +65,73 @@ const client = McpSchema.McpServerClient.of({
 });
 const TestLayer = McpHttpServer.PreviewToolkitRegistrationLive.pipe(
   Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer))),
+  Layer.provideMerge(PreviewAutomationBroker.layer),
+  Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-http-server-test-" })),
+  Layer.provideMerge(NodeServices.layer),
 );
+const PullRequestsTestLayer = McpHttpServer.PullRequestsToolkitRegistrationLive.pipe(
+  Layer.provideMerge(McpServer.McpServer.layer),
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(ProjectionSnapshotQuery)({
+        getThreadShellById: () => Effect.succeedNone,
+      }),
+      Layer.mock(OrchestrationEngineService)({}),
+      NodeServices.layer,
+    ),
+  ),
+);
+
+const snapshotResult = {
+  url: "http://example.test/",
+  title: "Example",
+  loading: false,
+  visibleText: "Example",
+  interactiveElements: [],
+  accessibilityTree: {},
+  consoleEntries: [],
+  networkEntries: [],
+  actionTimeline: [],
+  screenshot: {
+    mimeType: "image/png",
+    data: Buffer.from("png").toString("base64"),
+    width: 10,
+    height: 5,
+  },
+};
+
+/** Answers every snapshot request on a fresh broker host with the given result. */
+const serveSnapshots = (clientId: string, result: unknown) =>
+  Effect.gen(function* () {
+    const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+    const connected = yield* Deferred.make<void>();
+    const inputs: Array<unknown> = [];
+    const events = yield* broker.connect({ clientId, environmentId });
+    yield* Stream.runForEach(events, (event) => {
+      if (event.type === "connected") return Deferred.succeed(connected, undefined);
+      inputs.push(event.request.input);
+      return broker.respond({
+        clientId,
+        connectionId: event.connectionId,
+        requestId: event.request.requestId,
+        ok: true,
+        result,
+      });
+    }).pipe(Effect.forkScoped);
+    yield* Deferred.await(connected);
+    return inputs;
+  });
+
+const callSnapshot = (args: Record<string, unknown>) =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    return yield* server
+      .callTool({ name: "preview_snapshot", arguments: args })
+      .pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+  });
 
 it("normalizes empty successful notification responses to accepted", () => {
   const notificationResponse = McpHttpServer.normalizeMcpHttpResponse(
@@ -70,48 +145,547 @@ it("normalizes empty successful notification responses to accepted", () => {
   expect(resultResponse.status).toBe(200);
 });
 
-it.effect("returns bounded structural preview snapshot failures", () =>
+it.effect.each([{}, { includeImage: false }])(
+  "returns bounded structural preview snapshot failures %#",
+  (input) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const server = yield* McpServer.McpServer;
+        const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+        const events = yield* broker.connect({
+          clientId: "mcp-failure-client",
+          environmentId,
+        });
+        yield* Stream.runForEach(events, (event) =>
+          event.type === "connected"
+            ? Effect.void
+            : broker.respond({
+                clientId: "mcp-failure-client",
+                connectionId: event.connectionId,
+                requestId: event.request.requestId,
+                ok: false,
+                error: {
+                  _tag: "PreviewAutomationExecutionError",
+                  message: "sensitive renderer failure",
+                  detail: { consoleOutput: "sensitive browser output" },
+                },
+              }),
+        ).pipe(Effect.forkScoped);
+        yield* Effect.yieldNow;
+
+        const snapshot = yield* server
+          .callTool({ name: "preview_snapshot", arguments: input })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+
+        const message = "Preview automation snapshot failed on client mcp-failure-client.";
+        expect(snapshot.isError).toBe(true);
+        expect(snapshot.content).toEqual([
+          { type: "text", text: `Preview snapshot failed: ${message}` },
+        ]);
+        expect(snapshot.structuredContent).toEqual({
+          error: {
+            _tag: "PreviewAutomationExecutionError",
+            operation: "snapshot",
+            failureCount: 1,
+            message,
+          },
+        });
+      }),
+    ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect.each([
+  { args: {}, advice: "No active preview tab was found for snapshot. Call preview_open first." },
+  {
+    args: { tabId: alternateTabId },
+    advice: `Preview tab ${alternateTabId} was not found for snapshot. Omit tabId to use the current tab, or call preview_open.`,
+  },
+])("tells the agent to open a tab when the snapshot has none $args", ({ args, advice }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const connected = yield* Deferred.make<void>();
+      const events = yield* broker.connect({ clientId: "mcp-no-tab-client", environmentId });
+      yield* Stream.runForEach(events, (event) =>
+        event.type === "connected"
+          ? Deferred.succeed(connected, undefined)
+          : broker.respond({
+              clientId: "mcp-no-tab-client",
+              connectionId: event.connectionId,
+              requestId: event.request.requestId,
+              ok: false,
+              error: { _tag: "PreviewAutomationTabNotFoundError", message: "no tab" },
+            }),
+      ).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
+
+      const snapshot = yield* callSnapshot(args);
+
+      expect(snapshot.isError).toBe(true);
+      expect(snapshot.content).toEqual([
+        { type: "text", text: `Preview snapshot failed: ${advice}` },
+      ]);
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("tells the agent how to fall back when no desktop app can run the snapshot", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* callSnapshot({});
+
+    expect(snapshot.isError).toBe(true);
+    const [text] = snapshot.content;
+    expect(text?.type === "text" ? text.text : "").toContain(
+      "use a headless browser from the shell",
+    );
+    expect(snapshot.structuredContent).toMatchObject({
+      error: { _tag: "PreviewAutomationNoAvailableHostError" },
+    });
+  }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect.each([
+  { mode: "default", input: {}, images: true },
+  { mode: "explicit image", input: { includeImage: true }, images: true },
+  { mode: "text only", input: { includeImage: false }, images: false },
+])("returns fresh $mode snapshots on repeated MCP calls", ({ input, images }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
       const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
-      const events = yield* broker.connect({
-        clientId: "mcp-failure-client",
-        environmentId,
-      });
-      yield* Stream.runForEach(events, (event) =>
-        event.type === "connected"
-          ? Effect.void
-          : broker.respond({
-              clientId: "mcp-failure-client",
-              connectionId: event.connectionId,
-              requestId: event.request.requestId,
-              ok: false,
-              error: {
-                _tag: "PreviewAutomationExecutionError",
-                message: "sensitive renderer failure",
-                detail: { consoleOutput: "sensitive browser output" },
-              },
-            }),
-      ).pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+      const connected = yield* Deferred.make<void>();
+      const png =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+      const page = {
+        url: "http://example.test/",
+        loading: false,
+        visibleText: "Save your changes",
+        interactiveElements: [
+          {
+            tag: "button",
+            role: "button",
+            name: "Save",
+            selector: "#save",
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 10,
+          },
+        ],
+        accessibilityTree: { role: "document", name: "Example" },
+        consoleEntries: [],
+        networkEntries: [],
+        actionTimeline: [],
+      };
+      const screenshot = { mimeType: "image/png", width: 1, height: 1 };
+      let requests = 0;
+      const events = yield* broker.connect({ clientId: "mcp-image-option-client", environmentId });
+      yield* Stream.runForEach(events, (event) => {
+        if (event.type === "connected") return Deferred.succeed(connected, undefined);
+        requests += 1;
+        expect(event.request).toMatchObject({
+          operation: "snapshot",
+          tabId: alternateTabId,
+          threadId,
+        });
+        expect(event.request.input).toEqual({});
+        return broker.respond({
+          clientId: "mcp-image-option-client",
+          connectionId: event.connectionId,
+          requestId: event.request.requestId,
+          ok: true,
+          result: {
+            ...page,
+            title: `Snapshot ${requests}`,
+            screenshot: { ...screenshot, data: png },
+          },
+        });
+      }).pipe(Effect.forkScoped);
+      yield* Deferred.await(connected);
 
-      const snapshot = yield* server
-        .callTool({ name: "preview_snapshot", arguments: {} })
+      for (const call of [1, 2, 3, 4, 5, 6]) {
+        const snapshot = yield* server
+          .callTool({
+            name: "preview_snapshot",
+            arguments: { ...input, tabId: alternateTabId },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        const metadata = { ...page, title: `Snapshot ${call}`, screenshot };
+        const { accessibilityTree: _tree, ...boundedMetadata } = metadata;
+        expect(snapshot.isError).toBe(false);
+        expect(snapshot.structuredContent).toEqual({
+          ...boundedMetadata,
+          omitted: ["accessibilityTree (use interactiveElements locators or preview_evaluate)"],
+        });
+        const [identity, text, ...rest] = snapshot.content;
+        expect(identity?.type === "text" ? decodeJsonText(identity.text) : null).toEqual({
+          url: page.url,
+        });
+        expect(text?.type === "text" ? decodeJsonText(text.text) : null).toEqual(boundedMetadata);
+        expect(rest).toEqual([
+          {
+            type: "text",
+            text: "Snapshot text was bounded. Omitted: accessibilityTree (use interactiveElements locators or preview_evaluate).",
+          },
+          ...(images
+            ? [
+                {
+                  type: "image",
+                  mimeType: "image/png",
+                  data: new Uint8Array(Buffer.from(png, "base64")),
+                },
+              ]
+            : []),
+        ]);
+      }
+
+      // Output selection belongs to this call, not the MCP session's history.
+      const nextDefault = yield* server
+        .callTool({
+          name: "preview_snapshot",
+          arguments: { tabId: alternateTabId },
+        })
         .pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
+      expect(nextDefault.content.map((content) => content.type)).toEqual([
+        "text",
+        "text",
+        "text",
+        "image",
+      ]);
+      expect(nextDefault.structuredContent).toMatchObject({ title: "Snapshot 7", screenshot });
+      expect(nextDefault.structuredContent).not.toHaveProperty("accessibilityTree");
+      expect(requests).toBe(7);
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("rejects non-boolean snapshot image options before selecting a browser host", () =>
+  Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    for (const includeImage of ["false", 0, null]) {
+      const result = yield* server
+        .callTool({
+          name: "preview_snapshot",
+          arguments: { includeImage },
+        })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([{ type: "text", text: "Preview snapshot failed: AiError." }]);
+      expect(result.structuredContent).toEqual({
+        error: { _tag: "AiError", operation: "snapshot", failureCount: 1 },
+      });
+    }
+  }).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("saves the snapshot PNG on request and reports its path", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const inputs = yield* serveSnapshots("mcp-save-client", snapshotResult);
+
+      const snapshot = yield* callSnapshot({ save: true });
+
+      expect(snapshot.isError).toBe(false);
+      // The browser never receives the server-only `save` flag.
+      expect(inputs).toEqual([{}]);
+      const structured = snapshot.structuredContent as { readonly screenshotPath?: string };
+      const screenshotPath = structured.screenshotPath;
+      expect(typeof screenshotPath).toBe("string");
+      expect(path.dirname(screenshotPath!)).toBe(config.browserArtifactsDir);
+      expect(path.basename(screenshotPath!)).toMatch(
+        /^browser-screenshot-example-test-[0-9a-z]+-[0-9a-f]{8}\.png$/,
+      );
+      expect(Buffer.from(yield* fileSystem.readFile(screenshotPath!)).toString()).toBe("png");
+      const [, text] = snapshot.content;
+      expect(text?.type === "text" ? text.text : "").toContain(screenshotPath);
+
+      const unsaved = yield* callSnapshot({});
+      expect(unsaved.structuredContent).not.toHaveProperty("screenshotPath");
+
+      // A save without the image skips the page dump.
+      const pathOnly = yield* callSnapshot({ save: true, includeImage: false });
+      const saved = pathOnly.structuredContent as { readonly screenshotPath: string };
+      expect(saved).toEqual({ url: snapshotResult.url, screenshotPath: expect.any(String) });
+      expect(Buffer.from(yield* fileSystem.readFile(saved.screenshotPath)).toString()).toBe("png");
+      const [only, ...others] = pathOnly.content;
+      expect(others).toEqual([]);
+      expect(only?.type === "text" ? decodeJsonText(only.text) : null).toEqual(saved);
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("reports a tagged error when the screenshot cannot be saved", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      // A regular file where the artifacts directory should be makes every write fail.
+      yield* fileSystem.writeFileString(config.browserArtifactsDir, "");
+      yield* serveSnapshots("mcp-save-failure-client", snapshotResult);
+
+      const snapshot = yield* callSnapshot({ save: true });
 
       expect(snapshot.isError).toBe(true);
-      expect(snapshot.content).toEqual([{ type: "text", text: "Preview snapshot failed." }]);
+      expect(snapshot.content).toEqual([
+        { type: "text", text: "Preview snapshot failed: PreviewScreenshotSaveError." },
+      ]);
       expect(snapshot.structuredContent).toEqual({
-        error: {
-          _tag: "PreviewAutomationExecutionError",
-          operation: "snapshot",
-          failureCount: 1,
-        },
+        error: { _tag: "PreviewScreenshotSaveError", operation: "snapshot", failureCount: 1 },
       });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect(
+  "registers the pull request toolkit and surfaces a missing capability as a tool error",
+  () =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const names = server.tools.map(({ tool }) => tool.name);
+      expect(names).toEqual(
+        expect.arrayContaining([
+          "link_pull_request",
+          "unlink_pull_request",
+          "list_thread_pull_requests",
+        ]),
+      );
+      const linkTool = server.tools.find(({ tool }) => tool.name === "link_pull_request");
+      expect(linkTool?.tool.annotations?.idempotentHint).toBe(true);
+      expect(linkTool?.tool.annotations?.openWorldHint).toBe(false);
+      expect(linkTool?.tool.description).toContain("Register every pull request you open");
+
+      const denied = yield* server
+        .callTool({ name: "list_thread_pull_requests", arguments: {} })
+        .pipe(
+          // A preview-only credential: the token predates the toolkit or was minted elsewhere.
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+      expect(denied.isError).toBe(true);
+      expect(denied.content).toEqual([
+        { type: "text", text: "MCP credential does not grant the pull-requests capability." },
+      ]);
+    }).pipe(Effect.provide(PullRequestsTestLayer)),
+);
+
+it.effect("keeps the snapshot text under the agent's output ceiling", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      // Mirrors the real failure: a [role] container whose innerText is the whole
+      // project list, repeated for several elements, plus a big AX tree.
+      const pageText = "/Users/theo/Code/project\nClaude, Codex · 79 threads\n".repeat(600);
+      const element = (name: string, index: number) => ({
+        tag: "div",
+        role: "presentation",
+        name,
+        selector: `div:nth-of-type(${index})`,
+        x: 0,
+        y: 0,
+        width: 10,
+        height: 10,
+      });
+      const oversized = {
+        ...snapshotResult,
+        visibleText: pageText,
+        interactiveElements: [
+          element(pageText, 1),
+          element(pageText, 2),
+          element(pageText, 3),
+          element("Continue", 4),
+        ],
+        accessibilityTree: { nodes: Array.from({ length: 2_000 }, (_, i) => ({ nodeId: `${i}` })) },
+        consoleEntries: Array.from({ length: 100 }, (_, i) => ({
+          level: "log",
+          text: `entry ${i}`,
+          timestamp: "t",
+        })),
+      };
+      yield* serveSnapshots("mcp-bounded-client", oversized);
+
+      const snapshot = yield* callSnapshot({ includeImage: false });
+
+      expect(snapshot.isError).toBe(false);
+      const [identity, text, notice] = snapshot.content;
+      expect(identity?.type === "text" ? decodeJsonText(identity.text) : null).toEqual({
+        url: oversized.url,
+      });
+      expect(text?.type).toBe("text");
+      const body = text?.type === "text" ? text.text : "";
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
+        McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
+      );
+      const parsed = decodeJsonText(body) as {
+        readonly accessibilityTree?: unknown;
+        readonly visibleText: string;
+        readonly interactiveElements: ReadonlyArray<{ readonly name: string }>;
+        readonly consoleEntries: ReadonlyArray<{ readonly text: string }>;
+      };
+      expect(parsed.accessibilityTree).toBeUndefined();
+      expect(parsed.visibleText.length).toBeLessThanOrEqual(8_001);
+      expect(parsed.interactiveElements).toHaveLength(4);
+      expect(parsed.interactiveElements[0]?.name.length).toBeLessThanOrEqual(201);
+      expect(parsed.interactiveElements[3]?.name).toBe("Continue");
+      expect(parsed.consoleEntries).toHaveLength(40);
+      expect(parsed.consoleEntries[0]?.text).toBe("entry 60");
+      expect(notice?.type === "text" ? notice.text : "").toContain("accessibilityTree");
+      expect(notice?.type === "text" ? notice.text : "").toContain("60 older console entries");
+      // Claude Code shows the model structuredContent instead of the text, so it is bounded too.
+      expect(snapshot.structuredContent).toEqual({
+        ...parsed,
+        omitted: expect.arrayContaining(["60 older console entries"]),
+      });
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("bounds the snapshot text even when nothing but logs and the title are large", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const oversized = {
+        ...snapshotResult,
+        title: "t".repeat(70_000),
+        interactiveElements: [],
+        consoleEntries: [{ level: "log", text: "x".repeat(70_000), timestamp: "t" }],
+      };
+      yield* serveSnapshots("mcp-bounded-logs-client", oversized);
+
+      const snapshot = yield* callSnapshot({ includeImage: false });
+
+      const [, text] = snapshot.content;
+      const body = text?.type === "text" ? text.text : "";
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
+        McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
+      );
+      const parsed = decodeJsonText(body) as {
+        readonly title: string;
+        readonly consoleEntries: ReadonlyArray<{ readonly text: string }>;
+      };
+      expect(parsed.title.length).toBe(2_049);
+      expect(parsed.consoleEntries[0]?.text.length).toBe(501);
+      const notice = snapshot.content[2];
+      const noticeText = notice?.type === "text" ? notice.text : "";
+      expect(noticeText).toContain("url or title after 2048 characters");
+      expect(noticeText).toContain("console entries text after 500 characters");
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("bounds page text made of wide characters before dropping locators", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      // The character caps alone leave 8,000 three-byte characters, about 24 KB.
+      yield* serveSnapshots("mcp-wide-text-client", {
+        ...snapshotResult,
+        visibleText: "界".repeat(9_000),
+        interactiveElements: Array.from({ length: 20 }, (_, i) => ({
+          tag: "button",
+          role: "button",
+          name: `Button ${i}`,
+          selector: `#button-${i}`,
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10,
+        })),
+      });
+
+      const snapshot = yield* callSnapshot({ includeImage: false });
+
+      const [, text, notice] = snapshot.content;
+      const body = text?.type === "text" ? text.text : "";
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
+        McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
+      );
+      const parsed = decodeJsonText(body) as {
+        readonly visibleText: string;
+        readonly interactiveElements: ReadonlyArray<unknown>;
+      };
+      expect(parsed.visibleText).toMatch(/^界+…$/);
+      expect(parsed.interactiveElements).toHaveLength(20);
+      expect(notice?.type === "text" ? notice.text : "").toContain(
+        "visibleText after 4000 characters",
+      );
+    }),
+  ).pipe(Effect.provide(TestLayer)),
+);
+
+it.effect("sheds log entries before locators when every list is full", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const long = "x".repeat(2_000);
+      const oversized = {
+        ...snapshotResult,
+        interactiveElements: Array.from({ length: 20 }, (_, i) => ({
+          tag: "button",
+          role: "button",
+          name: `Button ${i}`,
+          selector: `#button-${i}`,
+          x: 0,
+          y: 0,
+          width: 10,
+          height: 10,
+        })),
+        consoleEntries: Array.from({ length: 200 }, () => ({
+          level: long,
+          text: long,
+          timestamp: long,
+          source: long,
+        })),
+        networkEntries: Array.from({ length: 200 }, () => ({
+          url: long,
+          method: long,
+          status: 200,
+          failed: false,
+          errorText: long,
+          timestamp: long,
+        })),
+        actionTimeline: Array.from({ length: 200 }, () => ({
+          id: long,
+          action: long,
+          status: "succeeded",
+          startedAt: long,
+          completedAt: long,
+          error: long,
+        })),
+      };
+      yield* serveSnapshots("mcp-full-logs-client", oversized);
+
+      const snapshot = yield* callSnapshot({ includeImage: false });
+
+      const [, text, notice] = snapshot.content;
+      const body = text?.type === "text" ? text.text : "";
+      expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(
+        McpHttpServer.MAX_SNAPSHOT_TEXT_BYTES,
+      );
+      const parsed = decodeJsonText(body) as {
+        readonly interactiveElements: ReadonlyArray<unknown>;
+        readonly consoleEntries: ReadonlyArray<unknown>;
+        readonly networkEntries: ReadonlyArray<unknown>;
+        readonly actionTimeline: ReadonlyArray<unknown>;
+      };
+      // Locators survive; the log lists take the cut.
+      expect(parsed.interactiveElements).toHaveLength(20);
+      expect(
+        parsed.consoleEntries.length + parsed.networkEntries.length + parsed.actionTimeline.length,
+      ).toBeLessThan(120);
+      const noticeText = notice?.type === "text" ? notice.text : "";
+      expect(noticeText).toContain("40 of 40 actionTimeline");
+      expect(noticeText).not.toMatch(/\d+ of \d+ interactiveElements/);
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -175,6 +749,10 @@ it.effect("registers annotated tools and preserves authenticated request context
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
       const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
+      const toolIcon = {
+        _tag: "website" as const,
+        pageUrl: "http://example.test/",
+      };
       const routedRequests: Array<{
         readonly operation: string;
         readonly tabId?: string | undefined;
@@ -193,33 +771,19 @@ it.effect("registers annotated tools and preserves authenticated request context
           ok: true,
           result:
             event.request.operation === "snapshot"
-              ? {
-                  url: "http://example.test/",
-                  title: "Example",
-                  loading: false,
-                  visibleText: "Example",
-                  interactiveElements: [],
-                  accessibilityTree: {},
-                  consoleEntries: [],
-                  networkEntries: [],
-                  actionTimeline: [],
-                  screenshot: {
-                    mimeType: "image/png",
-                    data: Buffer.from("png").toString("base64"),
-                    width: 10,
-                    height: 5,
-                  },
-                }
-              : event.request.operation === "press"
-                ? undefined
-                : {
-                    available: true,
-                    visible: true,
-                    tabId,
-                    url: "http://example.test/",
-                    title: "Example",
-                    loading: false,
-                  },
+              ? snapshotResult
+              : event.request.operation === "evaluate"
+                ? ["Connect", "Continue"]
+                : event.request.operation === "press"
+                  ? undefined
+                  : {
+                      available: true,
+                      visible: true,
+                      tabId,
+                      url: "http://example.test/",
+                      title: "Example",
+                      loading: false,
+                    },
         });
       }).pipe(Effect.forkScoped);
       yield* Effect.yieldNow;
@@ -238,6 +802,11 @@ it.effect("registers annotated tools and preserves authenticated request context
       expect(clickTool?.tool.annotations?.readOnlyHint).toBe(false);
       expect(clickTool?.tool.annotations?.destructiveHint).toBe(true);
       expect(clickTool?.tool.annotations?.openWorldHint).toBe(true);
+      expect(clickTool?.tool.outputSchema).toMatchObject({
+        type: "object",
+        additionalProperties: true,
+        description: "The preview action completed successfully.",
+      });
 
       const navigateTool = server.tools.find(({ tool }) => tool.name === "preview_navigate");
       expect(navigateTool?.tool.annotations?.destructiveHint).toBe(false);
@@ -279,15 +848,44 @@ it.effect("registers annotated tools and preserves authenticated request context
         alternateTabId,
       );
 
-      const press = yield* server
-        .callTool({ name: "preview_press", arguments: { key: "Enter" } })
+      // Arrays and primitives are wrapped so structuredContent stays a JSON object.
+      // Claude Code rejects the whole result otherwise.
+      const evaluateTool = server.tools.find(({ tool }) => tool.name === "preview_evaluate");
+      expect(evaluateTool?.tool.outputSchema).toMatchObject({ type: "object" });
+      const evaluated = yield* server
+        .callTool({ name: "preview_evaluate", arguments: { expression: "buttons()" } })
         .pipe(
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      expect(press.isError).toBe(false);
-      expect(press.structuredContent).toBeNull();
-      expect(press.content).toEqual([{ type: "text", text: "null" }]);
+      expect(evaluated.isError).toBe(false);
+      expect(evaluated.structuredContent).toEqual({ value: ["Connect", "Continue"], toolIcon });
+      const evaluatedText = evaluated.content[0];
+      expect(evaluatedText?.type === "text" ? decodeJsonText(evaluatedText.text) : null).toEqual({
+        toolIcon,
+        value: ["Connect", "Continue"],
+      });
+
+      const actionRequests = [
+        { name: "preview_click", arguments: { x: 10, y: 10 } },
+        { name: "preview_type", arguments: { text: "Hello" } },
+        { name: "preview_press", arguments: { key: "Enter" } },
+        { name: "preview_scroll", arguments: { deltaY: 100 } },
+        { name: "preview_wait_for", arguments: { text: "Example" } },
+      ];
+      for (const request of actionRequests) {
+        const result = yield* server
+          .callTool(request)
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+        expect(result.isError).toBe(false);
+        expect(result.structuredContent).toEqual({ toolIcon });
+        expect(routedRequests.at(-1)?.operation).toBe("status");
+        const text = result.content[0];
+        expect(text?.type === "text" ? decodeJsonText(text.text) : null).toEqual({ toolIcon });
+      }
     }),
   ).pipe(Effect.provide(TestLayer)),
 );
@@ -329,39 +927,20 @@ const fakeGenerationService: GenerationService.GenerationServiceShape = {
   getAssetByJobId: () => Effect.die("unexpected getAssetByJobId call"),
 };
 
-const fakeProjectionSnapshotQuery: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"] = {
-  getCommandReadModel: () => Effect.die("unexpected getCommandReadModel call"),
-  getSnapshot: () => Effect.die("unexpected getSnapshot call"),
-  getShellSnapshot: () => Effect.die("unexpected getShellSnapshot call"),
-  getArchivedShellSnapshot: () => Effect.die("unexpected getArchivedShellSnapshot call"),
-  searchThreads: () => Effect.die("unexpected searchThreads call"),
-  getSnapshotSequence: () => Effect.die("unexpected getSnapshotSequence call"),
-  getCounts: () => Effect.die("unexpected getCounts call"),
-  getActiveProjectByWorkspaceRoot: () =>
-    Effect.die("unexpected getActiveProjectByWorkspaceRoot call"),
-  getProjectShellById: () => Effect.die("unexpected getProjectShellById call"),
-  getFirstActiveThreadIdByProjectId: () =>
-    Effect.die("unexpected getFirstActiveThreadIdByProjectId call"),
-  getActiveSpacesForProject: () => Effect.die("unexpected getActiveSpacesForProject call"),
-  getSpaceProjectId: () => Effect.die("unexpected getSpaceProjectId call"),
-  getThreadCheckpointContext: () => Effect.die("unexpected getThreadCheckpointContext call"),
-  getFullThreadDiffContext: () => Effect.die("unexpected getFullThreadDiffContext call"),
+// Only the thread -> project lookup is reachable; every other method dies if called.
+const FakeProjectionSnapshotQueryLive = Layer.mock(ProjectionSnapshotQuery)({
   getThreadShellById: (threadId) =>
     Effect.succeed(
       threadId === generationThreadId
         ? Option.some({ id: threadId, projectId: generationProjectId } as never)
         : Option.none(),
     ),
-  getThreadDetailById: () => Effect.die("unexpected getThreadDetailById call"),
-  getThreadDetailSnapshot: () => Effect.die("unexpected getThreadDetailSnapshot call"),
-};
+});
 
 const makeGenerationInspectTestLayer = (imageHandler: Parameters<typeof HttpClient.make>[0]) =>
   McpHttpServer.GenerationInspectRegistrationLive.pipe(
     Layer.provide(Layer.succeed(GenerationService.GenerationService, fakeGenerationService)),
-    Layer.provide(
-      Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, fakeProjectionSnapshotQuery),
-    ),
+    Layer.provide(FakeProjectionSnapshotQueryLive),
     Layer.provide(Layer.succeed(HttpClient.HttpClient, HttpClient.make(imageHandler))),
     Layer.provideMerge(McpServer.McpServer.layer),
   );
@@ -405,6 +984,41 @@ it.effect(
     ),
 );
 
+// inspect_generation failures go through upstream's shared imageToolFailure:
+// a credential without "generation" fails with the contracts
+// McpCapabilityUnavailableError, which the generation toolkit translates, and
+// the tool result carries only that tag and a fixed message.
+it.effect("reports a denied generation capability as a tagged inspect_generation failure", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const result = yield* server
+        .callTool({ name: "inspect_generation", arguments: { assetId: succeededAssetId } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...generationInvocation,
+            capabilities: new Set(["preview", "pull-requests"] as const),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toEqual({
+        error: {
+          _tag: "GenerationCapabilityUnavailableError",
+          operation: "inspect_generation",
+          failureCount: 1,
+        },
+      });
+      expect(result.content).toMatchObject([{ type: "text", text: "inspect_generation failed." }]);
+    }),
+  ).pipe(
+    Effect.provide(
+      makeGenerationInspectTestLayer(() => Effect.die("unexpected preview image fetch")),
+    ),
+  ),
+);
+
 it.effect(
   "degrades to structured-content-only (no image block, isError:false) when the preview image fetch fails",
   () =>
@@ -433,32 +1047,13 @@ it.effect(
     ),
 );
 
-// Increment #155 (docs/v2/specs/increment-155-mcp-toolkit-registration.md):
-// PRODUCTION-topology guard. Every test ABOVE this point builds an ANCESTOR
-// `McpServer.McpServer.layer` topology (`TestLayer`, `makeGenerationInspectTestLayer`
-// both do `Layer.provideMerge(McpServer.McpServer.layer)`) — the SAME bare
-// `McpServer.layer` reference effect's own `McpServer.toolkit(x)` self-provides
-// (effect McpServer.js:951: `toolkit = t => effectDiscard(registerToolkit(t)).
-// pipe(provide(McpServer.layer))`). Effect memoizes a layer by REFERENCE, so
-// those tests' registrations land in the SAME instance as any `toolkit(x)`
-// self-provide would — tools appear whether the registration used the BROKEN
-// `McpServer.toolkit` or the FIXED `McpServer.registerToolkit`. That is
-// precisely why the existing suite did not catch the bug: it is structurally
-// blind to this class of failure.
-//
-// This test instead builds the REAL exported `McpHttpServer.layer`, whose
-// `McpTransportLive = McpServer.layerHttp(...)` is built via
-// `layerWithProtocolState` — a DIFFERENT construction from the bare
-// `McpServer.layer` (effect McpServer.js:591 vs :590) — wrapped exactly the
-// way `server.ts` wraps it for the real HTTP server (`HttpRouter.serve`, see
-// server.ts's own `routesLayer`). A registration that self-provides its own
-// throwaway `McpServer` instance therefore serves an EMPTY tools/list here,
-// not a false green. `HttpRouter.serve`'s `Layer.provideMerge(appLayer)`
-// (HttpRouter.js:627) merges `McpHttpServer.layer`'s own output — which
-// includes the served `McpServer.McpServer` (via `layerWithProtocolState`'s
-// own `Layer.provideMerge(McpServer.layer)`, McpServer.js:594) — straight
-// into this test's ambient context, so `yield* McpServer.McpServer` below
-// reads the SAME instance the HTTP transport would actually serve.
+// PRODUCTION-topology guard. The tests above build an ancestor
+// `McpServer.McpServer.layer`; this one builds the REAL exported
+// `McpHttpServer.layer` (its `McpTransportLive = McpServer.layerHttp(...)`)
+// wrapped the way `server.ts` wraps it (`HttpRouter.serve`), so
+// `yield* McpServer.McpServer` reads the instance the HTTP transport serves.
+// Any registration that lands in a different McpServer instance shows up
+// here as a missing tool rather than a false green.
 const fakeMcpSessionRegistry: McpSessionRegistry.McpSessionRegistryShape = {
   issue: () => Effect.die("unexpected issue call"),
   resolve: () => Effect.die("unexpected resolve call"),
@@ -468,31 +1063,27 @@ const fakeMcpSessionRegistry: McpSessionRegistry.McpSessionRegistryShape = {
   revokeAll: Effect.die("unexpected revokeAll call"),
 };
 
-// Only what building the REAL `McpHttpServer.layer` graph actually needs at
-// LAYER-BUILD time: `McpSessionRegistry` (the auth middleware closure reads
-// it once, at construction — `McpHttpServer.ts`'s `makeMcpAuthMiddleware`),
-// and `GenerationService`/`ProjectionSnapshotQuery`/`HttpClient` for the two
-// MANUAL registrations (`registerPreviewSnapshot`, `registerInspectGeneration`)
-// which read their services directly in their own registration bodies —
-// same reasoning `makeGenerationInspectTestLayer` above already documents.
-// The DECLARATIVE toolkit handlers' own bare deps (`McpInvocationContext`,
-// `FileSystem`/`Path`/`ChildProcessSpawner`/`ServerSecretStore`/`ServerConfig`
-// for `import_generated_asset`) are never resolved here, deliberately: per
-// `Toolkit.toLayer`'s own signature (`RX` defaults to `never` for a plain
-// handler-function object, not an `Effect<Handlers, EX, RX>` — effect's
-// Toolkit.ts:98-103), those handlers' requirements are embedded in the
-// stored closures' OWN types, discharged only when a tool is actually
-// CALLED, never at registration/build time — this test never calls a tool,
-// only reads the registered tool LIST, so it never needs them.
+// What building the REAL `McpHttpServer.layer` graph needs at LAYER-BUILD
+// time: `McpSessionRegistry` (auth middleware), the services the manual
+// registrations read in their bodies (`registerPreviewSnapshot`: broker,
+// ServerConfig/FileSystem/Path; `registerDeviceScreenshot`: DeviceService;
+// `registerInspectGeneration`: GenerationService/ProjectionSnapshotQuery/
+// HttpClient) and the pull-request handlers' constructor services
+// (OrchestrationEngine, ProjectionSnapshotQuery, Crypto). Declarative handler
+// requirements are only discharged when a tool is called, which this test
+// never does; unused services are mocks that die if touched.
 const ProductionMcpDeps = Layer.mergeAll(
   Layer.succeed(McpSessionRegistry.McpSessionRegistry, fakeMcpSessionRegistry),
-  Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, fakeProjectionSnapshotQuery),
+  FakeProjectionSnapshotQueryLive,
+  Layer.mock(OrchestrationEngineService)({}),
+  Layer.mock(DeviceService.DeviceService)({}),
   Layer.succeed(
     HttpClient.HttpClient,
     HttpClient.make(() => Effect.die("unexpected HTTP call in production-topology test")),
   ),
-  PreviewAutomationBroker.layer.pipe(Layer.provide(NodeServices.layer)),
-);
+  PreviewAutomationBroker.layer,
+  ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-production-topology-test-" }),
+).pipe(Layer.provideMerge(NodeServices.layer));
 
 const ProductionMcpServerLayer = HttpRouter.serve(
   McpHttpServer.layer(
@@ -502,7 +1093,7 @@ const ProductionMcpServerLayer = HttpRouter.serve(
 ).pipe(Layer.provide(NodeHttpServer.layerTest));
 
 it.effect(
-  "PRODUCTION topology: the real McpHttpServer.layer (McpTransportLive/layerHttp, not an ancestor McpServer.layer) serves every generation + preview tool",
+  "PRODUCTION topology: the real McpHttpServer.layer serves every preview, pull-request, device and generation tool",
   () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -517,6 +1108,10 @@ it.effect(
             "inspect_generation",
             "preview_status",
             "preview_snapshot",
+            "link_pull_request",
+            "list_thread_pull_requests",
+            "device_list",
+            "device_screenshot",
           ]),
         );
       }),
@@ -534,16 +1129,21 @@ it.effect(
 // production-serving instance — a test that would have caught this exact
 // bug, since the old suite never inspected `inputSchema` at all.
 it.effect(
-  "PRODUCTION topology: every served tool's inputSchema has a top-level type:\"object\" (#155-B)",
+  'PRODUCTION topology: every served tool\'s inputSchema has a top-level type:"object" (#155-B)',
   () =>
     Effect.scoped(
       Effect.gen(function* () {
         const server = yield* McpServer.McpServer;
-        expect(server.tools.length).toBe(19);
+        // 14 preview + 3 pull-request + 4 device + 5 generation tools.
+        expect(server.tools.length).toBe(26);
         const offenders = server.tools
-          .filter(({ tool }) => (tool.inputSchema as { readonly type?: unknown })?.type !== "object")
+          .filter(
+            ({ tool }) => (tool.inputSchema as { readonly type?: unknown })?.type !== "object",
+          )
           .map(({ tool }) => tool.name);
-        expect(offenders, `tool(s) with a malformed inputSchema: ${offenders.join(", ")}`).toEqual([]);
+        expect(offenders, `tool(s) with a malformed inputSchema: ${offenders.join(", ")}`).toEqual(
+          [],
+        );
       }),
     ).pipe(Effect.provide(ProductionMcpServerLayer)),
 );

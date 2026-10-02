@@ -60,6 +60,13 @@ export function resolveFilesDockPanelView(input: {
   readonly routeContext: ThreadRouteContextValue;
   readonly activeThread: EnvironmentThread | null;
   readonly activeProject: EnvironmentProject | null;
+  /**
+   * The active tab is a chat attachment. Attachments live in the thread's
+   * attachment store, not the workspace, so they stay viewable while the
+   * project or its workspace is unavailable (upstream renders an attachment
+   * surface with an empty cwd in that case; this does the same).
+   */
+  readonly attachmentOpen?: boolean;
 }): FilesDockPanelView {
   if (input.routeContext.routeKind === "draft") {
     return { kind: "draft-empty" };
@@ -70,6 +77,17 @@ export function resolveFilesDockPanelView(input: {
   };
   const cwd = input.activeThread?.worktreePath ?? input.activeProject?.workspaceRoot;
   if (!input.activeProject || !cwd) {
+    if (input.attachmentOpen === true) {
+      return {
+        kind: "ready",
+        environmentId: input.routeContext.environmentId,
+        cwd: "",
+        projectName: input.activeProject?.title ?? "",
+        threadRef,
+        composerDraftTarget: threadRef,
+        previewPanelKey: `${scopedThreadKey(threadRef)}:`,
+      };
+    }
     return { kind: "loading" };
   }
   return {

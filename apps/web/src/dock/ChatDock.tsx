@@ -35,7 +35,7 @@
 // comment on why Diff went first), not started here.
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
-import { THREAD_SIDEBAR_DEFAULT_WIDTH } from "~/components/threadSidebarWidth";
+import { resolveInitialThreadSidebarWidth } from "~/components/threadSidebarWidth";
 import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
@@ -402,10 +402,11 @@ chatDockPanelRegistry.register({
  * now covers every surface spec-surfaces-as-dock-panels.md set out to
  * promote, plus Increment 2b.1's own addition.
  *
- * Sidebar's initial width is seeded from `THREAD_SIDEBAR_DEFAULT_WIDTH`
- * (`~/components/threadSidebarWidth.ts`, 256px), the SAME constant
- * `AppSidebarLayout`'s fixed sidebar already defaults to — not a re-guessed
- * number. No measured mock exists for the chat:diff:files split — dockview
+ * Sidebar's initial width is seeded from `resolveInitialThreadSidebarWidth`
+ * with no stored width and no viewport cap (`~/components/threadSidebarWidth.ts`,
+ * 256px): the SAME default `AppSidebarLayout`'s resizable sidebar starts
+ * at, not a re-guessed number. Upstream made the raw constant private, so
+ * the default is read through its public resolver. No measured mock exists for the chat:diff:files split — dockview
  * stretches this initial tree to fit the real container, so only the
  * RATIOS matter, not the absolute pixels.
  *
@@ -450,7 +451,7 @@ function presetPanelEntry(id: string, title: string): SerializedDockview["panels
 
 function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
-  const SIDEBAR_WIDTH = THREAD_SIDEBAR_DEFAULT_WIDTH;
+  const SIDEBAR_WIDTH = resolveInitialThreadSidebarWidth(null, Number.POSITIVE_INFINITY);
   const CHAT_WIDTH = 640;
   const DIFF_WIDTH = 400;
   const FILES_WIDTH = 400;
@@ -581,6 +582,8 @@ export type ChatDockProps = ChatDockRouteProps & {
   // see DockviewLayout.tsx's matching `className` prop, which this passes
   // straight through to.
   className?: string | undefined;
+  /** Forwarded to the ChatView inside `ChatPanel`; see `ThreadRouteContextValue.chatViewKey`. */
+  chatViewKey?: string | null | undefined;
 };
 
 /**
@@ -678,12 +681,14 @@ export function ChatDock(props: ChatDockProps) {
           environmentId: props.environmentId,
           threadId: props.threadId,
           draftId: props.draftId,
+          chatViewKey: props.chatViewKey ?? null,
         }
       : {
           routeKind: "server",
           environmentId: props.environmentId,
           threadId: props.threadId,
           threadSyncPhase: props.threadSyncPhase ?? null,
+          chatViewKey: props.chatViewKey ?? null,
         };
 
   return (

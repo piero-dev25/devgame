@@ -35,7 +35,7 @@ export interface UnityPairingHandoffDependencies {
   ) => Effect.Effect<{ readonly credential: string }, UnityPairingHandoffDependencyError>;
 }
 
-export class UnityPairingHandoffDependencyError extends Schema.TaggedErrorClass<UnityPairingHandoffDependencyError>()(
+export class UnityPairingHandoffDependencyError extends Schema.TaggedError<UnityPairingHandoffDependencyError>()(
   "UnityPairingHandoffDependencyError",
   {
     operation: Schema.Literals(["publisherLookup", "credentialMint"]),

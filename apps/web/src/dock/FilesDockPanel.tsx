@@ -58,12 +58,25 @@
  * `routeKind` EXPLICITLY, first, before anything else, and returns a
  * distinct `"draft-empty"` state for it — see `FilesDockPanel.test.ts` for
  * the red/green proof this doesn't fall through to a crash or stale data.
+ *
+ * UPSTREAM PROPS: `FilePreviewPanel` now also takes `selectedFilePending`
+ * (the active tab's unsaved-edit dot, from this store's `pendingPaths`),
+ * `workspaceMutationId` (derived from the thread, `threadWorkspaceMutationId.ts`)
+ * and an optional `attachment`. Chat attachments open as their own tabs in
+ * `fileExplorerStore` (upstream's `rightPanelStore.openAttachment`, moved
+ * there) and stay viewable while the workspace is unavailable.
  */
 import { useAtomValue } from "@effect/atom-react";
 import { FolderTree, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useContext } from "react";
 
-import { selectThreadFileExplorerState, useFileExplorerStore } from "~/fileExplorerStore";
+import type { ChatFileAttachment } from "@t3tools/contracts";
+
+import {
+  selectFileExplorerAttachment,
+  selectThreadFileExplorerState,
+  useFileExplorerStore,
+} from "~/fileExplorerStore";
 import { cn } from "~/lib/utils";
 import { primaryServerAvailableEditorsAtom, primaryServerKeybindingsAtom } from "~/state/server";
 import { useProject, useThread } from "~/state/entities";
@@ -71,6 +84,7 @@ import { useProject, useThread } from "~/state/entities";
 import { ThreadRouteContext } from "./ChatPanel";
 import type { PanelProps } from "./lib/types";
 import { resolveFilesDockPanelView } from "./resolveFilesDockPanelView";
+import { useThreadWorkspaceMutationId } from "./threadWorkspaceMutationId";
 
 const FilePreviewPanel = lazy(() => import("~/components/files/FilePreviewPanel"));
 
@@ -86,6 +100,8 @@ function FilesTabStrip(props: {
   openPaths: ReadonlyArray<string>;
   activePath: string | null;
   pendingPaths: ReadonlyArray<string>;
+  /** The attachment behind an `openPaths` entry, or `null` for a workspace path. */
+  attachmentFor: (entry: string) => ChatFileAttachment | null;
   onSelectExplorer: () => void;
   onSelectFile: (relativePath: string) => void;
   onCloseFile: (relativePath: string) => void;
@@ -108,6 +124,7 @@ function FilesTabStrip(props: {
       {props.openPaths.map((relativePath) => {
         const active = props.activePath === relativePath;
         const pending = props.pendingPaths.includes(relativePath);
+        const label = props.attachmentFor(relativePath)?.name ?? relativePath;
         return (
           <div
             key={relativePath}
@@ -122,14 +139,14 @@ function FilesTabStrip(props: {
               type="button"
               onClick={() => props.onSelectFile(relativePath)}
               className="max-w-40 truncate"
-              title={relativePath}
+              title={label}
             >
-              {fileBasename(relativePath)}
+              {fileBasename(label)}
             </button>
             <button
               type="button"
               onClick={() => props.onCloseFile(relativePath)}
-              aria-label={`Close ${relativePath}`}
+              aria-label={`Close ${label}`}
               className="relative flex size-4 shrink-0 items-center justify-center rounded hover:bg-accent"
             >
               {pending ? (
@@ -163,16 +180,31 @@ export default function FilesDockPanel(_props: PanelProps) {
   );
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
+  const workspaceMutationId = useThreadWorkspaceMutationId(activeThread);
+
+  // Read before the view resolves: an open attachment is viewable even while
+  // the workspace is unavailable, which changes what the view resolves to.
+  const serverThreadRef =
+    routeContext?.routeKind === "server"
+      ? { environmentId: routeContext.environmentId, threadId: routeContext.threadId }
+      : null;
+  const fileState = useFileExplorerStore((state) =>
+    selectThreadFileExplorerState(state.byThreadKey, serverThreadRef),
+  );
+  const activeAttachment = selectFileExplorerAttachment(fileState, fileState.activePath);
+  const attachmentFor = useCallback(
+    (entry: string) => selectFileExplorerAttachment(fileState, entry),
+    [fileState],
+  );
 
   const view = routeContext
-    ? resolveFilesDockPanelView({ routeContext, activeThread, activeProject })
+    ? resolveFilesDockPanelView({
+        routeContext,
+        activeThread,
+        activeProject,
+        attachmentOpen: activeAttachment !== null,
+      })
     : { kind: "loading" as const };
-
-  const fileState = useFileExplorerStore((state) =>
-    view.kind === "ready"
-      ? selectThreadFileExplorerState(state.byThreadKey, view.threadRef)
-      : selectThreadFileExplorerState(state.byThreadKey, null),
-  );
 
   const onSelectExplorer = useCallback(() => {
     if (view.kind !== "ready") return;
@@ -181,9 +213,14 @@ export default function FilesDockPanel(_props: PanelProps) {
   const onSelectFile = useCallback(
     (relativePath: string) => {
       if (view.kind !== "ready") return;
+      const attachment = attachmentFor(relativePath);
+      if (attachment) {
+        useFileExplorerStore.getState().openAttachment(view.threadRef, attachment);
+        return;
+      }
       useFileExplorerStore.getState().openFile(view.threadRef, relativePath);
     },
-    [view],
+    [attachmentFor, view],
   );
   const onCloseFile = useCallback(
     (relativePath: string) => {
@@ -224,6 +261,7 @@ export default function FilesDockPanel(_props: PanelProps) {
         openPaths={fileState.openPaths}
         activePath={fileState.activePath}
         pendingPaths={fileState.pendingPaths}
+        attachmentFor={attachmentFor}
         onSelectExplorer={onSelectExplorer}
         onSelectFile={onSelectFile}
         onCloseFile={onCloseFile}
@@ -239,8 +277,13 @@ export default function FilesDockPanel(_props: PanelProps) {
             // thread was open before. `view.previewPanelKey`
             // (resolveFilesDockPanelView.ts) adds thread identity while
             // keeping cwd, so the original "cwd changed" remount trigger
-            // (e.g. a worktree operation) still works too.
-            key={view.previewPanelKey}
+            // (e.g. a worktree operation) still works too. An attachment
+            // gets its own instance per attachment, as upstream keys it.
+            key={
+              activeAttachment
+                ? `${view.previewPanelKey}:attachment:${activeAttachment.id}`
+                : view.previewPanelKey
+            }
             environmentId={view.environmentId}
             cwd={view.cwd}
             projectName={view.projectName}
@@ -248,11 +291,16 @@ export default function FilesDockPanel(_props: PanelProps) {
             composerDraftTarget={view.composerDraftTarget}
             keybindings={keybindings}
             availableEditors={availableEditors}
-            relativePath={fileState.activePath}
-            revealLine={fileState.revealLine}
-            revealRequestId={fileState.revealRequestId}
+            relativePath={activeAttachment ? activeAttachment.name : fileState.activePath}
+            {...(activeAttachment ? { attachment: activeAttachment } : {})}
+            revealLine={activeAttachment ? null : fileState.revealLine}
+            revealRequestId={activeAttachment ? 0 : fileState.revealRequestId}
             onOpenFile={onOpenFile}
             onPendingChange={onPendingChange}
+            selectedFilePending={
+              fileState.activePath !== null && fileState.pendingPaths.includes(fileState.activePath)
+            }
+            workspaceMutationId={workspaceMutationId}
           />
         </Suspense>
       </div>

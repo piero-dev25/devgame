@@ -49,7 +49,7 @@ import { fetchUnitySetupProbeCached } from "./setupProbeCache";
  * two are independent budgets, not one nested inside the other. */
 export const UNITY_SETUP_CONNECTION_WAIT_TIMEOUT_MS = 15_000;
 
-export class UnitySetupConnectionWaitTimeoutError extends Schema.TaggedErrorClass<UnitySetupConnectionWaitTimeoutError>()(
+export class UnitySetupConnectionWaitTimeoutError extends Schema.TaggedError<UnitySetupConnectionWaitTimeoutError>()(
   "UnitySetupConnectionWaitTimeoutError",
   {},
 ) {
@@ -71,7 +71,7 @@ export class UnitySetupConnectionWaitTimeoutError extends Schema.TaggedErrorClas
  * the failure channel: `effect(globalErrorInEffectFailure)`), matching
  * `desktopNetworkAccess.ts`'s identical "wrap a rejected bridge/HTTP call"
  * shape. */
-export class UnitySetupProbeFetchError extends Schema.TaggedErrorClass<UnitySetupProbeFetchError>()(
+export class UnitySetupProbeFetchError extends Schema.TaggedError<UnitySetupProbeFetchError>()(
   "UnitySetupProbeFetchError",
   { cause: Schema.Defect() },
 ) {
@@ -98,8 +98,7 @@ export function createUnitySetupProbeAtom(input: {
   readonly fetchProbe: (input: {
     readonly environmentId: EnvironmentId;
     readonly projectId: ProjectId;
-    readonly httpBaseUrl: string;
-    readonly httpAuthorization: PreparedConnection["httpAuthorization"];
+    readonly prepared: PreparedConnection;
   }) => Promise<UnitySetupProbeSuccess>;
   readonly connectionWaitTimeoutMs?: number;
 }) {
@@ -126,8 +125,7 @@ export function createUnitySetupProbeAtom(input: {
               input.fetchProbe({
                 environmentId,
                 projectId,
-                httpBaseUrl: prepared.httpBaseUrl,
-                httpAuthorization: prepared.httpAuthorization,
+                prepared,
               }),
             catch: (cause) => new UnitySetupProbeFetchError({ cause }),
           });

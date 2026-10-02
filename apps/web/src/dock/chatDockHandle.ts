@@ -1,3 +1,8 @@
+import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import type { PreviewAnnotationPayload, ScopedThreadRef } from "@t3tools/contracts";
+
+import type { ComposerImageAttachment } from "~/composerDraftStore";
+
 /**
  * A module-scope handle to the live ChatDock's `DockviewLayout` — spec-
  * surfaces-as-dock-panels.md, Part B. Exists because a caller that needs to
@@ -177,4 +182,58 @@ export function toggleChatDockSidebarVisibility(): void {
     return;
   }
   chatDockHandle.toggleSidebarVisibility();
+}
+
+/**
+ * Preview annotations sent from the Browser dock panel. Upstream renders the
+ * browser inside ChatView's right panel, so its `PreviewPanel` gets
+ * `onSendAnnotation` straight from ChatView's `onSend`. In DevGame the
+ * Browser panel is a dock SIBLING of the chat panel (the same reachability
+ * gap this module exists for), so the chat registers its sender here and the
+ * Browser panel looks it up.
+ *
+ * Keyed by thread: a Browser panel must only ever send into the chat of the
+ * thread it is showing. A missing or mismatched sender is a loud no-op; the
+ * annotation and its screenshot are already in that thread's composer draft
+ * by the time a send is requested, so nothing the user picked is lost.
+ */
+export type ChatPreviewAnnotationSender = (
+  annotation: PreviewAnnotationPayload,
+  image: ComposerImageAttachment | null,
+) => void;
+
+let chatPreviewAnnotationSender: {
+  readonly threadKey: string;
+  readonly send: ChatPreviewAnnotationSender;
+} | null = null;
+
+/** Registers the live chat's sender; returns the unregister function for an effect cleanup. */
+export function registerChatPreviewAnnotationSender(
+  threadRef: ScopedThreadRef,
+  send: ChatPreviewAnnotationSender,
+): () => void {
+  const registration = { threadKey: scopedThreadKey(threadRef), send };
+  chatPreviewAnnotationSender = registration;
+  return () => {
+    if (chatPreviewAnnotationSender === registration) chatPreviewAnnotationSender = null;
+  };
+}
+
+/** Returns whether the annotation reached the chat of `threadRef`. */
+export function sendPreviewAnnotationToChat(
+  threadRef: ScopedThreadRef,
+  annotation: PreviewAnnotationPayload,
+  image: ComposerImageAttachment | null,
+): boolean {
+  const sender = chatPreviewAnnotationSender;
+  const threadKey = scopedThreadKey(threadRef);
+  if (!sender || sender.threadKey !== threadKey) {
+    console.warn("sendPreviewAnnotationToChat: no chat is registered for this thread — no-op.", {
+      operation: "send-preview-annotation-to-chat",
+      threadKey,
+    });
+    return false;
+  }
+  sender.send(annotation, image);
+  return true;
 }

@@ -16,6 +16,7 @@ const BASE_PROPS: PanelLayoutControlsProps = {
   rightPanelAvailable: true,
   rightPanelOpen: false,
   rightPanelShortcutLabel: null,
+  liveAgentCount: 0,
   onToggleTerminal: () => {},
   onToggleRightPanel: () => {},
 };
@@ -50,5 +51,21 @@ describe("PanelLayoutControls accessible names (#111)", () => {
 
     expect(hasAriaLabel(html, "Toggle right panel")).toBe(false);
     expect(hasAriaLabel(html, "Right panel is unavailable")).toBe(true);
+  });
+
+  it("uses the caller's unavailable reason for both the accessible name and the tooltip", () => {
+    const html = render({
+      rightPanelAvailable: false,
+      rightPanelUnavailableLabel: "Open a thread to use the right panel",
+    });
+
+    expect(hasAriaLabel(html, "Open a thread to use the right panel")).toBe(true);
+    expect(hasAriaLabel(html, "Right panel is unavailable")).toBe(false);
+  });
+
+  it("names working subagents in the right panel toggle's accessible name", () => {
+    const html = render({ liveAgentCount: 2, rightPanelShortcutLabel: "Ctrl+." });
+
+    expect(hasAriaLabel(html, "Toggle right panel (Ctrl+.), 2 agents working")).toBe(true);
   });
 });

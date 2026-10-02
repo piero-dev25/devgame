@@ -22,6 +22,13 @@
 //   - play state is per-editor while that block may carry items from several
 //     publishers on one project, so a header line there has no well-defined
 //     owner.
+import type {
+  ComposerContextId,
+  ComposerContextRecord,
+  UnknownContextRecord,
+} from "@t3tools/contracts";
+import { sanitizeComposerContextLabel } from "@t3tools/shared/composerContextReferences";
+
 import type { EditorPresenceEntry } from "./protocol";
 import { normalizeWorkspaceRoot } from "./resolveProjectEditor";
 import type { EditorPresenceProjectRef } from "./store";
@@ -85,6 +92,55 @@ export function buildEngineHeadlineBlock(
   return ["<engine>", ...mine.map(buildEditorLine), "</engine>"].join("\n");
 }
 
+// --------------------------------------------------------------------------
+// Structured transport: an "engine-state" composer context record
+// --------------------------------------------------------------------------
+//
+// Same lines as the `<engine>` block, carried as one context record with an
+// inline reference so every send path built on `buildMessageContext` ships
+// it, and the server renders it into the provider prompt as
+// `[Engine state: ...]` plus its payload. Same hard rule: counts and levels,
+// never contents. The `<engine>` text block remains only as the legacy READ
+// path for messages sent before this change.
+
+export const ENGINE_STATE_CONTEXT_KIND = "engine-state";
+const ENGINE_STATE_CONTEXT_ID = "engine-state_current";
+
+/** `null` under exactly the conditions `buildEngineHeadlineBlock` returns `""`. */
+export function buildEngineStateContextRecord(
+  editors: ReadonlyArray<EditorPresenceEntry>,
+  project: EditorPresenceProjectRef | null,
+): UnknownContextRecord | null {
+  if (!project) return null;
+  const targetRoot = normalizeWorkspaceRoot(project.workspaceRoot);
+  const lines = editors
+    .filter(
+      (entry) => entry.connected && normalizeWorkspaceRoot(entry.workspace.root) === targetRoot,
+    )
+    .map(buildEditorLine);
+  if (lines.length === 0) return null;
+  return {
+    version: 1,
+    kind: ENGINE_STATE_CONTEXT_KIND,
+    contextId: ENGINE_STATE_CONTEXT_ID as ComposerContextId,
+    label: sanitizeComposerContextLabel(lines.join("; "), ENGINE_STATE_CONTEXT_KIND),
+    payload: { version: 1, editors: lines },
+  };
+}
+
+/** The headline lines from a sent message's engine-state record, or `null`. */
+export function readEngineStateContextRecord(
+  record: ComposerContextRecord,
+): ReadonlyArray<string> | null {
+  if (record.kind !== ENGINE_STATE_CONTEXT_KIND || !("payload" in record)) return null;
+  const payload = record.payload;
+  if (typeof payload !== "object" || payload === null) return null;
+  const { editors } = payload as Record<string, unknown>;
+  if (!Array.isArray(editors) || !editors.every((line) => typeof line === "string")) return null;
+  return editors as string[];
+}
+
+/** Legacy text format writer; production sends the record above instead. */
 export function appendEngineHeadlineToPrompt(
   prompt: string,
   editors: ReadonlyArray<EditorPresenceEntry>,

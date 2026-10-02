@@ -1,5 +1,4 @@
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
-import { isWindowsPlatform } from "../lib/utils";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
@@ -31,10 +30,27 @@ export function getDesktopUpdateReleaseUrl(version: string | null): string | nul
   return `${releaseTagUrl}/v${encodeURIComponent(normalizedVersion)}`;
 }
 
+/**
+ * The releases index the tag URL lives under (`/releases/tag` sits below
+ * `/releases`). Derived from the same build-time setting rather than a second
+ * one, so a build that names no releases page links to none, and a tag URL of
+ * another shape gets no guessed index.
+ */
+export function getDesktopUpdateReleaseHistoryUrl(): string | null {
+  const releaseTagUrl = configuredDesktopReleaseTagUrl();
+  if (!releaseTagUrl || !releaseTagUrl.endsWith("/tag")) return null;
+  return releaseTagUrl.slice(0, -"/tag".length);
+}
+
 export function resolveDesktopUpdateButtonAction(
   state: DesktopUpdateState,
 ): DesktopUpdateButtonAction {
-  if (state.downloadedVersion) {
+  if (
+    state.downloadedVersion &&
+    (state.status === "downloaded" ||
+      (state.status === "error" &&
+        (state.errorContext === null || state.errorContext === "install")))
+  ) {
     return "install";
   }
   if (state.status === "available") {
@@ -46,16 +62,6 @@ export function resolveDesktopUpdateButtonAction(
     }
   }
   return "none";
-}
-
-export function shouldShowDesktopUpdateButton(state: DesktopUpdateState | null): boolean {
-  if (!state || !state.enabled) {
-    return false;
-  }
-  if (state.status === "downloading") {
-    return true;
-  }
-  return resolveDesktopUpdateButtonAction(state) !== "none";
 }
 
 export function shouldShowArm64IntelBuildWarning(state: DesktopUpdateState | null): boolean {
@@ -100,6 +106,9 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
     if (state.errorContext === "install" && state.downloadedVersion) {
       return `Install failed for ${state.downloadedVersion}. Click to retry.`;
     }
+    if (state.downloadedVersion) {
+      return `Update ${state.downloadedVersion} downloaded. Click to restart and install.`;
+    }
     return state.message ?? "Update failed";
   }
   return "Up to date";
@@ -107,13 +116,9 @@ export function getDesktopUpdateButtonTooltip(state: DesktopUpdateState): string
 
 export function getDesktopUpdateInstallConfirmationMessage(
   state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
-  platform = "",
 ): string {
   const version = state.downloadedVersion ?? state.availableVersion;
-  const windowsInstallWarning = isWindowsPlatform(platform)
-    ? "\n\nOn Windows, DevGame may remain closed for several minutes while the update installs, and no installer window may appear. DevGame will reopen automatically when installation finishes."
-    : "";
-  return `Install update${version ? ` ${version}` : ""} and restart DevGame?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.${windowsInstallWarning}`;
+  return `Install update${version ? ` ${version}` : ""} and restart DevGame?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.`;
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
@@ -127,17 +132,9 @@ export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateAction
   return getDesktopUpdateActionError(result) !== null;
 }
 
-export function shouldHighlightDesktopUpdateError(state: DesktopUpdateState | null): boolean {
-  if (!state || state.status !== "error") return false;
-  return state.errorContext === "download" || state.errorContext === "install";
-}
-
 export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {
   if (!state || !state.enabled) return false;
   return (
-    state.status !== "checking" &&
-    state.status !== "downloading" &&
-    state.status !== "downloaded" &&
-    state.status !== "disabled"
+    state.status !== "checking" && state.status !== "downloading" && state.status !== "disabled"
   );
 }

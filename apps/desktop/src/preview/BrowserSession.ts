@@ -10,6 +10,17 @@ import * as Schema from "effect/Schema";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 
 const PREVIEW_PARTITION_PREFIX = "persist:devgame-preview-";
+/**
+ * Incognito partitions deliberately omit the `persist:` prefix, which is what
+ * makes Chromium keep them in memory and discard them with the process. They
+ * still carry the product prefix, but `isPartition` admits only partitions
+ * this process derived (G5) — the `will-attach-webview` gate rejects anything
+ * it does not recognise.
+ */
+const PREVIEW_EPHEMERAL_PARTITION_PREFIX = "devgame-preview-ephemeral-";
+const PROFILE_PARTITION_MARKER = "profile-";
+
+export type BrowserSessionPartitionNamespace = "profile";
 
 // Permissions granted to preview web content. `clipboard-sanitized-write` is the
 // Electron permission behind `navigator.clipboard.writeText()` — note it is NOT
@@ -29,7 +40,7 @@ const ALLOWED_PREVIEW_PERMISSIONS: ReadonlySet<string> = new Set([
   // picker runs in the main window session, which is unaffected by this list.
 ]);
 
-export class BrowserSessionPartitionDerivationError extends Schema.TaggedErrorClass<BrowserSessionPartitionDerivationError>()(
+export class BrowserSessionPartitionDerivationError extends Schema.TaggedError<BrowserSessionPartitionDerivationError>()(
   "BrowserSessionPartitionDerivationError",
   {
     scope: Schema.String,
@@ -41,7 +52,7 @@ export class BrowserSessionPartitionDerivationError extends Schema.TaggedErrorCl
   }
 }
 
-export class BrowserSessionCreationError extends Schema.TaggedErrorClass<BrowserSessionCreationError>()(
+export class BrowserSessionCreationError extends Schema.TaggedError<BrowserSessionCreationError>()(
   "BrowserSessionCreationError",
   {
     scope: Schema.String,
@@ -54,7 +65,7 @@ export class BrowserSessionCreationError extends Schema.TaggedErrorClass<Browser
   }
 }
 
-export class BrowserSessionStorageClearError extends Schema.TaggedErrorClass<BrowserSessionStorageClearError>()(
+export class BrowserSessionStorageClearError extends Schema.TaggedError<BrowserSessionStorageClearError>()(
   "BrowserSessionStorageClearError",
   {
     partition: Schema.String,
@@ -66,7 +77,7 @@ export class BrowserSessionStorageClearError extends Schema.TaggedErrorClass<Bro
   }
 }
 
-export class BrowserSessionCacheClearError extends Schema.TaggedErrorClass<BrowserSessionCacheClearError>()(
+export class BrowserSessionCacheClearError extends Schema.TaggedError<BrowserSessionCacheClearError>()(
   "BrowserSessionCacheClearError",
   {
     partition: Schema.String,
@@ -83,7 +94,6 @@ export const BrowserSessionGetSessionError = Schema.Union([
   BrowserSessionCreationError,
 ]);
 export type BrowserSessionGetSessionError = typeof BrowserSessionGetSessionError.Type;
-export const isBrowserSessionGetSessionError = Schema.is(BrowserSessionGetSessionError);
 
 export const BrowserSessionError = Schema.Union([
   BrowserSessionPartitionDerivationError,
@@ -92,85 +102,129 @@ export const BrowserSessionError = Schema.Union([
   BrowserSessionCacheClearError,
 ]);
 export type BrowserSessionError = typeof BrowserSessionError.Type;
-export const isBrowserSessionError = Schema.is(BrowserSessionError);
 
 export class BrowserSession extends Context.Service<
   BrowserSession,
   {
     readonly getPartition: (
       scope?: string,
+      persistent?: boolean,
+      namespace?: BrowserSessionPartitionNamespace,
     ) => Effect.Effect<string, BrowserSessionPartitionDerivationError>;
     readonly isPartition: (partition: string) => boolean;
-    readonly getSession: (scope?: string) => Effect.Effect<Session, BrowserSessionGetSessionError>;
-    readonly clearCookies: () => Effect.Effect<void, BrowserSessionStorageClearError>;
-    readonly clearCache: () => Effect.Effect<void, BrowserSessionCacheClearError>;
+    readonly getSession: (
+      scope?: string,
+      persistent?: boolean,
+      namespace?: BrowserSessionPartitionNamespace,
+    ) => Effect.Effect<Session, BrowserSessionGetSessionError>;
+    /** Omit `partitions` to clear every known partition. */
+    readonly clearCookies: (
+      partitions?: ReadonlyArray<string>,
+    ) => Effect.Effect<void, BrowserSessionStorageClearError>;
+    readonly clearCache: (
+      partitions?: ReadonlyArray<string>,
+    ) => Effect.Effect<void, BrowserSessionCacheClearError>;
   }
 >()("@t3tools/desktop/preview/BrowserSession") {}
 
+/**
+ * Restricts a clear to the given partitions. Omitting them keeps the historical
+ * "every partition" behaviour, which callers now only use for an explicit
+ * "all profiles" action — a per-profile clear must never reach across profiles.
+ */
+const selectSessions = (
+  sessions: ReadonlyMap<string, Session>,
+  partitions: ReadonlyArray<string> | undefined,
+): ReadonlyArray<readonly [string, Session]> =>
+  [...sessions.entries()].filter(
+    ([partition]) => partitions === undefined || partitions.includes(partition),
+  );
+
+/**
+ * Scope bytes for the partition digest.
+ *
+ * `TextEncoder` replaces a lone UTF-16 surrogate with U+FFFD, so `"p\ud800"`
+ * and `"p\ufffd"` would hash to the same partition and share cookies. Those
+ * are distinct, supported ids, so lone surrogates are escaped to `\uXXXX`
+ * first — and a literal backslash is doubled so the escape cannot be forged.
+ * Every well-formed scope passes through byte-for-byte unchanged, which keeps
+ * existing partitions (and the logins in them) where they are.
+ */
+const encodeScopeForDigest = (scope: string): Uint8Array =>
+  new TextEncoder().encode(
+    scope
+      .replace(/\\/g, "\\\\")
+      .replace(
+        /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g,
+        (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`,
+      ),
+  );
+
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* BrowserSessionMake() {
   const crypto = yield* Crypto.Crypto;
   const sessionsRef = yield* SynchronizedRef.make<ReadonlyMap<string, Session>>(new Map());
 
-  const derivePartition = (prefix: string) =>
-    Effect.fn("BrowserSession.derivePartition")(function* (scope: string) {
-      const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(scope)).pipe(
-        Effect.mapError(
-          (cause) =>
-            new BrowserSessionPartitionDerivationError({
-              scope,
-              cause,
-            }),
-        ),
-      );
-      return `${prefix}${Encoding.encodeHex(digest).slice(0, 20)}`;
-    });
-
   // G5 (independent security review, follow-up to F3, 2026-08-04): preview
-  // has MANY legitimate partitions — one per scope — so a single-string
-  // cache doesn't generalize directly; this is the Set equivalent. Every
-  // successful derivation adds its result here, and `isPartition` (below)
-  // checks membership instead of a `startsWith` prefix match. Without
-  // this, `persist:devgame-preview-anything` satisfied the prefix check
-  // for ANY suffix, and DesktopWindow.ts's `will-attach-webview` handler
-  // trusts "classified as preview" to mean "really is a preview session"
-  // backed by this process's own derivation. A webview can only plausibly
-  // request a partition AFTER the renderer has already called
-  // `getPreviewConfig` (which calls `getSession` → this derivation) for
-  // that scope, so the set is always populated before a real attach
-  // attempt could reach it.
+  // has MANY legitimate partitions — one per scope, persistence mode and
+  // namespace — so trust is a Set of every partition this process derived,
+  // not a prefix match. Without this, `persist:devgame-preview-anything`
+  // satisfied a `startsWith` check for ANY suffix, and DesktopWindow.ts's
+  // `will-attach-webview` handler trusts "classified as preview" to mean
+  // "really is a preview session" backed by this process's own derivation.
+  // A webview can only plausibly request a partition AFTER the renderer has
+  // called `getPreviewConfig` / `getBrowserPartition` (both reach
+  // getPartition) for that scope, so the set is populated before a real
+  // attach. A partition string restored from storage before that call is
+  // refused: fail closed.
   const derivedPreviewPartitions = new Set<string>();
 
-  const derivePreviewPartitionForScope = derivePartition(PREVIEW_PARTITION_PREFIX);
-  const derivePreviewPartition = Effect.fn("BrowserSession.getPartition")(function* (
+  const getPartition = Effect.fn("BrowserSession.getPartition")(function* (
     scope = "shared",
+    persistent = true,
+    namespace?: BrowserSessionPartitionNamespace,
   ) {
-    const partition = yield* derivePreviewPartitionForScope(scope);
+    const digest = yield* crypto.digest("SHA-256", encodeScopeForDigest(scope)).pipe(
+      Effect.mapError(
+        (cause) =>
+          new BrowserSessionPartitionDerivationError({
+            scope,
+            cause,
+          }),
+      ),
+    );
+    const prefix = persistent ? PREVIEW_PARTITION_PREFIX : PREVIEW_EPHEMERAL_PARTITION_PREFIX;
+    // Legacy/default partitions are prefix + hex digest. The non-hex profile
+    // marker creates a disjoint namespace while leaving every legacy default
+    // partition byte-for-byte unchanged.
+    const partition = `${prefix}${namespace === "profile" ? PROFILE_PARTITION_MARKER : ""}${Encoding.encodeHex(digest).slice(0, 20)}`;
     derivedPreviewPartitions.add(partition);
     return partition;
   });
 
-  const resolveSession = (
-    ref: SynchronizedRef.SynchronizedRef<ReadonlyMap<string, Session>>,
-    scope: string,
-    partition: string,
-    allowedPermissions: ReadonlySet<string>,
-  ) =>
-    SynchronizedRef.modifyEffect(ref, (sessions) => {
+  const getSession = Effect.fn("BrowserSession.getSession")(function* (
+    scope = "shared",
+    persistent = true,
+    namespace?: BrowserSessionPartitionNamespace,
+  ) {
+    const partition = yield* getPartition(scope, persistent, namespace);
+    return yield* SynchronizedRef.modifyEffect(sessionsRef, (sessions) => {
       const existing = sessions.get(partition);
       if (existing) return Effect.succeed([existing, sessions] as const);
       return Effect.try({
         try: () => {
           const browserSession = session.fromPartition(partition);
-          const userAgent = browserSession
-            .getUserAgent()
-            .replace(/Electron\/[\d.]+ /, "")
-            .replace(/\s*t3code\/[\d.]+/, "");
-          browserSession.setUserAgent(userAgent);
+          // The guest keeps Electron's native User-Agent. Rewriting it in any
+          // form — even variants that keep the Electron token — makes Cloudflare
+          // Turnstile fail its integrity check with error 600010 and recreate
+          // the challenge every few seconds, so logins behind it never complete
+          // (#5002). Re-setting the unchanged native string is harmless, so it
+          // is the rewritten string itself that trips the check.
           browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
-            callback(allowedPermissions.has(permission));
+            callback(ALLOWED_PREVIEW_PERMISSIONS.has(permission));
           });
           browserSession.setPermissionCheckHandler((_webContents, permission) =>
-            allowedPermissions.has(permission),
+            ALLOWED_PREVIEW_PERMISSIONS.has(permission),
           );
           const next = new Map(sessions);
           next.set(partition, browserSession);
@@ -184,24 +238,21 @@ export const make = Effect.gen(function* BrowserSessionMake() {
           }),
       });
     });
-
-  const getSession = Effect.fn("BrowserSession.getSession")(function* (scope = "shared") {
-    const partition = yield* derivePreviewPartition(scope);
-    return yield* resolveSession(sessionsRef, scope, partition, ALLOWED_PREVIEW_PERMISSIONS);
   });
 
   return BrowserSession.of({
-    getPartition: derivePreviewPartition,
+    getPartition,
     isPartition: (partition) => derivedPreviewPartitions.has(partition),
     getSession,
-    clearCookies: Effect.fn("BrowserSession.clearCookies")(function* () {
+    clearCookies: Effect.fn("BrowserSession.clearCookies")(function* (partitions?) {
       const sessions = yield* SynchronizedRef.get(sessionsRef);
-      yield* Effect.all(
-        [...sessions.entries()].map(([partition, browserSession]) =>
+      yield* Effect.forEach(
+        selectSessions(sessions, partitions),
+        ([partition, browserSession]) =>
           Effect.tryPromise({
             try: () =>
               browserSession.clearStorageData({
-                storages: ["cookies", "localstorage", "indexdb", "websql", "serviceworkers"],
+                storages: ["cookies", "localstorage", "indexdb", "serviceworkers"],
               }),
             catch: (cause) =>
               new BrowserSessionStorageClearError({
@@ -209,14 +260,14 @@ export const make = Effect.gen(function* BrowserSessionMake() {
                 cause,
               }),
           }),
-        ),
         { concurrency: "unbounded", discard: true },
       );
     }),
-    clearCache: Effect.fn("BrowserSession.clearCache")(function* () {
+    clearCache: Effect.fn("BrowserSession.clearCache")(function* (partitions?) {
       const sessions = yield* SynchronizedRef.get(sessionsRef);
-      yield* Effect.all(
-        [...sessions.entries()].map(([partition, browserSession]) =>
+      yield* Effect.forEach(
+        selectSessions(sessions, partitions),
+        ([partition, browserSession]) =>
           Effect.tryPromise({
             try: () => browserSession.clearCache(),
             catch: (cause) =>
@@ -225,7 +276,6 @@ export const make = Effect.gen(function* BrowserSessionMake() {
                 cause,
               }),
           }),
-        ),
         { concurrency: "unbounded", discard: true },
       );
     }),

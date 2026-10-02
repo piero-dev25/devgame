@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { fetchGenerationList } from "./fetchGenerationList";
 
 afterEach(() => {
@@ -56,8 +57,7 @@ describe("fetchGenerationList", () => {
 
     await fetchGenerationList({
       projectId: ProjectId.make("project-gen"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -72,8 +72,7 @@ describe("fetchGenerationList", () => {
     await expect(
       fetchGenerationList({
         projectId: ProjectId.make("project-gen"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
     ).rejects.toBeTruthy();
   });
@@ -83,8 +82,7 @@ describe("fetchGenerationList", () => {
 
     const result = await fetchGenerationList({
       projectId: ProjectId.make("project-gen"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     });
 
     expect(result.entries).toHaveLength(1);
@@ -102,8 +100,7 @@ describe("fetchGenerationList", () => {
     await expect(
       fetchGenerationList({
         projectId: ProjectId.make("project-unknown"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
     ).rejects.toMatchObject({ message: "Project not found." });
   });

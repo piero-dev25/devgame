@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { dispatchEditorPresenceCommand } from "./dispatchCommand";
 
 afterEach(() => {
@@ -19,8 +20,7 @@ describe("dispatchEditorPresenceCommand", () => {
     let caught: unknown;
     try {
       await dispatchEditorPresenceCommand({
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
         sessionId: "session-1",
         action: "play",
       });
@@ -35,8 +35,7 @@ describe("dispatchEditorPresenceCommand", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ ok: true })));
 
     const result = await dispatchEditorPresenceCommand({
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
       sessionId: "session-1",
       action: "play",
     });

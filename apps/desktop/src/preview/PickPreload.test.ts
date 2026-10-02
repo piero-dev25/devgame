@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 //
 // #89/#92 (independent audit, mutation-tested, 2026-08-04): this file used
-// to be named PickPreload.test.ts but only ever tested computeLabelPosition
-// (moved to PickLabelPosition.test.ts) — the real PickPreload.ts, 48KB, the
+// to only test computeLabelPosition (a helper upstream later deleted as dead
+// code, along with its old test) — the real PickPreload.ts, 48KB, the
 // actual Electron preload script that runs inside every preview webview,
 // had ZERO coverage. A mutation deleting `if (!event.isTrusted) return;`
 // from EITHER human-input handler survived all 463 tests in the suite,
@@ -40,6 +40,11 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import type { DesktopPreviewAnnotationTheme } from "@t3tools/contracts";
 
+// Vitest 5 defaults `clearMocks: true`, which would erase the import-time
+// registrations recorded once in `beforeAll` before the first test reads
+// them. This file manages its own mock lifetimes (see `afterEach`).
+vi.setConfig({ clearMocks: false });
+
 const ipcOn = vi.fn();
 const ipcOff = vi.fn();
 const ipcSend = vi.fn();
@@ -54,6 +59,7 @@ import {
   CANCEL_PICK_CHANNEL,
   ELEMENT_PICKED_CHANNEL,
   HUMAN_INPUT_CHANNEL,
+  MOUSE_NAVIGATE_CHANNEL,
   START_PICK_CHANNEL,
 } from "./GuestProtocol.ts";
 
@@ -92,9 +98,10 @@ describe("PickPreload — the real preload module, loaded for real", () => {
 
   beforeAll(async () => {
     addEventListenerSpy = vi.spyOn(window, "addEventListener");
-    // Import-time side effects (the two DOM listener registrations below,
-    // and the three module-scope ipcRenderer.on registrations further
-    // down) fire exactly once, here — matching how this module actually
+    // Import-time side effects (the human-input and mouse-navigation DOM
+    // listener registrations, and the module-scope ipcRenderer.on
+    // registrations: recording cursor/controller/key/pointer plus
+    // START_PICK/ANNOTATION_THEME/CANCEL_PICK) fire exactly once, here — matching how this module actually
     // loads in a real preload context, not something a per-test re-import
     // would reproduce faithfully.
     await import("./PickPreload.ts");
@@ -111,8 +118,8 @@ describe("PickPreload — the real preload module, loaded for real", () => {
       ([channel]) => channel === CANCEL_PICK_CHANNEL,
     )?.[1] as (() => void) | undefined;
     moduleCancelHandler?.();
-    // Deliberately NOT clearing ipcOn: the three module-scope registrations
-    // (START_PICK/ANNOTATION_THEME/CANCEL_PICK) happened exactly once, in
+    // Deliberately NOT clearing ipcOn: the module-scope registrations
+    // (recording channels, START_PICK/ANNOTATION_THEME/CANCEL_PICK) happened exactly once, in
     // beforeAll — clearing here would erase them permanently after the
     // first test, since nothing re-registers them. `latestIpcHandler`
     // picks the MOST RECENT match for a given channel, which is what makes
@@ -200,6 +207,29 @@ describe("PickPreload — the real preload module, loaded for real", () => {
         key: "a",
         code: "KeyA",
       });
+    });
+  });
+
+  // Upstream added mouse thumb-button navigation (MOUSE_NAVIGATE_CHANNEL),
+  // gated by the same `isTrusted` control: a forged button-3/4 event must not
+  // drive the tab's history from page script.
+  describe("MOUSE_NAVIGATE_CHANNEL — the isTrusted guard on thumb-button navigation", () => {
+    it("blocks a forged (isTrusted: false) back-button mouseup", () => {
+      const forged = new MouseEvent("mouseup", { button: 3 });
+      expect(forged.isTrusted).toBe(false);
+      window.dispatchEvent(forged);
+      expect(ipcSend).not.toHaveBeenCalledWith(MOUSE_NAVIGATE_CHANNEL, expect.anything());
+    });
+
+    it("reports a genuine (isTrusted: true) back-button mouseup to the main process", () => {
+      const listener = capturedListener("mouseup");
+      listener({
+        isTrusted: true,
+        button: 3,
+        preventDefault: vi.fn(),
+        stopImmediatePropagation: vi.fn(),
+      });
+      expect(ipcSend).toHaveBeenCalledWith(MOUSE_NAVIGATE_CHANNEL, { direction: "back" });
     });
   });
 

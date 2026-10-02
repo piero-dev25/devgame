@@ -1,8 +1,13 @@
 # Install DevGame
 
-DevGame is a web and desktop GUI for running coding agents on your machine, specialised for
-game development (Unity integration, dockable panels, editor presence). It is a fork of
+DevGame runs coding agents on your computer, specialised for game development (Unity
+integration, dockable panels, editor presence). It is a fork of
 [T3 Code](https://github.com/pingdotgg/t3code) — see [ATTRIBUTION.md](../../ATTRIBUTION.md).
+
+## Requirements
+
+You need an installed, authenticated provider before starting a thread. You can
+launch DevGame and configure providers afterwards.
 
 ## Download
 
@@ -14,44 +19,61 @@ like any normal download, no security warnings. Only self-built binaries are uns
 
 ## No Package Registry Yet
 
-There's no `npx`, `winget`, `brew`, or AUR install for DevGame yet — download the release
-artifact above, or build it yourself. See
+There's no install script, `npx`, `winget`, `brew`, `.deb` repository, or AUR install for
+DevGame yet, and the T3 Code mobile apps in the App Store and Google Play are T3 Code's, not
+DevGame's. Download the release artifact above, or build it yourself. See
 [docs/user/build-from-source.md](./build-from-source.md) for the full walkthrough.
+
+## Windows Subsystem for Linux
+
+Choose a WSL distro in **Settings → Connections** to run agents and projects
+there. Install the provider CLIs inside that distro. DevGame installs its own
+server runtime there automatically; the first launch after an app update can
+take longer.
 
 ## Providers
 
-DevGame drives provider CLIs; it does not ship them. Install the CLI for each provider you want
-to use, then authenticate it.
+Open **Settings → Providers** in the web or desktop app, select the environment,
+and enable the provider you want. Installation, login, and configuration belong
+to that environment's machine, even when you connect from a phone or another
+computer.
 
-| Provider   | CLI                                                   | Default binary | Log in with           |
-| ---------- | ----------------------------------------------------- | -------------- | --------------------- |
-| Codex      | [Codex CLI](https://developers.openai.com/codex/cli)  | `codex`        | `codex login`         |
-| Claude     | [Claude Code](https://claude.com/product/claude-code) | `claude`       | `claude auth login`   |
-| Cursor     | [Cursor CLI](https://cursor.com/cli)                  | `cursor-agent` | `agent login`         |
-| Grok Build | [Grok Build CLI](https://x.ai/cli)                    | `grok`         | `grok login`          |
-| OpenCode   | [OpenCode](https://opencode.ai)                       | `opencode`     | `opencode auth login` |
+| Provider    | Install and authenticate                                                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Codex       | [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), or install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`. |
+| Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                              |
+| Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
+| Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
+| OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
+| Antigravity | Install and sign in with Google from DevGame's provider settings.                                                                                         |
 
-Cursor is the one to watch: install Cursor CLI, which provides the `cursor-agent` binary that
-DevGame looks for, but authenticate with `agent login`, not `cursor-agent login`.
+Provider CLIs must be on the server's `PATH`. If DevGame cannot find one, set its
+**Binary path** in provider settings, especially when using a version manager.
+Cursor's executable is `cursor-agent`, although its login command is
+`agent login`. Codex connected through ChatGPT and Antigravity can use their
+managed runtimes without a `PATH` entry.
 
-Run the login command on the machine running the DevGame server, not on the device you browse
-from.
+DevGame warns when a provider version has known compatibility problems with your
+release. Check **Settings → Providers** on that environment for the recommended
+version or range. When its package manager supports installing a specific version,
+you can install the recommendation there. Otherwise use the provider's installer
+on the environment's machine. An unlisted version is unverified.
 
-### Binary Discovery
+When a provider CLI is behind its latest release, its provider card shows the
+available version. **Update now** appears only when DevGame can tell which
+installer owns the CLI (its own update command, Homebrew, or a global npm, pnpm,
+bun, or Vite+ install) and runs that installer. Otherwise update the CLI the same
+way you installed it. Homebrew installs compare against the version Homebrew
+offers, which can trail the npm release by a few hours.
 
-Each provider CLI must be on the server's `PATH`, or have an explicit binary path set in
-**Settings** → the provider instance → **Binary path**. Use the explicit path when a version
-manager or a non-standard install location keeps the CLI off the `PATH` of the shell that
-started DevGame.
+Add another provider instance for a separate account or configuration. Each
+instance can have its own environment variables, such as API keys or a custom
+base URL. Mark secret values as sensitive; after saving, DevGame does not display
+their original values.
 
-### When Auth Is Needed
-
-Provider auth is required before you start a session with that provider, not before you start
-DevGame. You can install DevGame, open it, and add providers afterwards. A provider that is not
-authenticated shows its status in **Settings** and fails at session start with the login command
-to run.
-
-For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./providers-claude.md).
+For provider-specific setup and accounts, see [Codex](./providers-codex.md),
+[Claude](./providers-claude.md), [OpenCode](./providers-opencode.md), and
+[Antigravity](./providers-antigravity.md).
 
 ## Game Features Setup (Unity)
 
@@ -72,9 +94,11 @@ shows **Setup Integrations** — one click installs Unity's own `com.unity.pipel
 (from Unity's own registry) plus DevGame's bundled `com.devgame.editor-presence` package into
 the project, and pairs them automatically.
 
-## Next Steps
+## Next steps
 
-- [Permission modes](./permission-modes.md): how much DevGame asks before acting
-- [Remote access](./remote-access.md): connect from a phone, tablet, or another desktop
-- [Keeping DevGame in sync](./updating.md): client and server version skew
-- [Running in the background](./background-service.md): Linux background service
+- [Working with threads](./thread-sidebar.md): start tasks and organize parallel work.
+- [Permission modes](./permission-modes.md): choose when agents ask before acting.
+- [Remote access](./remote-access.md): connect from another device.
+- [Running in the background](./background-service.md): keep a Linux or macOS host available.
+- [Keeping DevGame in sync](./updating.md): update the app and connected servers.
+- [Build from source](./build-from-source.md): run the dev server or package a desktop build.

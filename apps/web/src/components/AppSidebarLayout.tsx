@@ -7,20 +7,37 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate, useParams } from "@tanstack/react-router";
 
+import { readDockShortcutPanelContext } from "../dock/dockShortcutContext";
 import { isElectron } from "../env";
 import { useDesktopFullscreenState } from "../hooks/useDesktopFullscreenState";
-import { getLocalStorageItem } from "../hooks/useLocalStorage";
-import { resolveShortcutCommand, shortcutLabelForCommand } from "../keybindings";
+import { getLocalStorageItem, removeLocalStorageItem } from "../hooks/useLocalStorage";
+import {
+  isRichTextBoldShortcut,
+  resolveShortcutCommand,
+  shortcutLabelForCommand,
+} from "../keybindings";
+import { isEditableFocused } from "../lib/editableFocus";
+import { isPreviewFocused } from "../lib/previewFocus";
+import { isTerminalFocused } from "../lib/terminalFocus";
+import { isModelPickerOpen } from "../modelPickerVisibility";
+import { resolveThreadRouteRef } from "../threadRoutes";
 import { cn, isMacPlatform } from "../lib/utils";
 import { primaryServerKeybindingsAtom } from "../state/server";
-import { resolveWorkspaceChromeInsetStyle } from "../workspaceChromeInset";
 import { useEnvironmentIdentificationMode } from "../hooks/useSettings";
 import { useThreadSidebarComponent } from "../hooks/useThreadSidebarComponent";
+import { resolveWorkspaceChromeInsetStyle } from "../workspaceChromeInset";
+import {
+  PanelAnimationSuppressionProvider,
+  usePanelAnimationSettings,
+  usePanelNavigationSuppression,
+} from "../panelAnimations";
 import { SettingsSidebarNav } from "./settings/SettingsSidebarNav";
 import { SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { MainAppLocationTracker } from "./sidebar/mainAppLocation";
 import { useSidebarStageBackdropVariant } from "./SidebarStageBackdrop";
+import { useProjects } from "../state/entities";
 import {
   resolveInitialThreadSidebarWidth,
   resolveThreadSidebarMaximumWidth,
@@ -60,6 +77,7 @@ function readInitialThreadSidebarWidth(): number {
 }
 
 function SidebarControl() {
+  const usagePageOpen = useLocation({ select: (location) => location.pathname === "/usage" });
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
   const { toggleSidebar } = useSidebar();
   const isSidebarVisible = useSidebarVisibility();
@@ -67,7 +85,9 @@ function SidebarControl() {
   const stageBackdropVariant = useSidebarStageBackdropVariant(
     environmentIdentificationMode === "artwork",
   );
-  const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggle");
+  const shortcutLabel = shortcutLabelForCommand(keybindings, "sidebar.toggle", {
+    context: { usagePageOpen },
+  });
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -78,7 +98,20 @@ function SidebarControl() {
       ) {
         return;
       }
-      if (resolveShortcutCommand(event, keybindings) !== "sidebar.toggle") return;
+      if (
+        isRichTextBoldShortcut(event) &&
+        event.target instanceof HTMLElement &&
+        event.target.closest('[data-composer-rich-text="true"]')
+      ) {
+        // The rich-text composer claims Mod+B for bold; the toggle stays
+        // available everywhere else, including the plain-text composer.
+        return;
+      }
+      if (
+        resolveShortcutCommand(event, keybindings, { context: { usagePageOpen } }) !==
+        "sidebar.toggle"
+      )
+        return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -88,31 +121,33 @@ function SidebarControl() {
     // Capture before focused editors consume commands such as Mod+B for rich-text formatting.
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [keybindings, toggleSidebar]);
+  }, [keybindings, toggleSidebar, usagePageOpen]);
 
   return (
+    // The right-side layout controls carry mr-px (border compensation inside
+    // the panel), so the trigger mirrors it: both clusters sit one extra pixel
+    // off their edge and the titlebar reads symmetric.
     <div
-      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 flex h-[var(--workspace-topbar-height)] items-center"
+      className="pointer-events-none fixed left-[var(--workspace-controls-left)] top-[var(--workspace-controls-top)] z-50 ml-px flex h-[var(--workspace-topbar-height)] items-center"
       data-sidebar-control=""
     >
       <Tooltip>
         <TooltipTrigger
           render={
             <SidebarTrigger
+              // Over the stage artwork the trigger is a control on imagery, like the media
+              // viewer's arrows; that variant positions itself, so the layout is reset here.
+              variant={isSidebarVisible && stageBackdropVariant ? "media-navigation" : "ghost"}
               className={cn(
                 "pointer-events-auto",
-                isSidebarVisible &&
-                  stageBackdropVariant &&
-                  "[:hover,[data-pressed]]:bg-white/15 focus-visible:ring-white/90 focus-visible:ring-offset-blue-700 [&_svg]:stroke-white/90! [&_svg]:opacity-100! [&_svg]:hover:stroke-white!",
+                isSidebarVisible && stageBackdropVariant && "relative top-auto translate-y-0",
               )}
               aria-label="Toggle main sidebar"
-              // dock-chrome-strip.md, Section C: `SidebarTrigger` now accepts
-              // explicit `onToggle`/`pressed` so it can be reused by the
-              // dock-side strip toggle without touching `SidebarProvider`
-              // state. Passed explicitly here too (not left to `SidebarTrigger`'s
-              // internal `useSidebar()` fallback) so this call site's behavior
-              // is visibly, verifiably unchanged: same `toggleSidebar` function,
-              // same `isSidebarVisible` read this component already computed.
+              // dock-chrome-strip.md, Section C: `SidebarTrigger` accepts
+              // explicit `onToggle`/`pressed` so the dock-side strip toggle
+              // can reuse it without touching `SidebarProvider` state. Passed
+              // explicitly here too, so this call site visibly keeps the
+              // provider's own toggle and visibility.
               onToggle={toggleSidebar}
               pressed={isSidebarVisible}
             />
@@ -126,21 +161,87 @@ function SidebarControl() {
   );
 }
 
+// Moves through the app's route history like a browser's back/forward buttons.
+function NavigationHistoryShortcuts() {
+  const keybindings = useAtomValue(primaryServerKeybindingsAtom);
+  const routeThreadRef = useParams({
+    strict: false,
+    select: (params) => resolveThreadRouteRef(params),
+  });
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (
+        event.target instanceof HTMLElement &&
+        event.target.closest("[data-keybinding-capture]")
+      ) {
+        return;
+      }
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: isTerminalFocused(),
+          // Terminal and Browser are dock panels in DevGame, so their "open"
+          // context comes from the dock's stores, not upstream's right panel.
+          ...readDockShortcutPanelContext(routeThreadRef),
+          previewFocus: isPreviewFocused(),
+          editableFocus: isEditableFocused(event.target),
+          modelPickerOpen: isModelPickerOpen(),
+        },
+      });
+      if (command !== "navigation.back" && command !== "navigation.forward") return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (command === "navigation.back") window.history.back();
+      else window.history.forward();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [keybindings, routeThreadRef]);
+
+  return null;
+}
+
+// Settings swaps the thread sidebar out of the tree. Keep the lightweight
+// project projection subscribed so returning to a draft never renders the
+// zero-project state while the environment snapshot reconnects.
+function ProjectProjectionRetention() {
+  useProjects();
+  return null;
+}
+
+/**
+ * App-wide coordinators upstream mounts inside `AppSidebarLayout`. In DevGame
+ * thread routes render the dock, not `AppSidebarLayout`, so mounting them
+ * there would leave thread routes without back/forward shortcuts, without the
+ * main-app location Back returns to, and without the retained project
+ * projection. `__root.tsx` mounts this once for every authenticated route
+ * (dock and sidebar pages alike) instead.
+ */
+export function AppRouteCoordinators() {
+  return (
+    <>
+      <ProjectProjectionRetention />
+      <NavigationHistoryShortcuts />
+      <MainAppLocationTracker />
+    </>
+  );
+}
+
 export function AppSidebarLayout({ children }: { children: ReactNode }) {
   const navigate = useNavigate();
+  // The same thread-sidebar choice the dock's SidebarPanel makes.
+  const ThreadSidebarComponent = useThreadSidebarComponent();
+  const { active: panelAnimationsActive, durationMs: panelAnimationDurationMs } =
+    usePanelAnimationSettings();
   // Settings routes show the settings nav in place of whichever thread
   // sidebar is active.
   const pathname = useLocation({ select: (location) => location.pathname });
+  const panelAnimationsSuppressed = usePanelNavigationSuppression(pathname);
+  const routePanelAnimationsActive = panelAnimationsActive && !panelAnimationsSuppressed;
   const isOnSettings = pathname === "/settings" || pathname.startsWith("/settings/");
-  // Which thread-sidebar CONTENT component renders is resolved by the shared
-  // hook (spec correction: the dock's SidebarPanel.tsx uses the exact same
-  // hook, so the decision lives in exactly one place instead of being
-  // duplicated here and there). The hook's `forceV1` option is no longer
-  // passed: it existed only because the settings nav used to live inside the
-  // v1 sidebar component, and upstream extracted it into
-  // `SettingsSidebarNav`, so `/settings*` now mounts no thread sidebar at
-  // all.
-  const ThreadSidebarComponent = useThreadSidebarComponent();
   const isMacosDesktop = isElectron && isMacPlatform(navigator.platform);
   const [sidebarWidth, setSidebarWidth] = useState(readInitialThreadSidebarWidth);
   // Subscribed rather than read once: the clamp must track live window size,
@@ -148,14 +249,21 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   // that would otherwise refresh a render-time snapshot.
   const viewportWidth = useSyncExternalStore(subscribeToViewportWidth, readViewportWidth);
   const sidebarMaximumWidth = resolveThreadSidebarMaximumWidth(viewportWidth);
-  // dock-chrome-strip.md, Section A: both the fullscreen subscription and the
-  // resulting inset mapping are now shared with `_chat.tsx`'s hoisted chrome
-  // strip via `useDesktopFullscreenState`/`resolveWorkspaceChromeInsetStyle`
-  // — no behavior change here, same inputs, same byte-equal output (see
-  // `workspaceChromeInset.test.ts`).
+  const resetSidebarWidth = () => {
+    try {
+      removeLocalStorageItem(THREAD_SIDEBAR_WIDTH_STORAGE_KEY);
+    } catch (error) {
+      console.error("Could not clear persisted thread sidebar width.", error);
+    }
+    setSidebarWidth(resolveInitialThreadSidebarWidth(null, viewportWidth));
+  };
+  // dock-chrome-strip.md, Section A: the fullscreen subscription and the
+  // traffic-light inset are shared with `_chat.tsx`'s chrome corner, so the
+  // two layouts cannot drift (see workspaceChromeInset.ts).
   const isWindowFullscreen = useDesktopFullscreenState(isMacosDesktop);
   const sidebarProviderStyle = {
     "--sidebar-width": `${sidebarWidth}px`,
+    "--panel-animation-duration": `${panelAnimationDurationMs}ms`,
     ...resolveWorkspaceChromeInsetStyle({
       isMacDesktop: isMacosDesktop,
       isFullscreen: isWindowFullscreen,
@@ -183,34 +291,39 @@ export function AppSidebarLayout({ children }: { children: ReactNode }) {
   }, [navigate, pathname]);
 
   return (
-    <SidebarProvider className="h-dvh! min-h-0!" defaultOpen style={sidebarProviderStyle}>
-      <Sidebar
-        side="left"
-        collapsible="offcanvas"
-        data-app-sidebar=""
-        className="border-r border-sidebar-border bg-sidebar text-sidebar-foreground"
-        resizable={{
-          maxWidth: sidebarMaximumWidth,
-          minWidth: THREAD_SIDEBAR_MIN_WIDTH,
-          shouldAcceptWidth: ({ currentWidth, nextWidth, wrapper }) =>
-            nextWidth <= currentWidth ||
-            wrapper.clientWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
-          storageKey: THREAD_SIDEBAR_WIDTH_STORAGE_KEY,
-          onResize: setSidebarWidth,
-        }}
+    <PanelAnimationSuppressionProvider value={panelAnimationsSuppressed}>
+      <SidebarProvider
+        className="h-dvh! min-h-0!"
+        data-panel-animations={routePanelAnimationsActive ? "true" : "false"}
+        defaultOpen
+        style={sidebarProviderStyle}
       >
-        {isOnSettings ? (
-          <>
-            <SidebarChromeHeader isElectron={isElectron} />
-            <SettingsSidebarNav pathname={pathname} />
-          </>
-        ) : (
-          <ThreadSidebarComponent />
-        )}
-        <SidebarRail />
-      </Sidebar>
-      {children}
-      <SidebarControl />
-    </SidebarProvider>
+        <Sidebar
+          side="left"
+          collapsible="offcanvas"
+          data-app-sidebar=""
+          role="navigation"
+          aria-label={isOnSettings ? "Settings" : "Threads"}
+          resizable={{
+            maxWidth: sidebarMaximumWidth,
+            minWidth: THREAD_SIDEBAR_MIN_WIDTH,
+            shouldAcceptWidth: ({ currentWidth, nextWidth, wrapper }) =>
+              nextWidth <= currentWidth ||
+              wrapper.clientWidth - nextWidth >= THREAD_MAIN_CONTENT_MIN_WIDTH,
+            storageKey: THREAD_SIDEBAR_WIDTH_STORAGE_KEY,
+            onResize: setSidebarWidth,
+          }}
+        >
+          {/* Both thread sidebars leave this header out, since in the dock
+              _chat.tsx's chrome corner renders it; pages without a dock get
+              it here, settings included. */}
+          <SidebarChromeHeader isElectron={isElectron} />
+          {isOnSettings ? <SettingsSidebarNav pathname={pathname} /> : <ThreadSidebarComponent />}
+          <SidebarRail onDoubleClick={resetSidebarWidth} />
+        </Sidebar>
+        {children}
+        <SidebarControl />
+      </SidebarProvider>
+    </PanelAnimationSuppressionProvider>
   );
 }

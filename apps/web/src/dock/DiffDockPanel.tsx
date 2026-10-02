@@ -27,38 +27,26 @@
  * `addDiffSurface`/`onOpenTurnDiff` gates, both of which bail out on
  * `!isServerThread` before ever opening a diff.
  *
- * `initialGitScope`: `DiffPanel`'s own prop is a `useState` INITIALIZER,
- * read once on mount and never re-synced from a later prop change.
- * `ChatView`'s inline usage compensates with a `key={...}` that force-
- * remounts `DiffPanel` once its git-status query resolves (see
- * `ChatView.tsx`'s `diffPanelGitStatusResolutionKey`). That remount trick is
- * deliberately NOT reproduced here — an OWNER RULING, not an oversight: a
- * dock panel mounts once and persists (it does not remount per thread
- * switch, unlike `ChatView`'s old inline surface), so this wrapper computes
- * `initialGitScope` from its OWN copy of the exact query `DiffPanel` runs
- * internally (`vcsEnvironment.status`, the same `activeCwd` formula as
- * `DiffPanel.tsx`'s own — NOT `ChatView.tsx`'s slightly different
- * `gitStatusCwd`, which also folds in `projectScriptCwd`; matching
- * `DiffPanel`'s own formula is what "derive it from DiffPanel's own
- * gitStatusQuery" means) and passes whatever it has at first render. If
- * that query is still pending the very first time this panel mounts, the
- * selected scope stays at the "branch" default until the user picks
- * "Working tree" from `DiffPanel`'s own scope dropdown by hand. Accepted
- * simplification: the dock panel mounting once per app session (rather than
- * once per surface-open) makes the pending-query window rare in practice,
- * and the query itself is shared/cached with `DiffPanel`'s own identical
- * call (same query key), so this costs nothing extra over what `DiffPanel`
- * already fetches — just an earlier read of the same cache entry.
+ * `workspaceMutationId`: upstream's `DiffPanel` now takes the id of the
+ * latest agent workspace mutation so it refreshes the working-tree diff once
+ * per mutation. Upstream's inline right panel computes it inside `ChatView`;
+ * this dock panel derives the same value from its own route thread
+ * (`threadWorkspaceMutationId.ts`, same formula).
+ *
+ * Scope: upstream dropped `DiffPanel`'s `initialGitScope` prop. The selected
+ * scope now lives per thread in `diffPanelStore` (default "unstaged", the
+ * working tree), and `ChatView`'s own actions select it there. This wrapper's
+ * old copy of the status query, which only existed to seed that removed
+ * initializer, went with it.
  */
 import { useParams } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 
-import { useEnvironmentQuery } from "~/state/query";
-import { useProject, useThread } from "~/state/entities";
+import { useThread } from "~/state/entities";
 import { resolveThreadRouteRef } from "~/threadRoutes";
-import { vcsEnvironment } from "~/state/vcs";
 
 import type { PanelProps } from "./lib/types";
+import { useThreadWorkspaceMutationId } from "./threadWorkspaceMutationId";
 
 const DiffPanel = lazy(() => import("~/components/DiffPanel"));
 
@@ -68,23 +56,7 @@ export default function DiffDockPanel(_props: PanelProps) {
     select: (params) => resolveThreadRouteRef(params),
   });
   const activeThread = useThread(routeThreadRef);
-  const activeProjectId = activeThread?.projectId ?? null;
-  const activeProject = useProject(
-    activeThread && activeProjectId
-      ? { environmentId: activeThread.environmentId, projectId: activeProjectId }
-      : null,
-  );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.workspaceRoot;
-  const gitStatusQuery = useEnvironmentQuery(
-    activeThread !== null && activeThread !== undefined && activeCwd != null
-      ? vcsEnvironment.status({
-          environmentId: activeThread.environmentId,
-          input: { cwd: activeCwd },
-        })
-      : null,
-  );
-  const initialGitScope: "branch" | "unstaged" =
-    gitStatusQuery.data?.hasWorkingTreeChanges === true ? "unstaged" : "branch";
+  const workspaceMutationId = useThreadWorkspaceMutationId(activeThread);
 
   if (!routeThreadRef) {
     return (
@@ -99,7 +71,7 @@ export default function DiffDockPanel(_props: PanelProps) {
       <DiffPanel
         mode="embedded"
         composerDraftTarget={routeThreadRef}
-        initialGitScope={initialGitScope}
+        workspaceMutationId={workspaceMutationId}
       />
     </Suspense>
   );

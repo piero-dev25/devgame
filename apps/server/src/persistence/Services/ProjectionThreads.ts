@@ -16,6 +16,8 @@ import {
   RuntimeMode,
   SpaceId,
   TaskRef,
+  ThreadLinkedPullRequest,
+  ThreadTitleState,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -30,6 +32,7 @@ export const ProjectionThread = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
+  titleState: Schema.optional(Schema.NullOr(ThreadTitleState)),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -40,16 +43,21 @@ export const ProjectionThread = Schema.Struct({
   spaceId: Schema.NullOr(SpaceId),
   // Opaque tracker pointer.
   taskRef: Schema.NullOr(TaskRef),
+  linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
+  branchPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   archivedAt: Schema.NullOr(IsoDateTime),
   settledOverride: Schema.NullOr(Schema.Literals(["settled", "active"])),
   settledAt: Schema.NullOr(IsoDateTime),
+  unsettledAt: Schema.NullOr(IsoDateTime),
   snoozedUntil: Schema.NullOr(IsoDateTime),
   snoozedAt: Schema.NullOr(IsoDateTime),
   pinnedAt: Schema.NullOr(IsoDateTime),
   pinOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
+  activeOrderKey: Schema.optional(Schema.NullOr(Schema.String)),
+  autoSettleDisabledAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   titleRegenerationRequestId: Schema.optional(Schema.NullOr(CommandId)),
   titleRegenerationStartedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   latestUserMessageAt: Schema.NullOr(IsoDateTime),
@@ -64,16 +72,6 @@ export const GetProjectionThreadInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type GetProjectionThreadInput = typeof GetProjectionThreadInput.Type;
-
-export const DeleteProjectionThreadInput = Schema.Struct({
-  threadId: ThreadId,
-});
-export type DeleteProjectionThreadInput = typeof DeleteProjectionThreadInput.Type;
-
-export const ListProjectionThreadsByProjectInput = Schema.Struct({
-  projectId: ProjectId,
-});
-export type ListProjectionThreadsByProjectInput = typeof ListProjectionThreadsByProjectInput.Type;
 
 export const ClearThreadSpaceReferencesInput = Schema.Struct({
   spaceId: SpaceId,
@@ -98,22 +96,6 @@ export interface ProjectionThreadRepositoryShape {
   readonly getById: (
     input: GetProjectionThreadInput,
   ) => Effect.Effect<Option.Option<ProjectionThread>, ProjectionRepositoryError>;
-
-  /**
-   * List projected threads for a project.
-   *
-   * Returned in deterministic creation order.
-   */
-  readonly listByProjectId: (
-    input: ListProjectionThreadsByProjectInput,
-  ) => Effect.Effect<ReadonlyArray<ProjectionThread>, ProjectionRepositoryError>;
-
-  /**
-   * Soft-delete a projected thread row by id.
-   */
-  readonly deleteById: (
-    input: DeleteProjectionThreadInput,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
 
   /**
    * Bulk-clears `spaceId` (to null, i.e. project-wide) on every thread row

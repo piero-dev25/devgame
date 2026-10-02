@@ -103,7 +103,7 @@ const DEFAULT_MAX_CONCURRENT_GENERATIONS = 4;
  * regardless (a header can be absent or understate the truth). */
 const DEFAULT_maxGlbBytes = 100 * 1_024 * 1_024; // 100MB
 
-class GenerationInternalError extends Schema.TaggedErrorClass<GenerationInternalError>()(
+class GenerationInternalError extends Schema.TaggedError<GenerationInternalError>()(
   "GenerationInternalError",
   { detail: Schema.String },
 ) {

@@ -105,14 +105,12 @@ describe("createUnitySetupProbeAtom", () => {
     expect(fetchProbe).toHaveBeenCalledWith({
       environmentId,
       projectId: projectOneRef.projectId,
-      httpBaseUrl: preparedConnection.httpBaseUrl,
-      httpAuthorization: preparedConnection.httpAuthorization,
+      prepared: preparedConnection,
     });
     expect(fetchProbe).toHaveBeenCalledWith({
       environmentId,
       projectId: projectTwoRef.projectId,
-      httpBaseUrl: preparedConnection.httpBaseUrl,
-      httpAuthorization: preparedConnection.httpAuthorization,
+      prepared: preparedConnection,
     });
 
     registry.dispose();
@@ -157,8 +155,7 @@ describe("createUnitySetupProbeAtom", () => {
     expect(fetchProbe).toHaveBeenCalledWith({
       environmentId,
       projectId,
-      httpBaseUrl: preparedConnection.httpBaseUrl,
-      httpAuthorization: preparedConnection.httpAuthorization,
+      prepared: preparedConnection,
     });
 
     registry.dispose();

@@ -46,7 +46,7 @@ describe("resolveWorkspaceChromeInsetStyle", () => {
     );
   });
 
-  it("MACOS_TRAFFIC_LIGHTS_LEFT_INSET is exactly AppSidebarLayout's original literal value", () => {
-    expect(MACOS_TRAFFIC_LIGHTS_LEFT_INSET).toBe("90px");
+  it("MACOS_TRAFFIC_LIGHTS_LEFT_INSET is exactly AppSidebarLayout's upstream value (#11906: preload-written var, 90px fallback)", () => {
+    expect(MACOS_TRAFFIC_LIGHTS_LEFT_INSET).toBe("var(--desktop-window-controls-inset, 90px)");
   });
 });

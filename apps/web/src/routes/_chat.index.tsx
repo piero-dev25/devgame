@@ -1,13 +1,17 @@
+import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { LinkIcon, PlusIcon, RotateCcwIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { LinkIcon, PlusIcon } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-import { openCommandPalette } from "../commandPaletteBus";
+import { isLocalEnvironmentDisabled } from "../localEnvironment";
+import { isElectron } from "../env";
+import { NoProjectsHero } from "../components/NoProjectsHero";
 import { sortScopedProjectsForSidebar } from "../components/Sidebar.logic";
 import { Button } from "../components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "../components/ui/empty";
 import { SidebarInset } from "../components/ui/sidebar";
+import { WorkspacePageHeader } from "../components/WorkspacePageHeader";
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import {
   useAllEnvironmentShellsBootstrapped,
@@ -17,16 +21,15 @@ import {
 import { useEnvironments } from "../state/environments";
 import { APP_DISPLAY_NAME } from "~/branding";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
-import { isElectron } from "~/env";
 import { cn } from "~/lib/utils";
-import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 function ChatIndexRouteView() {
   const { authGateState } = Route.useRouteContext();
-  const { environments } = useEnvironments();
+  const { environments, isReady } = useEnvironments();
 
-  if (authGateState.status === "hosted-static" && environments.length === 0) {
-    return <HostedStaticOnboardingState />;
+  if (authGateState.status === "hosted-static") {
+    if (!isReady) return null;
+    if (environments.length === 0) return <HostedStaticOnboardingState />;
   }
 
   return <IndexDraftLanding />;
@@ -81,55 +84,29 @@ function IndexDraftLanding() {
       />
     ) : null;
   }
+  // First-run routing to the welcome wizard happens in FirstRunGate at the
+  // root, before this route ever renders.
   return <NoProjectsHero />;
 }
 
 function DraftStartError({ onRetry }: { readonly onRetry: () => void }) {
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
+      {isElectron ? <WorkspacePageHeader electron /> : null}
       <Empty className="flex-1">
         <EmptyHeader className="max-w-md">
-          <EmptyTitle className="text-foreground text-xl">Couldn’t start a new thread</EmptyTitle>
-          <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
+          <EmptyTitle>Couldn’t start a new thread</EmptyTitle>
+          <EmptyDescription>
             The project is still available. Try opening the draft again.
           </EmptyDescription>
           <div className="mt-5 flex justify-center">
             <Button size="sm" onClick={onRetry}>
-              <RotateCcwIcon className="size-4" />
+              <RefreshIcon size="md" />
               Try again
             </Button>
           </div>
         </EmptyHeader>
       </Empty>
-    </SidebarInset>
-  );
-}
-
-function NoProjectsHero() {
-  const openAddProject = useCallback(() => openCommandPalette({ open: "add-project" }), []);
-
-  return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
-        <Empty className="flex-1">
-          <div className="w-full max-w-lg px-8 py-12">
-            <EmptyHeader className="max-w-none">
-              <EmptyTitle className="text-foreground text-2xl sm:text-3xl">
-                What should we work on?
-              </EmptyTitle>
-              <EmptyDescription className="mt-2 text-sm text-muted-foreground/78">
-                Add a project to start your first thread.
-              </EmptyDescription>
-              <div className="mt-6 flex justify-center">
-                <Button size="sm" onClick={openAddProject}>
-                  <PlusIcon className="size-4" />
-                  Add project
-                </Button>
-              </div>
-            </EmptyHeader>
-          </div>
-        </Empty>
-      </div>
     </SidebarInset>
   );
 }
@@ -140,35 +117,30 @@ export const Route = createFileRoute("/_chat/")({
 
 function HostedStaticOnboardingState() {
   const cloudEnabled = hasCloudPublicConfig();
+  const localEnvironmentOff = isLocalEnvironmentDisabled();
+  const description = localEnvironmentOff
+    ? "The local environment is turned off. Connect a remote environment, or turn the local environment back on in Connections."
+    : cloudEnabled
+      ? "Enable T3 Connect on that machine, then open Connections here to sign in with the same account. You can also add the machine using a pairing link."
+      : "Open Connections and add that machine using its pairing link. This app must be able to reach it.";
 
   return (
-    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground">
+    <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden bg-background">
         {/*
-          docs/specs/unified-topband.md, Section B (re-check against the
-          corner, per spec — SUPERSEDES the ffafc3728 strip-row reasoning
-          this comment used to carry): the old reasoning ("does not
-          double-stack against the strip") relied on the strip being IN
-          FLOW, a separate row ABOVE this content that pushed it down —
-          spatial collision was structurally impossible. The corner cell
-          that replaced the strip is `position: absolute` (`_chat.tsx`'s
-          `WorkspaceChromeStrip`), OUT of flow, so nothing pushes this
-          header down anymore: without `pt-9` (36px — the corner's own
-          height, `--workspace-topbar-height` overridden locally there) on
-          Electron, this header's own brand text would render directly
-          UNDER the corner's z-20 overlay at the same top-left pixels.
-          `isElectron`-gated, matching the corner's own gate exactly — on
-          the plain web build there is no corner to clear, and the ORIGINAL
-          `COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS` narrow/mobile-viewport
-          behavior (unchanged, still `SidebarProvider`-`open`-state-driven,
-          still never fires on thread routes — see workspaceTitlebar.ts)
-          stays exactly as before.
+          docs/specs/unified-topband.md, Section B: on Electron the chrome
+          corner (`_chat.tsx`'s `WorkspaceChromeStrip`) is `position:
+          absolute` at z-20 over the top-left of every `_chat` route, and
+          this route has no dock to reserve room for it. WorkspacePageHeader
+          has a fixed height, so the clearance is a left inset of the
+          corner's own measured width rather than DevGame's old `pt-9`
+          (which would squash the row). Web has no corner, so no inset.
         */}
-        <header
+        <WorkspacePageHeader
+          electron={isElectron}
           className={cn(
-            "border-b border-border px-3 py-2 transition-[padding-left] duration-200 ease-linear motion-reduce:transition-none sm:px-5 sm:py-3",
-            isElectron && "pt-9",
-            COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS,
+            "border-b border-border",
+            isElectron && "pl-[calc(var(--workspace-corner-width)+var(--workspace-gutter))]",
           )}
         >
           <div className="flex items-center gap-2">
@@ -176,7 +148,7 @@ function HostedStaticOnboardingState() {
               {APP_DISPLAY_NAME}
             </span>
           </div>
-        </header>
+        </WorkspacePageHeader>
 
         <Empty className="flex-1">
           <div className="w-full max-w-xl rounded-3xl border border-border/55 bg-card/20 px-8 py-12 shadow-sm/5">
@@ -184,18 +156,16 @@ function HostedStaticOnboardingState() {
               <div className="mx-auto mb-5 flex size-11 items-center justify-center rounded-xl border border-border/70 bg-background/70 text-muted-foreground">
                 <LinkIcon className="size-5" />
               </div>
-              <EmptyTitle className="text-foreground text-xl">
-                Connect an environment to get started
-              </EmptyTitle>
-              <EmptyDescription className="mt-2 text-sm leading-relaxed text-muted-foreground/78">
-                {cloudEnabled
-                  ? "Sign in to T3 Connect to connect a linked environment through its managed tunnel, or add a reachable backend manually."
-                  : "Add a reachable backend manually to start working from this browser."}
+              <EmptyTitle>Connect to a computer running DevGame</EmptyTitle>
+              <EmptyDescription>
+                This app connects to DevGame running on your computer or a server. Start the DevGame
+                desktop app or command-line server on that machine and keep it running.
               </EmptyDescription>
+              <EmptyDescription>{description}</EmptyDescription>
               <div className="mt-6 flex justify-center">
                 <Button render={<Link to="/settings/connections" />} size="sm">
                   <PlusIcon className="size-4" />
-                  {cloudEnabled ? "Open Connections" : "Add environment"}
+                  Open Connections
                 </Button>
               </div>
             </EmptyHeader>

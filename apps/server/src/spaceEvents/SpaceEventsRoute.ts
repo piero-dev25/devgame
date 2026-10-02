@@ -59,6 +59,7 @@ import * as Socket from "effect/unstable/socket/Socket";
 import type { OrchestrationSpace, ProjectId } from "@t3tools/contracts";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { runSocketTextReadLoop } from "../editorPresence/socketReadLoop.ts";
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { buildSpacesFrame, type SpaceEventsEntry } from "./protocol.ts";
@@ -186,7 +187,7 @@ const runSpaceEventsSubscriberConnection = (
   >,
 ) =>
   Effect.gen(function* () {
-    const write = yield* socket.writer;
+    const { write } = yield* socket.writer;
     const send: SpaceEventsRegistry.SpaceEventsSubscriberSend = (frame) =>
       write(frame).pipe(Effect.catch(() => Effect.void));
 
@@ -198,56 +199,55 @@ const runSpaceEventsSubscriberConnection = (
     const rejectUpgrade = (code: number, reason: string) =>
       write(new Socket.CloseEvent(code, reason)).pipe(Effect.catch(() => Effect.void));
 
-    yield* socket
-      .runString(() => Effect.void, {
-        // The writer is only actually pumped once the read loop is running
-        // (see EditorPresenceRoute.ts's identical comment) — a write issued
-        // before that sits in an internal queue that nothing ever drains
-        // and hangs indefinitely. So authentication, the rejecting close on
-        // failure, registration, and the initial `spaces` frame all have to
-        // happen from inside `onOpen`.
-        onOpen: authenticate.pipe(
-          Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            rejectUpgrade(
-              credentialCloseCode(error),
-              EnvironmentAuth.serverAuthCredentialReason(error),
-            ),
-          ),
-          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
-            rejectUpgrade(SPACE_EVENTS_INTERNAL_ERROR_CLOSE_CODE, "internal_error"),
-          ),
-          Effect.flatMap(() =>
-            Effect.gen(function* () {
-              registered = true;
-              yield* registry.addSubscriber(projectId, send);
-              const spaces = yield* snapshotQuery.getActiveSpacesForProject(projectId);
-              yield* send(buildSpacesFrame(projectId, spaces.map(toSpaceEventsEntry)));
-            }).pipe(
-              // A read-model failure while sending the initial snapshot is a
-              // server fault, not a credential problem — same close code
-              // (and same "keep retrying") as an auth internal error.
-              Effect.catch(() =>
-                rejectUpgrade(SPACE_EVENTS_INTERNAL_ERROR_CLOSE_CODE, "internal_error"),
-              ),
+    yield* runSocketTextReadLoop(socket, {
+      // Subscribe-only: inbound frames are ignored (see protocol.ts).
+      onMessage: () => Effect.void,
+      // A write only reaches the peer once the reader has completed the
+      // upgrade (see EditorPresenceRoute.ts's identical comment and
+      // `../editorPresence/socketReadLoop.ts`). So authentication, the
+      // rejecting close on failure, registration, and the initial `spaces`
+      // frame all happen from inside `onOpen`.
+      onOpen: authenticate.pipe(
+        // Registration runs only on a successful authentication. The
+        // rejection arms below sit after it, so a rejected subscriber is
+        // closed without ever being registered.
+        Effect.flatMap(() =>
+          Effect.gen(function* () {
+            registered = true;
+            yield* registry.addSubscriber(projectId, send);
+            const spaces = yield* snapshotQuery.getActiveSpacesForProject(projectId);
+            yield* send(buildSpacesFrame(projectId, spaces.map(toSpaceEventsEntry)));
+          }).pipe(
+            // A read-model failure while sending the initial snapshot is a
+            // server fault, not a credential problem — same close code
+            // (and same "keep retrying") as an auth internal error.
+            Effect.catch(() =>
+              rejectUpgrade(SPACE_EVENTS_INTERNAL_ERROR_CLOSE_CODE, "internal_error"),
             ),
           ),
         ),
-      })
-      .pipe(
-        // A close we initiate ourselves (one of the auth codes above)
-        // surfaces as a FAILURE of the read loop, not a clean completion —
-        // see EditorPresenceRoute.ts's identical comment and
-        // Socket.ts:549's `closeCodeIsError` default.
-        Effect.catchFilter(
-          Socket.SocketCloseError.filterClean(isSpaceEventsAuthCloseCode),
-          () => Effect.void,
-        ),
-        Effect.ensuring(
-          Effect.suspend(() =>
-            registered ? registry.removeSubscriber(projectId, send) : Effect.void,
+        Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
+          rejectUpgrade(
+            credentialCloseCode(error),
+            EnvironmentAuth.serverAuthCredentialReason(error),
           ),
         ),
-      );
+        Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, () =>
+          rejectUpgrade(SPACE_EVENTS_INTERNAL_ERROR_CLOSE_CODE, "internal_error"),
+        ),
+      ),
+      // A close we initiate ourselves (one of the auth codes above)
+      // surfaces as a FAILURE of the read loop, not a clean completion —
+      // every close fails the socket's reader. See EditorPresenceRoute.ts's
+      // identical comment.
+      isServerInitiatedCloseCode: isSpaceEventsAuthCloseCode,
+    }).pipe(
+      Effect.ensuring(
+        Effect.suspend(() =>
+          registered ? registry.removeSubscriber(projectId, send) : Effect.void,
+        ),
+      ),
+    );
   });
 
 export const spaceEventsRouteLayer = Layer.unwrap(

@@ -24,7 +24,7 @@ import {
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
 } from "@t3tools/contracts";
-import type { AuthEnvironmentScope } from "@t3tools/contracts";
+import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
 import { parseAllowedOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as NodeUtil from "node:util";
@@ -69,7 +69,7 @@ const appendDpopChallengeOnUnauthorized = (error: EnvironmentAuthInvalidError) =
     return yield* error;
   });
 
-export const currentEnvironmentTraceId = Effect.currentParentSpan.pipe(
+const currentEnvironmentTraceId = Effect.currentParentSpan.pipe(
   Effect.map((span) => span.traceId),
   Effect.orElseSucceed(() => "unavailable"),
 );
@@ -99,10 +99,20 @@ export function annotateEnvironmentRequest(endpoint: string) {
   });
 }
 
-export function failEnvironmentAuthInvalid(reason: EnvironmentAuthInvalidReason) {
+export function failEnvironmentAuthInvalid(
+  reason: EnvironmentAuthInvalidReason,
+  dpopFailureReason?: DpopFailureReason,
+) {
   return currentEnvironmentTraceId.pipe(
     Effect.flatMap((traceId) =>
-      Effect.fail(new EnvironmentAuthInvalidError({ code: "auth_invalid", reason, traceId })),
+      Effect.fail(
+        new EnvironmentAuthInvalidError({
+          code: "auth_invalid",
+          reason,
+          ...(dpopFailureReason === undefined ? {} : { dpopFailureReason }),
+          traceId,
+        }),
+      ),
     ),
   );
 }
@@ -201,6 +211,23 @@ export function failEnvironmentInternal(reason: EnvironmentInternalErrorReason, 
   });
 }
 
+const appendSessionCookie = (cookieName: string, token: string, expiresAt: DateTime.DateTime) =>
+  Effect.fromResult(
+    Cookies.set(Cookies.empty, cookieName, token, {
+      expires: DateTime.toDate(expiresAt),
+      httpOnly: true,
+      path: "/",
+      sameSite: "lax",
+    }),
+  ).pipe(
+    Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")),
+    Effect.flatMap((cookies) =>
+      HttpEffect.appendPreResponseHandler((_request, response) =>
+        Effect.succeed(HttpServerResponse.mergeCookies(response, cookies)),
+      ),
+    ),
+  );
+
 export const requireEnvironmentScope = Effect.fn("environment.auth.requireScope")(function* (
   scope: AuthEnvironmentScope,
 ) {
@@ -220,7 +247,10 @@ export const environmentAuthenticatedAuthLayer = Layer.effect(
         const request = yield* HttpServerRequest.HttpServerRequest;
         const session = yield* serverAuth.authenticateHttpRequest(request).pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            failEnvironmentAuthInvalid(
+              EnvironmentAuth.serverAuthCredentialReason(error),
+              EnvironmentAuth.serverAuthDpopFailureReason(error),
+            ),
           ),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("internal_error", error),
@@ -251,7 +281,22 @@ export const authHttpApiLayer = HttpApiBuilder.group(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
-            return yield* serverAuth.getSessionState(request);
+            const result = yield* serverAuth.getSessionState(request);
+            const credential = EnvironmentAuth.selectRequestCredential(
+              request,
+              sessions.cookieName,
+              sessions.legacyCookieName,
+            );
+            if (
+              credential?.source === "legacy-cookie" &&
+              result.authenticated &&
+              result.sessionMethod === "browser-session-cookie" &&
+              result.expiresAt
+            ) {
+              yield* appendSessionCookie(sessions.cookieName, credential.token, result.expiresAt);
+              yield* appendCredentialResponseHeaders;
+            }
+            return result;
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("internal_error", error),
@@ -268,14 +313,24 @@ export const authHttpApiLayer = HttpApiBuilder.group(
               args.payload.credential,
               deriveAuthClientMetadata({ request }),
             );
-            const sessionCookies = yield* Effect.fromResult(
-              Cookies.set(Cookies.empty, sessions.cookieName, result.sessionToken, {
+            const cookieName = result.cookieName ?? sessions.cookieName;
+            const selectedCookie = yield* Effect.fromResult(
+              Cookies.set(Cookies.empty, cookieName, result.sessionToken, {
                 expires: DateTime.toDate(result.response.expiresAt),
                 httpOnly: true,
                 path: "/",
                 sameSite: "lax",
               }),
             ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+            const sessionCookies = result.expireNormalCookie
+              ? yield* Effect.fromResult(
+                  Cookies.expireCookie(selectedCookie, sessions.cookieName, {
+                    httpOnly: true,
+                    path: "/",
+                    sameSite: "lax",
+                  }),
+                ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")))
+              : selectedCookie;
 
             yield* HttpEffect.appendPreResponseHandler((_request, response) =>
               Effect.succeed(HttpServerResponse.mergeCookies(response, sessionCookies)),
@@ -284,7 +339,10 @@ export const authHttpApiLayer = HttpApiBuilder.group(
             return result.response;
           },
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            failEnvironmentAuthInvalid(
+              EnvironmentAuth.serverAuthCredentialReason(error),
+              EnvironmentAuth.serverAuthDpopFailureReason(error),
+            ),
           ),
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("browser_session_issuance_failed", error),
@@ -331,9 +389,14 @@ export const authHttpApiLayer = HttpApiBuilder.group(
             }
             const proofKeyThumbprint = args.headers.dpop
               ? yield* verifyRequestDpopProof({ request }).pipe(
-                  Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, () =>
+                  Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
                     appendDpopChallengeHeader.pipe(
-                      Effect.andThen(failEnvironmentAuthInvalid("invalid_credential")),
+                      Effect.andThen(
+                        failEnvironmentAuthInvalid(
+                          "invalid_credential",
+                          EnvironmentAuth.serverAuthDpopFailureReason(error),
+                        ),
+                      ),
                     ),
                   ),
                   Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
@@ -360,7 +423,10 @@ export const authHttpApiLayer = HttpApiBuilder.group(
           },
           traceRelayRequest,
           Effect.catchIf(EnvironmentAuth.isServerAuthCredentialError, (error) =>
-            failEnvironmentAuthInvalid(EnvironmentAuth.serverAuthCredentialReason(error)),
+            failEnvironmentAuthInvalid(
+              EnvironmentAuth.serverAuthCredentialReason(error),
+              EnvironmentAuth.serverAuthDpopFailureReason(error),
+            ),
           ),
           Effect.catchIf(EnvironmentAuth.isServerAuthInvalidRequestError, (error) =>
             failEnvironmentInvalidRequest(EnvironmentAuth.serverAuthInvalidRequestReason(error)),

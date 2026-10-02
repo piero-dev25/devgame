@@ -38,4 +38,8 @@ describe("isDevProxiedWebSocketPath", () => {
   it("/unity is plain HTTP, not a websocket upgrade — must stay off this list", () => {
     expect(isDevProxiedWebSocketPath("/unity")).toBe(false);
   });
+
+  it("/api carries the device-hub stream sockets, so it must upgrade", () => {
+    expect(isDevProxiedWebSocketPath("/api")).toBe(true);
+  });
 });

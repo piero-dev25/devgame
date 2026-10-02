@@ -48,7 +48,10 @@ import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { Globe2, Plus, X } from "lucide-react";
 import { useCallback, useContext, useMemo } from "react";
 
-import { useComposerDraftStore } from "~/composerDraftStore";
+import type { PreviewAnnotationPayload } from "@t3tools/contracts";
+
+import { type ComposerImageAttachment, useComposerDraftStore } from "~/composerDraftStore";
+import { readLocalApi } from "~/localApi";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { cn } from "~/lib/utils";
 import { faviconUrlForOrigin } from "~/lib/favicon";
@@ -60,11 +63,13 @@ import {
 import { useProject, useThread } from "~/state/entities";
 import { previewEnvironment } from "~/state/preview";
 
+import { agentControlledBrowserCloseConfirmation } from "../components/ChatView.logic";
 import { closePreviewSession } from "../components/preview/closePreviewSession";
 import { getConfiguredPreviewUrls } from "../components/preview/previewEmptyStateLogic";
 import { addBrowserSurface } from "../components/preview/addBrowserSurface";
 import { PreviewPanel } from "../components/preview/PreviewPanel";
 import { ThreadRouteContext } from "./ChatPanel";
+import { sendPreviewAnnotationToChat } from "./chatDockHandle";
 import type { PanelProps } from "./lib/types";
 
 const BROWSER_UNAVAILABLE_REASON =
@@ -225,14 +230,40 @@ export default function BrowserDockPanel(_props: PanelProps) {
   const onCloseTab = useCallback(
     (tabId: string) => {
       if (!threadRef) return;
-      void closePreviewSession({
-        closePreview,
-        snapshot: previewState.sessions[tabId] ?? null,
-        tabId,
-        threadRef,
-      });
+      const close = () => {
+        void closePreviewSession({
+          closePreview,
+          snapshot: previewState.sessions[tabId] ?? null,
+          tabId,
+          threadRef,
+        });
+      };
+      // Upstream asks before closing a browser the agent is driving.
+      const message = agentControlledBrowserCloseConfirmation([tabId], previewState.desktopByTabId);
+      if (!message) {
+        close();
+        return;
+      }
+      const localApi = readLocalApi();
+      if (!localApi) return;
+      void localApi.dialogs.confirm(message, { variant: "destructive" }).then(
+        (confirmed) => {
+          if (confirmed) close();
+        },
+        () => undefined,
+      );
     },
-    [closePreview, previewState.sessions, threadRef],
+    [closePreview, previewState.desktopByTabId, previewState.sessions, threadRef],
+  );
+
+  // "Send" from the element picker goes to this thread's chat, a dock
+  // sibling: see `sendPreviewAnnotationToChat`.
+  const onSendAnnotation = useCallback(
+    (annotation: PreviewAnnotationPayload, image: ComposerImageAttachment | null) => {
+      if (!threadRef) return;
+      sendPreviewAnnotationToChat(threadRef, annotation, image);
+    },
+    [threadRef],
   );
 
   if (!threadRef) {
@@ -261,6 +292,7 @@ export default function BrowserDockPanel(_props: PanelProps) {
           tabId={previewState.activeTabId}
           configuredUrls={configuredPreviewUrls}
           visible
+          onSendAnnotation={onSendAnnotation}
         />
       </div>
     </div>

@@ -1,8 +1,9 @@
 // Posts a real HTTP request to `POST /unity/pipeline-install`
 // (`apps/server/src/unity/UnityPipelineInstallRoute.ts`'s
 // `unityPipelineInstallRouteLayer`) — plan §5's increment 4a, the consented
-// `unity pipeline install`. Modeled closely on `./fetchSetupProbe.ts`: same
-// `buildEnvironmentAuthHeaders`/`withEnvironmentCredentials` plumbing, same
+// `unity pipeline install`. Modeled closely on `./fetchSetupProbe.ts`: both
+// post through `../lib/forkEnvironmentRoute.ts` (upstream's
+// `executeAuthenticatedEnvironmentHttpRequest`) at the same
 // `runtime.runPromise` boundary. The body carries only the opaque project id;
 // the canonical root is server-resolved, never caller-supplied — see
 // `UnityPipelineInstallInput`'s own doc comment). Kept as its own file for
@@ -15,50 +16,37 @@ import {
   UNITY_PIPELINE_INSTALL_PATH,
   UnityPipelineInstallResult,
 } from "@t3tools/contracts";
-import type { PreparedHttpAuthorization } from "@t3tools/client-runtime/connection";
-import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
-import { ManagedRelay } from "@t3tools/client-runtime/relay";
-import {
-  buildEnvironmentAuthHeaders,
-  withEnvironmentCredentials,
-} from "@t3tools/client-runtime/state/environmentHttpAuth";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/unstable/http";
+import { FetchHttpClient } from "effect/unstable/http";
 
+import { postForkEnvironmentRoute } from "../lib/forkEnvironmentRoute";
 import { runtime } from "../lib/runtime";
 
 // Pre-composed once at module scope — same convention as
 // `fetchSetupProbe.ts`'s `decodeUnitySetupProbeResult` (#99).
 const decodeUnityPipelineInstallResult = Schema.decodeUnknownEffect(UnityPipelineInstallResult);
 
+/** Bounds the whole authenticated call. The install runs one or more `unity`
+ * CLI commands server-side (each capped at 35s) plus the selection package
+ * install and pairing, so this is deliberately generous. */
+const UNITY_PIPELINE_INSTALL_TIMEOUT_MS = 5 * 60_000;
+
 function postEffect(input: {
   readonly projectId: ProjectId;
-  readonly httpBaseUrl: string;
-  readonly httpAuthorization: PreparedHttpAuthorization | null;
+  readonly prepared: PreparedConnection;
 }) {
-  const url = environmentEndpointUrl(input.httpBaseUrl, UNITY_PIPELINE_INSTALL_PATH);
   return Effect.gen(function* () {
-    const signer = yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner);
-    const headers = yield* buildEnvironmentAuthHeaders(
-      input.httpAuthorization,
-      "POST",
-      url,
-      signer,
-    );
-    const request = HttpClientRequest.post(url).pipe(
-      HttpClientRequest.setHeaders({ ...headers }),
-      HttpClientRequest.bodyJsonUnsafe({ projectId: input.projectId }),
-    );
-    const client = yield* HttpClient.HttpClient;
-    const response = yield* withEnvironmentCredentials(
-      input.httpAuthorization,
-      client.execute(request),
-    );
-    if (response.status === 403) {
-      throw new Error("Forbidden: insufficient scope");
-    }
-    return yield* decodeUnityPipelineInstallResult(yield* response.json);
+    // A `presence:command`-scope refusal is a text 403, which the shared
+    // helper fails as an undeclared status before any decode is attempted.
+    const body = yield* postForkEnvironmentRoute({
+      prepared: input.prepared,
+      path: UNITY_PIPELINE_INSTALL_PATH,
+      body: { projectId: input.projectId },
+      timeoutMs: UNITY_PIPELINE_INSTALL_TIMEOUT_MS,
+    });
+    return yield* decodeUnityPipelineInstallResult(body);
   }).pipe(Effect.provide(FetchHttpClient.layer));
 }
 
@@ -73,16 +61,15 @@ function postEffect(input: {
  * an explicit confirm-dialog click; `EngineToolbar.tsx`'s `Setup Unity
  * Integrations` CTA (owner ruling: the click IS the consent, no dialog) goes
  * straight from a single header click to this call, via
- * `ChatView.tsx`'s `handleSetupUnityIntegrations`. Rejects (a plain thrown
- * value) on a transport-level failure or a `presence:command`-scope refusal
- * (HTTP 403) only — a resolved value always has a real
+ * `ChatView.tsx`'s `handleSetupUnityIntegrations`. Rejects on a
+ * transport-level failure, a `presence:command`-scope refusal (HTTP 403), a
+ * rejected credential, or a timeout only — a resolved value always has a real
  * `UnityPipelineInstallResult` to render, same posture `fetchUnitySetupProbe`
  * documents for its own 403 case.
  */
 export function postUnityPipelineInstall(input: {
   readonly projectId: ProjectId;
-  readonly httpBaseUrl: string;
-  readonly httpAuthorization: PreparedHttpAuthorization | null;
+  readonly prepared: PreparedConnection;
 }): Promise<UnityPipelineInstallResult> {
   return runtime.runPromise(postEffect(input));
 }

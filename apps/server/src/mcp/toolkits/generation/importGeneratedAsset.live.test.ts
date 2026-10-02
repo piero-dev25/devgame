@@ -77,8 +77,7 @@ const projectionStub = (): ProjectionSnapshotQuery.ProjectionSnapshotQuery["Serv
   });
 
 const InfraLayer = Layer.mergeAll(
-  ServerSecretStore.layer,
-  NodeCrypto.layer,
+  ServerSecretStore.layer.pipe(Layer.provideMerge(NodeCrypto.layer)),
   FetchHttpClient.layer,
 ).pipe(
   Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-import-live-" })),

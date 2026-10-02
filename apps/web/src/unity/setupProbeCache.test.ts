@@ -11,6 +11,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { fetchUnitySetupProbeCached, invalidateUnitySetupProbeCache } from "./setupProbeCache";
 
 function probeResponse(overrides: { readonly pipelinePackageInstalled: boolean }) {
@@ -53,8 +54,7 @@ describe("fetchUnitySetupProbeCached", () => {
     const input = {
       environmentId: EnvironmentId.make("env-1"),
       projectId: ProjectId.make("project-1"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
     const [a, b, c] = await Promise.all([
       fetchUnitySetupProbeCached(input),
@@ -79,14 +79,15 @@ describe("fetchUnitySetupProbeCached", () => {
       fetchUnitySetupProbeCached({
         environmentId: EnvironmentId.make("env-1"),
         projectId: ProjectId.make("project-1"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
       fetchUnitySetupProbeCached({
         environmentId: EnvironmentId.make("env-2"),
         projectId: ProjectId.make("project-1"),
-        httpBaseUrl: "http://127.0.0.1:3001",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection({
+          environmentId: EnvironmentId.make("env-2"),
+          httpBaseUrl: "http://127.0.0.1:3001",
+        }),
       }),
     ]);
 
@@ -101,8 +102,7 @@ describe("fetchUnitySetupProbeCached", () => {
     vi.stubGlobal("fetch", fetchMock);
     const sharedConnection = {
       environmentId: EnvironmentId.make("env-1"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
     const projectOneInput = {
       ...sharedConnection,
@@ -135,8 +135,7 @@ describe("fetchUnitySetupProbeCached", () => {
     const input = {
       environmentId: EnvironmentId.make("env-1"),
       projectId: ProjectId.make("project-1"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
     const before = await fetchUnitySetupProbeCached(input);
     expect(before.facts.pipelinePackage.installed).toBe(false);
@@ -171,8 +170,7 @@ describe("fetchUnitySetupProbeCached", () => {
     const input = {
       environmentId: EnvironmentId.make("env-1"),
       projectId: ProjectId.make("project-1"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
     await expect(fetchUnitySetupProbeCached(input)).rejects.toBeTruthy();
 

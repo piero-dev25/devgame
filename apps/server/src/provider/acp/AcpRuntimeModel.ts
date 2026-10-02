@@ -65,12 +65,13 @@ export interface AcpToolCallState {
   readonly detail?: string;
   readonly data: Record<string, unknown>;
   /**
-   * Task #67 tool_call_update path: the typed sibling of `data.content` —
-   * that field exists for the untyped client-facing activity payload
-   * (ThreadActivity's `data`), so it stays `unknown` on the way back out.
-   * This field keeps the same values as `EffectAcpSchema.ToolCallContent[]`
+   * Task #67 tool_call_update path: the typed image entries of the tool
+   * call's content. `data.content` exists for the untyped client-facing
+   * activity payload (ThreadActivity's `data`) and carries the bounded text;
+   * this field keeps only the `EffectAcpSchema.ToolCallContent` image entries
    * so `extractToolCallImageDeltas` can read a tool call's image content
-   * (e.g. a screenshot tool's result) without re-validating unknown data.
+   * (e.g. a screenshot tool's result) without re-validating unknown data,
+   * and without an unbounded copy of the text.
    */
   readonly content?: ReadonlyArray<EffectAcpSchema.ToolCallContent>;
 }
@@ -93,6 +94,16 @@ export type AcpParsedSessionEvent =
   | {
       readonly _tag: "ModeChanged";
       readonly modeId: string;
+    }
+  | {
+      readonly _tag: "AvailableCommandsUpdated";
+      readonly availableCommands: ReadonlyArray<EffectAcpSchema.AvailableCommand>;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ConfigOptionsUpdated";
+      readonly configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>;
+      readonly rawPayload: unknown;
     }
   | {
       readonly _tag: "AssistantItemStarted";
@@ -132,6 +143,11 @@ export type AcpParsedSessionEvent =
       readonly itemId?: string;
       readonly data: string;
       readonly mimeType: string;
+      readonly rawPayload: unknown;
+    }
+  | {
+      readonly _tag: "ThoughtDelta";
+      readonly text: string;
       readonly rawPayload: unknown;
     };
 
@@ -289,25 +305,166 @@ function extractToolCallCommand(rawInput: unknown, title: string | undefined): s
   return extractCommandFromTitle(title);
 }
 
+// Some ACP agents (observed with Grok's CLI) resend the ENTIRE accumulated tool-call
+// output on every `tool_call_update` notification instead of a delta, so a redrawing
+// terminal progress bar can balloon a single tool call to hundreds of KB per update at
+// several updates per second. Cap what we retain/emit to a bounded tail so one busy tool
+// call cannot flood runtime event ingestion. We always keep the tail: `tool_call_update`
+// deltas routinely omit `kind`, so there is no reliable way to tell a redrawing terminal
+// from another tool here, and the end is the useful part of any live-growing output.
+const TOOL_CALL_CONTENT_MAX_CHARS = 8_000;
+const TOOL_CALL_CONTENT_TRUNCATION_MARKER = "[Earlier output truncated]\n\n";
+
+function boundToolCallOutputText(text: string): string {
+  if (text.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
+    return text;
+  }
+  const tail = text.slice(text.length - TOOL_CALL_CONTENT_MAX_CHARS);
+  return `${TOOL_CALL_CONTENT_TRUNCATION_MARKER}${tail}`;
+}
+
+const RAW_OUTPUT_TEXT_FIELDS = ["content", "stdout", "stderr", "output"] as const;
+
+// `rawOutput` is provider-defined and, for terminal-shaped tools, mirrors the same
+// cumulative text-growth problem as `content` (see the comment above). Bound its known
+// text-bearing fields the same way so a chatty provider cannot smuggle unbounded output
+// through this field instead.
+function boundToolCallRawOutput(rawOutput: unknown): unknown {
+  if (!isRecord(rawOutput)) {
+    return rawOutput;
+  }
+  let changed = false;
+  const bounded: Record<string, unknown> = { ...rawOutput };
+  for (const field of RAW_OUTPUT_TEXT_FIELDS) {
+    const value = rawOutput[field];
+    if (typeof value === "string" && value.length > TOOL_CALL_CONTENT_MAX_CHARS) {
+      bounded[field] = boundToolCallOutputText(value);
+      changed = true;
+    }
+  }
+  return changed ? bounded : rawOutput;
+}
+
+interface ExtractedToolCallContent {
+  readonly text: string | undefined;
+  readonly content: ReadonlyArray<EffectAcpSchema.ToolCallContent> | undefined;
+}
+
+function toolCallContentText(entry: EffectAcpSchema.ToolCallContent): string | undefined {
+  if (entry.type !== "content" || entry.content.type !== "text") {
+    return undefined;
+  }
+  return entry.content.text;
+}
+
+// Trim is used for display `text`, so whitespace-only (or whitespace-padded) entries never
+// contribute to `chunks` and used to take the early returns with the original array. Bound
+// each text entry independently so those paths cannot persist an unbounded terminal buffer
+// on `toolCall.data.content` / `rawPayload`.
+function boundToolCallContentEntries(
+  content: ReadonlyArray<EffectAcpSchema.ToolCallContent>,
+): ReadonlyArray<EffectAcpSchema.ToolCallContent> {
+  let changed = false;
+  const bounded = content.map((entry) => {
+    const text = toolCallContentText(entry);
+    if (text === undefined || text.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
+      return entry;
+    }
+    changed = true;
+    const trimmed = text.trim();
+    return {
+      type: "content",
+      content: {
+        type: "text",
+        text: boundToolCallOutputText(trimmed.length > 0 ? trimmed : text),
+      },
+    } as const;
+  });
+  return changed ? bounded : content;
+}
+
 function extractTextContentFromToolCallContent(
   content: ReadonlyArray<EffectAcpSchema.ToolCallContent> | null | undefined,
-): string | undefined {
-  if (!content) return undefined;
+): ExtractedToolCallContent {
+  if (!content) {
+    return { text: undefined, content: undefined };
+  }
   const chunks: Array<string> = [];
   for (const entry of content) {
-    if (entry.type !== "content") {
-      continue;
-    }
-    const nestedContent = entry.content;
-    if (nestedContent.type !== "text") {
-      continue;
-    }
-    const text = nestedContent.text.trim();
-    if (text.length > 0) {
+    const text = toolCallContentText(entry)?.trim();
+    if (text) {
       chunks.push(text);
     }
   }
-  return chunks.length > 0 ? chunks.join("\n") : undefined;
+  if (chunks.length === 0) {
+    return { text: undefined, content: boundToolCallContentEntries(content) };
+  }
+  const joined = chunks.join("\n");
+  if (joined.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
+    return { text: joined, content: boundToolCallContentEntries(content) };
+  }
+  const bounded = boundToolCallOutputText(joined);
+  const tail = joined.slice(joined.length - TOOL_CALL_CONTENT_MAX_CHARS);
+  return {
+    text: bounded,
+    content: distributeRetainedTailAcrossContent(content, tail),
+  };
+}
+
+// Walk the original text entries from the joined tail window so a retained slice that
+// spans entries around an image/diff stays on those entries. Non-text kinds keep their
+// relative order; blank text entries are dropped; the truncation marker is prepended to
+// the first remaining text entry.
+function distributeRetainedTailAcrossContent(
+  content: ReadonlyArray<EffectAcpSchema.ToolCallContent>,
+  tail: string,
+): ReadonlyArray<EffectAcpSchema.ToolCallContent> {
+  const textRanges: Array<
+    | {
+        readonly start: number;
+        readonly end: number;
+        readonly text: string;
+      }
+    | undefined
+  > = Array.from({ length: content.length });
+  let offset = 0;
+  let seenText = false;
+  for (const [index, entry] of content.entries()) {
+    const text = toolCallContentText(entry)?.trim();
+    if (!text) {
+      continue;
+    }
+    if (seenText) {
+      offset += 1;
+    }
+    seenText = true;
+    const start = offset;
+    const end = offset + text.length;
+    textRanges[index] = { start, end, text };
+    offset = end;
+  }
+  const tailStart = Math.max(0, offset - tail.length);
+  let markerPending = true;
+  return content.flatMap((entry, index) => {
+    if (toolCallContentText(entry) === undefined) {
+      return [entry];
+    }
+    const range = textRanges[index];
+    if (range === undefined) {
+      return [];
+    }
+    const overlapStart = Math.max(range.start, tailStart);
+    const overlapEnd = Math.min(range.end, offset);
+    if (overlapEnd <= overlapStart) {
+      return [];
+    }
+    let piece = range.text.slice(overlapStart - range.start, overlapEnd - range.start);
+    if (markerPending) {
+      piece = `${TOOL_CALL_CONTENT_TRUNCATION_MARKER}${piece}`;
+      markerPending = false;
+    }
+    return [{ type: "content", content: { type: "text", text: piece } } as const];
+  });
 }
 
 /**
@@ -369,7 +526,11 @@ function normalizeToolKind(kind: unknown): string | undefined {
   return typeof kind === "string" && kind.trim().length > 0 ? kind.trim() : undefined;
 }
 
-function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
+/**
+ * Map an ACP tool kind onto the canonical runtime item type used by the
+ * thread activity model. Unknown kinds fall back to a generic tool call.
+ */
+export function canonicalItemTypeFromAcpToolKind(kind: string | undefined): ToolLifecycleItemType {
   switch (kind) {
     case "execute":
       return "command_execution";
@@ -406,7 +567,14 @@ function makeToolCallState(
   }
   const title = input.title?.trim() || undefined;
   const command = extractToolCallCommand(input.rawInput, title);
-  const textContent = extractTextContentFromToolCallContent(input.content);
+  const extractedContent = extractTextContentFromToolCallContent(input.content);
+  const textContent = extractedContent.text;
+  // Only image entries go on the typed `content`: text already rides (bounded)
+  // on `data.content`, and an unbounded copy here would undo that bound on
+  // every ToolCallUpdated event a redrawing terminal emits.
+  const imageContent = (input.content ?? []).filter(
+    (entry) => entry.type === "content" && entry.content.type === "image",
+  );
   const normalizedTitle =
     title && title.toLowerCase() !== "terminal" && title.toLowerCase() !== "tool call"
       ? title
@@ -423,10 +591,10 @@ function makeToolCallState(
     data.rawInput = input.rawInput;
   }
   if (input.rawOutput !== undefined) {
-    data.rawOutput = input.rawOutput;
+    data.rawOutput = boundToolCallRawOutput(input.rawOutput);
   }
   if (input.content !== undefined) {
-    data.content = input.content;
+    data.content = extractedContent.content ?? input.content;
   }
   if (input.locations !== undefined) {
     data.locations = input.locations;
@@ -455,7 +623,7 @@ function makeToolCallState(
     ...(status ? { status } : {}),
     ...(command ? { command } : {}),
     ...(presentation?.detail ? { detail: presentation.detail } : {}),
-    ...(input.content != null ? { content: input.content } : {}),
+    ...(imageContent.length > 0 ? { content: imageContent } : {}),
     data,
   };
 }
@@ -509,6 +677,86 @@ export function mergeToolCallState(
       ...next.data,
     },
   };
+}
+
+// Even with bounded content (see TOOL_CALL_CONTENT_MAX_CHARS above), a redrawing terminal
+// can still shift its bounded tail window on nearly every notification, which would emit
+// a runtime event per redraw. Coalesce those: only emit early when the tool call's detail
+// has grown meaningfully since the last emission, otherwise batch up to a small number of
+// skipped updates before emitting anyway, so the UI still gets periodic progress and the
+// final (completed/failed) state is always emitted immediately.
+const TOOL_CALL_UPDATE_MIN_DETAIL_GROWTH_CHARS = 256;
+const TOOL_CALL_UPDATE_COALESCE_LIMIT = 10;
+
+export interface AcpToolCallEmitDecisionInput {
+  readonly previous: AcpToolCallState | undefined;
+  readonly next: AcpToolCallState;
+  readonly lastEmittedDetailLength: number | undefined;
+  readonly skippedSinceEmit: number;
+}
+
+export interface AcpToolCallEmitDecision {
+  readonly emit: boolean;
+  readonly skippedSinceEmit: number;
+}
+
+function toolCallOutputUnchanged(previous: AcpToolCallState, next: AcpToolCallState): boolean {
+  return (
+    previous.data.content === next.data.content && previous.data.rawOutput === next.data.rawOutput
+  );
+}
+
+// Command tools keep `detail` equal to the command, so live stdout lives on
+// `data.content` / `data.rawOutput`. Measure that too, otherwise coalescing never
+// sees growth and in-progress output is held until completed/failed.
+export function toolCallProgressLength(state: AcpToolCallState): number {
+  let contentChars = 0;
+  const content = state.data.content;
+  if (Array.isArray(content)) {
+    for (const entry of content) {
+      if (!isRecord(entry)) {
+        continue;
+      }
+      const text = toolCallContentText(entry as EffectAcpSchema.ToolCallContent);
+      if (text) {
+        contentChars += text.length;
+      }
+    }
+  }
+  let rawOutputChars = 0;
+  const rawOutput = state.data.rawOutput;
+  if (isRecord(rawOutput)) {
+    for (const field of RAW_OUTPUT_TEXT_FIELDS) {
+      const value = rawOutput[field];
+      if (typeof value === "string") {
+        rawOutputChars += value.length;
+      }
+    }
+  }
+  return Math.max(state.detail?.length ?? 0, contentChars, rawOutputChars);
+}
+
+export function decideToolCallUpdateEmission(
+  input: AcpToolCallEmitDecisionInput,
+): AcpToolCallEmitDecision {
+  const { previous, next, lastEmittedDetailLength, skippedSinceEmit } = input;
+  if (next.status === "completed" || next.status === "failed") {
+    return { emit: true, skippedSinceEmit: 0 };
+  }
+  if (previous === undefined || previous.title !== next.title || previous.status !== next.status) {
+    return { emit: true, skippedSinceEmit: 0 };
+  }
+  if (previous.detail === next.detail && toolCallOutputUnchanged(previous, next)) {
+    return { emit: false, skippedSinceEmit };
+  }
+  const progressLength = toolCallProgressLength(next);
+  const grewMeaningfully =
+    lastEmittedDetailLength === undefined ||
+    Math.abs(progressLength - lastEmittedDetailLength) >= TOOL_CALL_UPDATE_MIN_DETAIL_GROWTH_CHARS;
+  if (grewMeaningfully || skippedSinceEmit + 1 >= TOOL_CALL_UPDATE_COALESCE_LIMIT) {
+    return { emit: true, skippedSinceEmit: 0 };
+  }
+  return { emit: false, skippedSinceEmit: skippedSinceEmit + 1 };
 }
 
 export function parsePermissionRequest(
@@ -574,13 +822,24 @@ export const waitForSessionLoadReplayIdle = (input: {
     }
   });
 
+/**
+ * Model state some agents (Grok) advertise in `initialize._meta.modelState`, before any
+ * session exists. Undefined when the agent does not advertise it or the shape is unknown.
+ */
+export function sessionModelStateFromInitialize(
+  initializeResult: EffectAcpSchema.InitializeResponse,
+): EffectAcpSchema.SessionModelState | undefined {
+  const meta = initializeResult._meta;
+  const modelState = isRecord(meta) ? meta.modelState : undefined;
+  return isSessionModelState(modelState) ? modelState : undefined;
+}
+
 export function syntheticLoadSessionResponseFromInitialize(
   initializeResult: EffectAcpSchema.InitializeResponse,
 ): EffectAcpSchema.LoadSessionResponse {
   const meta = initializeResult._meta;
-  const modelState = isRecord(meta) ? meta.modelState : undefined;
   const modeState = isRecord(meta) ? meta.modeState : undefined;
-  const models = isSessionModelState(modelState) ? modelState : undefined;
+  const models = sessionModelStateFromInitialize(initializeResult);
   const modes = isSessionModeState(modeState) ? modeState : undefined;
 
   return {
@@ -588,6 +847,33 @@ export function syntheticLoadSessionResponseFromInitialize(
     ...(modes ? { modes } : {}),
     _meta: {
       t3SessionLoadReady: "replay_idle",
+    },
+  };
+}
+
+// The parsed AcpToolCallState already carries bounded content (see makeToolCallState /
+// extractTextContentFromToolCallContent above), but the raw JSON-RPC notification is also
+// threaded through as `rawPayload` for logging/debugging and ends up persisted on the
+// runtime event. Substitute the same bounded `content`/`rawOutput` there so an oversized
+// cumulative update cannot smuggle the unbounded buffer back in through the raw payload.
+function boundToolCallRawPayload(
+  params: EffectAcpSchema.SessionNotification,
+  update: AcpToolCallUpdate,
+  toolCall: AcpToolCallState,
+): unknown {
+  const boundedContent = toolCall.data.content;
+  const boundedRawOutput = toolCall.data.rawOutput;
+  const contentBounded = update.content !== undefined && boundedContent !== update.content;
+  const rawOutputBounded = update.rawOutput !== undefined && boundedRawOutput !== update.rawOutput;
+  if (!contentBounded && !rawOutputBounded) {
+    return params;
+  }
+  return {
+    ...params,
+    update: {
+      ...update,
+      ...(contentBounded ? { content: boundedContent } : {}),
+      ...(rawOutputBounded ? { rawOutput: boundedRawOutput } : {}),
     },
   };
 }
@@ -601,6 +887,22 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
   let modeId: string | undefined;
 
   switch (upd.sessionUpdate) {
+    case "config_option_update": {
+      events.push({
+        _tag: "ConfigOptionsUpdated",
+        configOptions: upd.configOptions,
+        rawPayload: params,
+      });
+      break;
+    }
+    case "available_commands_update": {
+      events.push({
+        _tag: "AvailableCommandsUpdated",
+        availableCommands: upd.availableCommands,
+        rawPayload: params,
+      });
+      break;
+    }
     case "current_mode_update": {
       modeId = upd.currentModeId.trim();
       if (modeId) {
@@ -635,7 +937,7 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         events.push({
           _tag: "ToolCallUpdated",
           toolCall,
-          rawPayload: params,
+          rawPayload: boundToolCallRawPayload(params, upd, toolCall),
         });
       }
       break;
@@ -646,7 +948,7 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
         events.push({
           _tag: "ToolCallUpdated",
           toolCall,
-          rawPayload: params,
+          rawPayload: boundToolCallRawPayload(params, upd, toolCall),
         });
       }
       break;
@@ -663,6 +965,16 @@ export function parseSessionUpdateEvent(params: EffectAcpSchema.SessionNotificat
           _tag: "ImageDelta",
           data: upd.content.data,
           mimeType: upd.content.mimeType,
+          rawPayload: params,
+        });
+      }
+      break;
+    }
+    case "agent_thought_chunk": {
+      if (upd.content.type === "text" && upd.content.text.length > 0) {
+        events.push({
+          _tag: "ThoughtDelta",
+          text: upd.content.text,
           rawPayload: params,
         });
       }

@@ -65,6 +65,15 @@ it.effect("normalizes the hosted app URL to an absolute origin", () =>
   }),
 );
 
+// DevGame has no hosted-app fallback: an unset origin must stop the headless
+// OAuth flow with a config error rather than send the user to upstream's app.
+it.effect("requires a hosted app URL when none is configured", () =>
+  Effect.gen(function* () {
+    const error = yield* hostedAppUrlConfig.pipe(provideEnv({}), Effect.flip);
+    assert.equal(error._tag, "ConfigError");
+  }),
+);
+
 it.effect("rejects malformed or insecure hosted app URLs", () =>
   Effect.gen(function* () {
     for (const value of [
@@ -90,11 +99,12 @@ it.effect("derives direct Clerk OAuth endpoints from statically injected public 
     }).pipe(provideEnv({}));
 
     assert.deepEqual(config, {
-      authorizationEndpoint: "https://clerk.example.test/oauth/authorize",
       tokenEndpoint: "https://clerk.example.test/oauth/token",
+      deviceAuthorizationEndpoint: "https://clerk.example.test/oauth/device_authorization",
       clientId: "oauth_client_embedded",
+      loopbackPort: 34338,
       redirectUri: "http://127.0.0.1:34338/callback",
-      scopes: ["openid", "profile", "email"],
+      scopes: ["openid", "profile", "email", "offline_access"],
     });
   }),
 );
@@ -111,7 +121,6 @@ it.effect("prefers runtime Clerk OAuth config overrides over statically injected
       }),
     );
 
-    assert.equal(config.authorizationEndpoint, "https://runtime.example.test/oauth/authorize");
     assert.equal(config.tokenEndpoint, "https://runtime.example.test/oauth/token");
     assert.equal(config.clientId, "oauth_client_runtime");
   }),

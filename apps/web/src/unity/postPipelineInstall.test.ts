@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { ProjectId } from "@t3tools/contracts";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { postUnityPipelineInstall } from "./postPipelineInstall";
 
 afterEach(() => {
@@ -20,8 +21,7 @@ describe("postUnityPipelineInstall", () => {
     vi.stubGlobal("fetch", fetchMock);
     const input = {
       projectId: ProjectId.make("project-unity"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     };
 
     await postUnityPipelineInstall(input);
@@ -38,8 +38,7 @@ describe("postUnityPipelineInstall", () => {
     await expect(
       postUnityPipelineInstall({
         projectId: ProjectId.make("project-unity"),
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
       }),
     ).rejects.toBeTruthy();
   });
@@ -59,8 +58,7 @@ describe("postUnityPipelineInstall", () => {
 
     const result = await postUnityPipelineInstall({
       projectId: ProjectId.make("project-unity"),
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
     });
 
     expect(result).toEqual(response);

@@ -24,6 +24,10 @@ const UPSTREAM_LITERALS = [
   "pingdotgg",
   "t3.codes",
   "com.t3tools.t3code",
+  // The reverse-DNS spelling upstream uses for Linux desktop entries and
+  // D-Bus names (com.t3tools.T3Code.desktop). Case differs from the bundle id
+  // above, so it needs its own entry.
+  "com.t3tools.T3Code",
 ] as const;
 
 /**
@@ -56,6 +60,24 @@ const SEVERED_FILES = [
   "scripts/mobile-showcase.ts",
   "apps/desktop/src/app/DesktopEnvironment.ts",
   "apps/desktop/scripts/electron-launcher.mjs",
+  // Arrived with the 2026-10 upstream sync carrying upstream identity, and
+  // rebranded during it: the Linux desktop entry / WM class, and the return
+  // addresses trusted after provider (Codex) sign-in.
+  "apps/desktop/src/app/DesktopEarlyElectronStartup.ts",
+  "packages/shared/src/providerAuthReturnUrl.ts",
+  "packages/shared/src/codexAuthHandoff.ts",
+  // The CLI/runtime release source used by `t3 update`, the desktop WSL/SSH
+  // runtime installers and the install scripts.
+  "packages/shared/src/cliRelease.ts",
+  "scripts/install.sh",
+  "scripts/install.ps1",
+  // Linux snapshot identity: the GNOME extension uuid and D-Bus client names,
+  // and the KDE capture helper's desktop entry. Upstream's values collide
+  // with a stock T3 Code install on the same machine.
+  "apps/desktop/gnome-extension/metadata.json",
+  "apps/desktop/gnome-extension/bundle.json",
+  "apps/desktop/gnome-extension/captureService.js",
+  "apps/desktop/src/snapShot/KdeSnapShot.ts",
 ] as const;
 
 /**
@@ -126,12 +148,26 @@ describe("fork severance from upstream infrastructure", () => {
     // running app's Info.plist. Two files declaring the same OS-level identity
     // is exactly the shape a single-file check misses.
     "apps/desktop/scripts/electron-launcher.mjs",
+    // Added with the 2026-10 upstream sync. These do not register a scheme,
+    // they decide which scheme a provider sign-in may return to. Upstream's
+    // `t3code:` there would hand a DevGame user's Codex sign-in to a stock
+    // T3 Code install, and DevGame would never receive it.
+    "packages/shared/src/providerAuthReturnUrl.ts",
+    "packages/shared/src/codexAuthHandoff.ts",
   ];
 
   it.each(SCHEME_DECLARING_FILES)("%s registers our own URL scheme, not upstream's", (path) => {
     const source = readRepoFile(path);
 
-    for (const upstreamScheme of ['"t3code"', '"t3code-dev"', '"t3code-preview"']) {
+    for (const upstreamScheme of [
+      '"t3code"',
+      '"t3code-dev"',
+      '"t3code-preview"',
+      '"t3code:"',
+      '"t3code-dev:"',
+      "t3code://",
+      "t3code-dev://",
+    ]) {
       expect(source, `${path} still registers ${upstreamScheme}`).not.toContain(upstreamScheme);
     }
     // Asserted PRESENT too: a file that simply lost its scheme block would pass
@@ -145,6 +181,32 @@ describe("fork severance from upstream infrastructure", () => {
 
     for (const shellDefault of shellDefaults) {
       expect(shellDefault).not.toContain("t3.codes");
+    }
+  });
+
+  /**
+   * Upstream split the hosted web release into build_web (bakes the router URL
+   * into the bundle) and deploy_web (aliases the channel domains). Each job
+   * reads the domains on its own, so each needs its own guard: an unguarded
+   * empty variable would build a bundle pointing nowhere, or alias onto
+   * whatever the empty string resolves to, instead of stopping the release.
+   */
+  it("guards every hosted web domain the release workflow reads", () => {
+    const workflow = readRepoFile(".github/workflows/release.yml");
+
+    for (const [name, variable] of [
+      ["router_url", "T3CODE_WEB_ROUTER_URL"],
+      ["latest_domain", "T3CODE_WEB_LATEST_DOMAIN"],
+      ["nightly_domain", "T3CODE_WEB_NIGHTLY_DOMAIN"],
+    ] as const) {
+      const assignments = workflow.match(new RegExp(`^\\s*${name}=.*$`, "gm")) ?? [];
+      const guards = workflow.split(`-z "\${${variable}:-}"`).length - 1;
+
+      expect(assignments.length, `${name} is never assigned`).toBeGreaterThan(0);
+      for (const assignment of assignments) {
+        expect(assignment.trim()).toBe(`${name}="$${variable}"`);
+      }
+      expect(guards, `${variable} is read without a guard`).toBe(assignments.length);
     }
   });
 });

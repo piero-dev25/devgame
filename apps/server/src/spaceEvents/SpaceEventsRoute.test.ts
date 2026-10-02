@@ -32,8 +32,10 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { HttpRouter, HttpServer } from "effect/unstable/http";
+import * as NetAddress from "effect/unstable/net/NetAddress";
 
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -61,6 +63,7 @@ const makeSpaceEventsDependenciesLayer = () =>
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(EngineTypeResolver.layer.pipe(Layer.provide(WorkspacePaths.layer))),
     Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provideMerge(ServerEnvironment.identityLayer),
     Layer.provideMerge(SqlitePersistenceMemory),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-space-events-route-test-" }),
@@ -70,7 +73,7 @@ const makeSpaceEventsDependenciesLayer = () =>
 const getSpaceEventsWsUrl = (projectId: ProjectId) =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer;
-    const address = server.address as HttpServer.TcpAddress;
+    const address = server.address as NetAddress.InetAddress;
     return `ws://127.0.0.1:${address.port}/space-events?projectId=${encodeURIComponent(projectId)}`;
   });
 

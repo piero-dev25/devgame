@@ -165,23 +165,23 @@ describe("SidebarChromeHeader (corner usage) — brand presence and the width fl
     expect(html).toContain("min-w-[14rem]");
   });
 
-  it("SidebarBrand is structurally present in the corner's rendered markup (not conditionally excluded) — aria-label, brand text, and the sidebar-brand class all appear", () => {
+  it("SidebarBrand is structurally present in the corner's rendered markup (not conditionally excluded) — aria-label and brand text appear", () => {
     const html = renderCornerHeader();
     expect(html).toContain('aria-label="Go to threads"');
-    expect(html).toContain("sidebar-brand");
     expect(html).toContain(">DevGame<");
   });
 
-  // Fix round 4 (round-15 live CDP evidence): the width floor CANNOT satisfy
-  // the .sidebar-brand container query — container size queries measure the
-  // CONTENT box, and the corner's own padding (90px lights inset + 20px
-  // trailing) leaves 114px against the 216px threshold. The corner instead
-  // FORCES the brand visible with an important-suffixed `flex!` on the brand
-  // itself. This assertion is markup-visible (unlike the display:none it
-  // cures), so it genuinely guards the wiring: remove `forceVisible` from
-  // the corner call site and this goes red.
-  it("the corner's SidebarBrand carries the force-visible override (flex!) — the container query is structurally unsatisfiable in a padded, content-sized corner", () => {
+  // Fix round 4 (round-15 live CDP evidence) forced the brand visible with
+  // `flex!` against the `.sidebar-brand` container query. The upstream merge
+  // removed that container-query CSS: the brand now carries a plain `flex`
+  // in the corner and upstream's `hidden md:flex` reveal everywhere else, so
+  // the guard is that the corner variant is the always-visible one.
+  it("the corner's SidebarBrand is always visible (flex, never hidden)", () => {
     const html = renderCornerHeader();
-    expect(html).toMatch(/sidebar-brand[^"]*flex!|flex![^"]*sidebar-brand/);
+    const brandTag = html.match(/<a\b[^>]*aria-label="Go to threads"[^>]*>/)?.[0] ?? "";
+    const brandClasses = (brandTag.match(/class="([^"]*)"/)?.[1] ?? "").split(/\s+/);
+    expect(brandClasses).toContain("flex");
+    expect(brandClasses).not.toContain("hidden");
+    expect(html).toContain(">DevGame<");
   });
 });

@@ -8,7 +8,7 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-export class Model3dProviderError extends Schema.TaggedErrorClass<Model3dProviderError>()(
+export class Model3dProviderError extends Schema.TaggedError<Model3dProviderError>()(
   "Model3dProviderError",
   { detail: Schema.String },
 ) {

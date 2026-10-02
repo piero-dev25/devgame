@@ -111,6 +111,8 @@ const okOutput = (
     timedOut: false,
     stdoutTruncated: false,
     stderrTruncated: false,
+    stdoutInvalidUtf8: false,
+    stderrInvalidUtf8: false,
   });
 
 /** Returns a different canned stdout per call, by position (clamped to the

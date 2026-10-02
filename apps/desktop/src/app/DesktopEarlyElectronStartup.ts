@@ -25,9 +25,24 @@ interface EarlyDesktopSettingsInput {
 type EarlyLinuxElectronOptionsInput = EarlyDesktopSettingsInput;
 
 export interface EarlyLinuxElectronOptions {
+  readonly isDevelopment: boolean;
   readonly linuxWmClass: string;
+  readonly linuxDesktopEntryName: string;
   readonly passwordStore: LinuxPasswordStoreSwitch | null;
 }
+
+/**
+ * DevGame Linux identity. The desktop entry name is shared by the AppImage
+ * entry, the x-scheme-handler registration and the installed icon, so it must
+ * never collide with a stock upstream install's entry. It keeps the names
+ * earlier DevGame builds already installed (devgame.desktop / WM class devgame)
+ * and must match electron-builder's StartupWMClass/executableName.
+ */
+export const resolveLinuxDesktopEntryName = (isDevelopment: boolean): string =>
+  isDevelopment ? "devgame-dev.desktop" : "devgame.desktop";
+
+export const resolveLinuxWmClass = (isDevelopment: boolean): string =>
+  isDevelopment ? "devgame-dev" : "devgame";
 
 const trimNonEmpty = (value: string | undefined): string | null => {
   const trimmed = value?.trim();
@@ -80,8 +95,11 @@ export function resolveEarlyLinuxElectronOptions(
   input: EarlyLinuxElectronOptionsInput,
 ): EarlyLinuxElectronOptions {
   const preference = resolveEarlyLinuxPasswordStorePreference(input);
+  const isDevelopment = isDevelopmentEnvironment(input.env);
   return {
-    linuxWmClass: isDevelopmentEnvironment(input.env) ? "t3code-dev" : "t3code",
+    isDevelopment,
+    linuxWmClass: resolveLinuxWmClass(isDevelopment),
+    linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
     passwordStore: resolveLinuxPasswordStoreSwitch({
       preference,
       env: input.env,

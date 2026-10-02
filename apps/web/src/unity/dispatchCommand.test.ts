@@ -16,6 +16,7 @@
 import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
+import { primaryPreparedConnection } from "../lib/preparedConnectionFixture";
 import { dispatchUnityCommand } from "./dispatchCommand";
 
 afterEach(() => {
@@ -29,8 +30,7 @@ describe("dispatchUnityCommand", () => {
     let caught: unknown;
     try {
       await dispatchUnityCommand({
-        httpBaseUrl: "http://127.0.0.1:3000",
-        httpAuthorization: null,
+        prepared: primaryPreparedConnection(),
         workspaceRoot: "/tmp/project",
         action: "play",
       });
@@ -45,8 +45,7 @@ describe("dispatchUnityCommand", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ _tag: "notReady" })));
 
     const result = await dispatchUnityCommand({
-      httpBaseUrl: "http://127.0.0.1:3000",
-      httpAuthorization: null,
+      prepared: primaryPreparedConnection(),
       workspaceRoot: "/tmp/project",
       action: "play",
     });

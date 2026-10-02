@@ -67,7 +67,10 @@ describe("SidebarChromeToggle — backdropVariant styling carries through regard
       backdropVariant: "nightly",
       sidebarToggle: { onToggle: () => {}, pressed: true },
     });
-    expect(withoutToggle).toContain("focus-visible:ring-white/90");
-    expect(withToggle).toContain("focus-visible:ring-white/90");
+    // Upstream's media-navigation trigger variant styles the on-backdrop toggle.
+    for (const html of [withoutToggle, withToggle]) {
+      expect(html).toContain("text-white/90");
+      expect(html).toContain("focus-visible:ring-white");
+    }
   });
 });
