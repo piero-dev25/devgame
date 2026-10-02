@@ -202,3 +202,67 @@ export const MrMakImportPlan = Schema.Struct({
   }),
 });
 export type MrMakImportPlan = typeof MrMakImportPlan.Type;
+
+/** What the user picked for a file the destination changed: never overwritten without `take-source`. */
+export const MrMakImportConflictChoice = Schema.Literals(["keep-destination", "take-source"]);
+export type MrMakImportConflictChoice = typeof MrMakImportConflictChoice.Type;
+
+/**
+ * What an import did with one planned file:
+ * - `written`: new at the destination.
+ * - `identical`: already there with the same bytes.
+ * - `updated`: the source changed and the destination still held our previous copy.
+ * - `replaced`: the destination differed and the user chose `take-source`.
+ * - `kept-local`: unchanged in the source since the last import; the user's edit or deletion stays.
+ * - `conflict`: the destination differs; left untouched.
+ */
+export const MrMakImportFileOutcome = Schema.Literals([
+  "written",
+  "identical",
+  "updated",
+  "replaced",
+  "kept-local",
+  "conflict",
+]);
+export type MrMakImportFileOutcome = typeof MrMakImportFileOutcome.Type;
+
+/**
+ * Completion receipt, written into the destination at
+ * `.devgame/import/receipt.json` only after every file is in place. Files are
+ * copied byte-for-byte from the source's committed HEAD, so `transforms` is empty.
+ */
+export const MrMakImportReceipt = Schema.Struct({
+  version: Schema.Literal(1),
+  /** Derived from the source revision, the planned files and their hashes, and the choices. */
+  importId: Schema.String,
+  previousImportId: Schema.NullOr(Schema.String),
+  source: Schema.Struct({
+    repositoryPath: Schema.String,
+    revision: Schema.String,
+    branch: Schema.NullOr(Schema.String),
+  }),
+  startedAt: Schema.String,
+  completedAt: Schema.String,
+  files: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      sourceSha256: Schema.String,
+      /** What the destination holds after the import; null when absent or not ours. */
+      destinationSha256: Schema.NullOr(Schema.String),
+      outcome: MrMakImportFileOutcome,
+    }),
+  ),
+  /** Source files changed since the previous import's revision. Removed ones are never deleted. */
+  changes: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      change: Schema.Literals(["added", "modified", "removed"]),
+      previousSha256: Schema.NullOr(Schema.String),
+      sha256: Schema.NullOr(Schema.String),
+    }),
+  ),
+  conflicts: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
+  exclusions: Schema.Array(MrMakImportExclusion),
+  transforms: Schema.Array(Schema.String),
+});
+export type MrMakImportReceipt = typeof MrMakImportReceipt.Type;
