@@ -163,7 +163,8 @@ export class MrMakImport extends Context.Service<
     /**
      * Which skills Claude and Codex discover as project skills of the
      * destination, by each provider's own fresh workspace scan. `expected`
-     * defaults to the active names in the destination's receipt.
+     * defaults to the active names in the destination's receipt; with no names
+     * either way it fails with `nothing-to-verify` instead of passing vacuously.
      */
     readonly verifySkillDiscovery: (input: {
       readonly destinationRoot: string;
@@ -691,20 +692,23 @@ const make = Effect.gen(function* () {
   const verifySkillDiscovery: MrMakImport["Service"]["verifySkillDiscovery"] = Effect.fn(
     "MrMakImport.verifySkillDiscovery",
   )(function* (input) {
-    const fail = (detail: string) =>
-      new MrMakImportApplyError({
-        reason: "filesystem",
-        destinationRoot: input.destinationRoot,
-        detail,
-      });
+    const fail = (reason: "filesystem" | "nothing-to-verify", detail: string) =>
+      new MrMakImportApplyError({ reason, destinationRoot: input.destinationRoot, detail });
     const cwd = yield* fileSystem
       .realPath(input.destinationRoot)
-      .pipe(Effect.mapError(() => fail("the destination does not exist.")));
+      .pipe(Effect.mapError(() => fail("filesystem", "the destination does not exist.")));
     const receipt = yield* fileSystem
       .readFileString(path.join(cwd, ".devgame/import/receipt.json"))
       .pipe(Effect.map(decodeImportReceipt), Effect.orElseSucceed(Option.none));
     const expected =
       input.expected ?? Object.values(Option.getOrUndefined(receipt)?.skills?.names ?? {});
+    // An empty list would report every provider as missing nothing.
+    if (expected.length === 0) {
+      return yield* fail(
+        "nothing-to-verify",
+        "no skill names were given and its import receipt names no imported skills.",
+      );
+    }
     return yield* checkSkillDiscovery(cwd, expected, registrySkillProbe(providerRegistry));
   });
 

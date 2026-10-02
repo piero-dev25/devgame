@@ -93,6 +93,7 @@ export class MrMakImportApplyError extends Schema.TaggedError<MrMakImportApplyEr
       "destination-changed",
       "source-read",
       "filesystem",
+      "nothing-to-verify",
     ]),
     destinationRoot: Schema.String,
     detail: Schema.String,
@@ -115,6 +116,8 @@ export class MrMakImportApplyError extends Schema.TaggedError<MrMakImportApplyEr
         return `Reading ${this.detail} from the source repository failed.`;
       case "filesystem":
         return `Import into ${this.destinationRoot} failed: ${this.detail}`;
+      case "nothing-to-verify":
+        return `Nothing to verify in ${this.destinationRoot}: ${this.detail}`;
     }
   }
 }

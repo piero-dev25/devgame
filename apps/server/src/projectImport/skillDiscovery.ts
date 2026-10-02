@@ -6,14 +6,16 @@
  * Claude reads only `<cwd>/.claude/skills` for project scope; Codex reads the
  * repository's `.agents/skills`. A probe returns what a provider reports for a
  * cwd: in the server, the provider registry's own fresh workspace scan; outside
- * it, `cliSkillProbe`, which runs `codex app-server` with an argv (no shell)
- * and Claude's filesystem scan, the one verified against the Claude CLI.
+ * it, `cliSkillProbe`, which runs `codex app-server` with an argv (no shell).
+ * Neither runs the Claude CLI: Claude's side is the server's own filesystem
+ * scan (ClaudeSkills.ts), the one the Claude driver uses.
  *
  * @module skillDiscovery
  */
 import * as NodePath from "node:path";
 
 import type { MrMakSkillDiscoveryReport, ServerProviderSkill } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
 import type * as Path from "effect/Path";
@@ -77,7 +79,11 @@ export const checkSkillDiscovery = <R>(
     ),
   );
 
-/** A fresh workspace scan by the first enabled, installed instance of each provider. */
+/**
+ * A fresh workspace scan by the first enabled, installed instance of each
+ * provider. A failed scan leaves the registry's cached snapshot in place, so
+ * only a snapshot taken after the scan started counts.
+ */
 export const registrySkillProbe =
   (registry: ProviderRegistryShape): SkillProbe =>
   (provider, cwd) =>
@@ -87,6 +93,7 @@ export const registrySkillProbe =
           candidate.driver === DRIVERS[provider] && candidate.enabled && candidate.installed,
       );
       if (instance === undefined) return null;
+      const startedAt = yield* Clock.currentTimeMillis;
       const providers = yield* registry.refreshWorkspaceSnapshot({
         instanceId: instance.instanceId,
         cwd,
@@ -95,7 +102,8 @@ export const registrySkillProbe =
       const snapshot = providers
         .find((candidate) => candidate.instanceId === instance.instanceId)
         ?.workspaceSnapshots?.find((candidate) => candidate.cwd === cwd);
-      return snapshot?.skills ?? null;
+      if (snapshot === undefined || Date.parse(snapshot.checkedAt) < startedAt) return null;
+      return snapshot.skills;
     });
 
 /** The providers' own probes, run directly with the user's default configuration. */

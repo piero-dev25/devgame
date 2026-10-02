@@ -720,26 +720,29 @@ Depends on: M1, M2. Estimate: ~300 lines.
   later import's plan becomes the receipt's file list.
 - A source skill whose name a different destination skill already uses (present, not recorded in
   the receipt, not byte-identical) fails with `MrMakSkillImportError` `skill-conflict` before any
-  write. `keep-existing` skips it; `import-renamed` (default `<name>-mrmak`) moves it and rewrites
-  its own references (frontmatter `name:`, `skills/<name>` paths, `/<name>` and `$<name>`); the
-  engine applies the rewrite to the blob and lists it in `transforms`.
+  write. `keep-existing` skips it (and is `invalid-choice` for a skill with no such conflict);
+  `import-renamed` (default `<name>-mrmak`) moves it and rewrites its own references (frontmatter
+  `name:`, `skills/<name>` paths, `/<name>` and `$<name>`); the engine applies the rewrite to the
+  blob and lists it in `transforms`. A new name must differ, ignoring case, from every source
+  skill, every other active name and every destination skill folder, since APFS folds case.
 - After the files land, both trees are checked on disk (`.agents` against the expected hashes,
   `.claude` against `.agents`, SKILL.md links resolved in each copy). The result is
   `receipt.skills`: per skill original and active name, file counts and requirements (paid
-  providers, tools, env var names, MCP servers named by SKILL.md and scripts/, never run), the
-  name map, and `baseline` (every source skill file's unmodified sha256).
+  providers, tools, env var names, MCP servers named in any text or code file of the skill up to
+  1 MiB, never run), the name map, and `baseline` (every source skill file's unmodified sha256).
 - `MrMakImport.verifySkillDiscovery({destinationRoot, expected?})` asks the first enabled,
   installed Claude and Codex instances for a fresh workspace scan of the destination through
   `ProviderRegistry.refreshWorkspaceSnapshot`, and reports discovered, missing and shadowed (found
-  outside the project) skills. `cliSkillProbe` runs the same probes without the registry for the
+  outside the project) skills. A snapshot older than the scan (the cache a failed scan leaves) is
+  `unavailable`, and with no names to look for it fails with `nothing-to-verify`. `cliSkillProbe` runs the same probes without the registry for the
   live check: Codex through `codex app-server` `skills/list` (argv, no shell), Claude through the
-  server's filesystem scan in ClaudeSkills.ts, which was verified against the CLI. No Claude
-  session or model turn is started.
+  server's filesystem scan in ClaudeSkills.ts, which was verified against the CLI. The Claude CLI
+  itself is not run, so no Claude session or model turn is started.
 - Live checks (skipped by default): `DEVGAME_MRMAK_IMPORT_LIVE=1 MRMAK_SOURCE MRMAK_DEST` and
   `DEVGAME_MRMAK_DISCOVERY_LIVE=1 MRMAK_DEST [CODEX_BINARY]` in importSkills.test.ts. On
   2026-10-03 against source 6248c9ec: 20 skills, 391 `.agents/skills` files, 375 `.claude/skills`
   files, 16 agents-only, verified, and identical to the source's own trees (`diff -r`). A rerun
-  was `unchanged`, and Claude and Codex each discovered all 20 as project skills.
+  was `unchanged`, and the Claude scan and Codex each discovered all 20 as project skills.
 - Per-provider: Antigravity reads `.agents/skills` (covered by the shared copy). Cursor, Grok and
   OpenCode are not targeted.
 

@@ -19,6 +19,7 @@ import {
   type ServerProviderSkill,
 } from "@t3tools/contracts";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -60,6 +61,8 @@ const SOURCE_FILES: Record<string, string> = {
   ".agents/skills/alpha/SKILL.md": ALPHA_SKILL,
   ".agents/skills/alpha/scripts/run.py": "import os, fal_client\nos.environ['FAL_KEY']\n",
   ".agents/skills/alpha/references/guide.md": "# Guide\n",
+  // Named outside SKILL.md and scripts/, as Mr. Mak's pipeline prompts and forge/ code do.
+  ".agents/skills/alpha/prompts/classify.md": "An OPENAI_API_KEY is required regardless.\n",
   ".agents/skills/beta/SKILL.md": "---\nname: beta\n---\nSee [notes](docs/notes.md).\n",
   ".agents/skills/beta/docs/notes.md": "notes\n",
   ".agents/skills/beta/.github/workflows/ci.yml": "on: push\n",
@@ -69,6 +72,7 @@ const SOURCE_FILES: Record<string, string> = {
   ".agents/skills/gamma/SKILL.md": "---\nname: gamma\n---\nUses the higgsfield CLI.\n",
   ".agents/skills/gamma/scripts/gen.mjs": "console.log(process.env.HIGGSFIELD_API_KEY);\n",
   ".agents/skills/gamma/__pycache__/gen.cpython-312.pyc": "\u0000compiled",
+  ".agents/skills/gamma/forge/next.py": "import replicate\n",
   "docs/readme.md": "# Mr. Mak\n",
 };
 
@@ -216,7 +220,7 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
           exists(destination, `.claude/skills/${target}`),
         ]).toEqual([true, true]);
       }
-      // Requirements are listed from SKILL.md and scripts, never activated.
+      // Requirements are listed from every text file of a skill, never activated.
       const requirements = (name: string) =>
         skills.skills
           .find((skill) => skill.original === name)
@@ -227,6 +231,8 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
           "tool:blender",
           "env-var:FAL_KEY",
           "tool:python",
+          "paid-provider:OpenAI",
+          "env-var:OPENAI_API_KEY",
         ]),
       );
       expect(requirements("gamma")).toEqual(
@@ -234,8 +240,14 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
           "paid-provider:Higgsfield",
           "env-var:HIGGSFIELD_API_KEY",
           "tool:node",
+          "tool:python",
         ]),
       );
+      expect(
+        skills.skills
+          .find((skill) => skill.original === "alpha")
+          ?.requirements.find((requirement) => requirement.name === "OPENAI_API_KEY")?.source,
+      ).toBe(".agents/skills/alpha/prompts/classify.md");
       expect(requirements("beta")).toEqual([]);
       // Both trees are in the baseline commit, so worktree threads see the skills too.
       const tracked = git(destination, "ls-files");
@@ -305,6 +317,46 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
     }).pipe(Effect.provide(TestLayer)),
   );
 
+  it.effect("names compare up to case, and only a real conflict can keep the existing skill", () =>
+    Effect.gen(function* () {
+      const { base, source, destination } = yield* makeFixture;
+      write(destination, ".agents/skills/alpha/SKILL.md", "---\nname: alpha\n---\nMine.\n");
+      write(destination, ".claude/skills/Delta/SKILL.md", "---\nname: Delta\n---\nMine too.\n");
+      const before = filesUnder(destination);
+      const rejected = (choices: ReadonlyArray<MrMakSkillConflictChoice>) =>
+        importSkills(source, destination, choices).pipe(Effect.flip);
+
+      // A case-folding disk would put Beta and beta, or delta and Delta, in one folder.
+      for (const newName of ["Beta", "ALPHA", "delta"]) {
+        expect(
+          yield* rejected([{ skill: "alpha", action: "import-renamed", newName }]),
+        ).toMatchObject({ reason: "invalid-choice", skills: ["alpha"] });
+      }
+      expect(
+        yield* rejected([
+          { skill: "alpha", action: "import-renamed", newName: "art" },
+          { skill: "beta", action: "import-renamed", newName: "Art" },
+        ]),
+      ).toMatchObject({ reason: "invalid-choice", skills: ["alpha", "beta"] });
+      // beta has no counterpart in the destination, so there is nothing to keep.
+      expect(
+        yield* rejected([
+          { skill: "alpha", action: "keep-existing" },
+          { skill: "beta", action: "keep-existing" },
+        ]),
+      ).toMatchObject({ reason: "invalid-choice", skills: ["beta"] });
+      expect(filesUnder(destination)).toEqual(before);
+
+      const empty = NodePath.join(base, "empty");
+      expect(
+        yield* importSkills(source, empty, [{ skill: "beta", action: "keep-existing" }]).pipe(
+          Effect.flip,
+        ),
+      ).toMatchObject({ reason: "invalid-choice", skills: ["beta"] });
+      expect(exists(empty, ".agents/skills")).toBe(false);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
   it.effect("a rerun changes nothing and keeps skills the user added", () =>
     Effect.gen(function* () {
       const { source, destination } = yield* makeFixture;
@@ -371,7 +423,11 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
         enabled,
       });
       const scans: Array<{ instanceId: string; cwd: string; fresh: boolean | undefined }> = [];
-      const provider = (driver: string, skills: ReadonlyArray<ServerProviderSkill>) =>
+      const provider = (
+        driver: string,
+        skills: ReadonlyArray<ServerProviderSkill>,
+        checkedAt: string,
+      ) =>
         decodeProvider({
           instanceId: driver,
           driver,
@@ -380,43 +436,62 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
           version: "1.0.0",
           status: "ready",
           auth: { status: "authenticated" },
-          checkedAt: "2026-10-03T00:00:00.000Z",
+          checkedAt,
           models: [],
-          workspaceSnapshots: [
-            { cwd, checkedAt: "2026-10-03T00:00:00.000Z", slashCommands: [], skills },
-          ],
+          workspaceSnapshots: [{ cwd, checkedAt, slashCommands: [], skills }],
         });
-      const providers = [
-        provider("claudeAgent", [
-          skill("alpha", NodePath.join(cwd, ".claude/skills/alpha/SKILL.md")),
-          // Claude's user scope wins a name collision, so beta is not the project copy.
-          skill("beta", NodePath.join(base, "home/.claude/skills/beta/SKILL.md")),
-          skill("gamma", NodePath.join(cwd, ".claude/skills/gamma/SKILL.md"), false),
-        ]),
+      /** Every skill, scanned at `checkedAt`. */
+      const providersAt = (checkedAt: string) => [
+        provider(
+          "claudeAgent",
+          [
+            skill("alpha", NodePath.join(cwd, ".claude/skills/alpha/SKILL.md")),
+            // Claude's user scope wins a name collision, so beta is not the project copy.
+            skill("beta", NodePath.join(base, "home/.claude/skills/beta/SKILL.md")),
+            skill("gamma", NodePath.join(cwd, ".claude/skills/gamma/SKILL.md"), false),
+          ],
+          checkedAt,
+        ),
         provider(
           "codex",
           ["alpha", "beta", "gamma"].map((name) =>
             skill(name, NodePath.join(cwd, `.agents/skills/${name}/SKILL.md`)),
           ),
+          checkedAt,
         ),
       ];
-      const registry = Layer.effect(
-        ProviderRegistry,
-        Effect.map(ProviderRegistry, (mock) =>
-          ProviderRegistry.of({
-            ...mock,
-            refreshWorkspaceSnapshot: (input) =>
-              Effect.sync(() => {
-                scans.push({ instanceId: input.instanceId, cwd: input.cwd, fresh: input.fresh });
-                return providers;
-              }),
-          }),
-        ),
-      ).pipe(Layer.provide(makeProviderRegistryLayer(providers)));
+      // A snapshot cached before the import, e.g. from a thread already open there.
+      const cached = providersAt("2020-01-01T00:00:00.000Z");
+      /** A registry whose scan returns `scanned`; the cache is what a failed scan returns. */
+      const verifyWith = (scanned: Effect.Effect<ReadonlyArray<ServerProvider>>) =>
+        Effect.flatMap(MrMakImport.MrMakImport, (service) =>
+          service.verifySkillDiscovery({ destinationRoot: destination }),
+        ).pipe(
+          Effect.provide(
+            layerWith(
+              Layer.effect(
+                ProviderRegistry,
+                Effect.map(ProviderRegistry, (mock) =>
+                  ProviderRegistry.of({
+                    ...mock,
+                    refreshWorkspaceSnapshot: (input) =>
+                      Effect.sync(() =>
+                        scans.push({
+                          instanceId: input.instanceId,
+                          cwd: input.cwd,
+                          fresh: input.fresh,
+                        }),
+                      ).pipe(Effect.andThen(scanned)),
+                  }),
+                ),
+              ).pipe(Layer.provide(makeProviderRegistryLayer(cached))),
+            ),
+          ),
+        );
 
-      const reports = yield* Effect.flatMap(MrMakImport.MrMakImport, (service) =>
-        service.verifySkillDiscovery({ destinationRoot: destination }),
-      ).pipe(Effect.provide(layerWith(registry)));
+      const reports = yield* verifyWith(
+        Effect.map(DateTime.now, (now) => providersAt(DateTime.formatIso(now))),
+      );
 
       expect(scans).toEqual([
         { instanceId: "claudeAgent", cwd, fresh: true },
@@ -445,6 +520,28 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
         status: "unavailable",
         missing: ["alpha"],
       });
+      // A failed scan hands back the cached snapshot: that is not a fresh check.
+      const failedScan = yield* verifyWith(Effect.succeed(cached));
+      expect(failedScan.map((report) => [report.provider, report.status])).toEqual([
+        ["claude", "unavailable"],
+        ["codex", "unavailable"],
+      ]);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("verifying discovery with no skill names to look for fails instead of passing", () =>
+    Effect.gen(function* () {
+      const { base } = yield* makeFixture;
+      const empty = NodePath.join(base, "no-receipt");
+      NodeFS.mkdirSync(empty);
+      const service = yield* MrMakImport.MrMakImport;
+      for (const expected of [undefined, []]) {
+        expect(
+          yield* service
+            .verifySkillDiscovery({ destinationRoot: empty, expected })
+            .pipe(Effect.flip),
+        ).toMatchObject({ reason: "nothing-to-verify" });
+      }
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -476,18 +573,22 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importS
 
   /** Opt-in: DEVGAME_MRMAK_DISCOVERY_LIVE=1 MRMAK_DEST=<imported comparison folder> [CODEX_BINARY] */
   it.effect.skipIf(process.env.DEVGAME_MRMAK_DISCOVERY_LIVE !== "1")(
-    "live: asks the installed Claude and Codex what they discover",
+    "live: asks the installed Codex, and the server's Claude scan, what they discover",
     () =>
       Effect.gen(function* () {
         const cwd = NodeFS.realpathSync(process.env.MRMAK_DEST ?? "");
         const receipt = yield* decodeReceipt(read(cwd, ".devgame/import/receipt.json"));
+        const expected = Object.values(receipt.skills?.names ?? {});
+        expect(expected.length).toBeGreaterThan(0);
         const reports = yield* checkSkillDiscovery(
           cwd,
-          Object.values(receipt.skills?.names ?? {}),
+          expected,
           cliSkillProbe(process.env.CODEX_BINARY ?? "codex"),
         );
         process.stdout.write(`${yield* encodeReports(reports)}\n`);
-        for (const report of reports) expect(report.missing).toEqual([]);
+        for (const report of reports) {
+          expect([report.status, report.missing]).toEqual(["checked", []]);
+        }
       }),
     120_000,
   );

@@ -13,7 +13,7 @@
  * it; a rename rewrites the skill's references to its own name. Once the files
  * are in place both trees are checked on disk and the summary is published in
  * the receipt. Nothing from a skill is run and no provider is contacted:
- * requirements are only listed.
+ * requirements are only listed, from every text file of the skill.
  *
  * @module importSkills
  */
@@ -69,7 +69,7 @@ export class MrMakSkillImportError extends Schema.TaggedError<MrMakSkillImportEr
       case "skill-conflict":
         return `The destination already has different skills named ${names}; choose keep-existing or import-renamed for each.`;
       case "invalid-choice":
-        return `The choices for ${names} name no source skill, or a name that is invalid or taken.`;
+        return `The choices for ${names} name no source skill, keep a skill the destination does not have, or pick a name that is invalid or taken.`;
       case "source-read":
         return "Reading the skills from the source repository failed.";
     }
@@ -100,10 +100,21 @@ const skillOf = (entry: MrMakImportEntry) => {
 const isDistributed = (entry: MrMakImportEntry) =>
   entry.symlinkTarget === null &&
   isSkillDistributionPath(entry.sourcePath.slice(AGENTS.length + 1));
+/** Prose and code a skill names its dependencies in; anything larger is data. */
+const SCANNED_TEXT = /\.(?:md|markdown|txt|py|[cm]?[jt]sx?|sh|bash|zsh|json|toml|ya?ml)$/i;
+const MAX_SCANNED_BYTES = 1024 * 1024;
 const isScanned = (entry: MrMakImportEntry) => {
   const skill = skillOf(entry);
-  return skill !== null && (skill.rest === "SKILL.md" || skill.rest.startsWith("scripts/"));
+  return (
+    skill !== null &&
+    entry.symlinkTarget === null &&
+    entry.bytes <= MAX_SCANNED_BYTES &&
+    SCANNED_TEXT.test(skill.rest) &&
+    !skill.rest.split("/").includes("node_modules")
+  );
 };
+/** APFS and NTFS fold case by default, so `Beta` and `beta` are one folder there. */
+const fold = (name: string) => name.toLowerCase();
 
 export const makeSkillImporter = (
   importContent: (
@@ -210,6 +221,11 @@ export const makeSkillImporter = (
       }
       const unresolved = conflicts.filter((name) => !choices.has(name));
       if (unresolved.length > 0) return yield* fail("skill-conflict", unresolved);
+      // Keeping the destination's skill only means something where it has one.
+      const nothingToKeep = [...choices.values()]
+        .filter((choice) => choice.action === "keep-existing" && !conflicts.includes(choice.skill))
+        .map((choice) => choice.skill);
+      if (nothingToKeep.length > 0) return yield* fail("invalid-choice", nothingToKeep);
 
       /** Original to active name; kept-existing skills are absent. */
       const active = new Map<string, string>();
@@ -221,22 +237,49 @@ export const makeSkillImporter = (
           choice?.action === "import-renamed" ? (choice.newName ?? `${name}-mrmak`) : name,
         );
       }
+      // Names compare up to case: on a case-folding disk two such names share one folder.
+      const sourceNames = new Set([...bySkill.keys()].map(fold));
+      /** Folded active names of the skills keeping their name, or of the renamed ones. */
+      const activeNames = (renamed: boolean) =>
+        [...active]
+          .filter(([name, activeName]) => (activeName !== name) === renamed)
+          .map(([, activeName]) => fold(activeName));
+      const clashes = (name: string, renamed: boolean) =>
+        activeNames(renamed).filter((other) => other === fold(name)).length > 1;
+      /** A different skill in a destination folder named `name` up to case. */
+      const takenUpToCase = Effect.fn("importSkills.takenUpToCase")(function* (name: string) {
+        for (const base of [AGENTS, CLAUDE]) {
+          const existing =
+            root === null
+              ? []
+              : yield* fileSystem
+                  .readDirectory(NodePath.join(root, base))
+                  .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+          for (const other of existing.filter((candidate) => fold(candidate) === fold(name))) {
+            if (yield* takenAt(base, other, null)) return true;
+          }
+        }
+        return false;
+      });
       const invalid: Array<string> = [];
       for (const [name, activeName] of active) {
-        if (activeName === name) continue;
-        if (
-          !SKILL_NAME.test(activeName) ||
-          bySkill.has(activeName) ||
-          [...active.values()].filter((other) => other === activeName).length > 1 ||
-          (yield* takenAt(AGENTS, activeName, null)) ||
-          (yield* takenAt(CLAUDE, activeName, null))
+        // A source skill keeping its name clashes only with another such one; a rename with any.
+        if (activeName === name ? clashes(name, false) : clashes(activeName, true)) {
+          invalid.push(name);
+        } else if (
+          activeName !== name &&
+          (!SKILL_NAME.test(activeName) ||
+            sourceNames.has(fold(activeName)) ||
+            (yield* takenAt(AGENTS, activeName, null)) ||
+            (yield* takenAt(CLAUDE, activeName, null)) ||
+            (yield* takenUpToCase(activeName)))
         ) {
           invalid.push(name);
         }
       }
       if (invalid.length > 0) return yield* fail("invalid-choice", invalid);
 
-      // Committed text of each SKILL.md and script (for requirements) and of every renamed file.
+      // Committed text of each scanned file (for requirements) and of every renamed file.
       const isRenamed = (entry: MrMakImportEntry) => {
         const skill = skillOf(entry);
         return skill !== null && (active.get(skill.name) ?? skill.name) !== skill.name;

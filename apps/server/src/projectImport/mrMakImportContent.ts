@@ -405,7 +405,7 @@ export const rewriteSkillReferences = (bytes: Uint8Array, from: string, to: stri
 const PAID_PROVIDERS: ReadonlyArray<readonly [string, RegExp]> = [
   ["fal.ai", /\bfal(?:[-_.]ai|[-_]client)\b|\bFAL_KEY\b/i],
   ["Higgsfield", /\bhiggsfield\b/i],
-  ["OpenAI", /\bopenai\b/i],
+  ["OpenAI", /\bopenai\b|\bOPENAI_API_KEY\b/i],
   ["Tripo", /\btripo(?:3d)?\b/i],
   ["Meshy", /\bmeshy\b/i],
   ["ElevenLabs", /\belevenlabs\b/i],
