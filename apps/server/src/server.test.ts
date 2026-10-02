@@ -32,6 +32,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   type PreviewEvent,
   ProjectId,
+  PROJECT_WORKSPACE_READ_PATH,
   type ProviderAuthState,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -164,6 +165,7 @@ import * as PortScanner from "./preview/PortScanner.ts";
 import * as BrowserTraceCollector from "./observability/BrowserTraceCollector.ts";
 import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
+import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -722,12 +724,17 @@ const buildAppUnderTest = (options?: {
       Layer.provide(WorkspacePaths.layer),
       Layer.provideMerge(vcsDriverRegistryLayer),
     );
+    const workspaceFileSystemLayer = WorkspaceFileSystem.layer.pipe(
+      Layer.provide(WorkspacePaths.layer),
+      Layer.provide(workspaceEntriesLayer),
+    );
     const workspaceAndProjectServicesLayer = Layer.mergeAll(
       WorkspacePaths.layer,
       workspaceEntriesLayer,
-      WorkspaceFileSystem.layer.pipe(
+      workspaceFileSystemLayer,
+      ProjectWorkspace.layer.pipe(
+        Layer.provide(workspaceFileSystemLayer),
         Layer.provide(WorkspacePaths.layer),
-        Layer.provide(workspaceEntriesLayer),
       ),
       ProjectFaviconResolver.layer.pipe(
         Layer.provide(WorkspacePaths.layer),
@@ -5184,6 +5191,91 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(pairedClientPairingBody.reason, "invalid_credential");
       assert.equal(typeof pairedClientPairingBody.traceId, "string");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "serves only the requested project's workspace registry, behind orchestration:read",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const writeRegistry = Effect.fnUntraced(function* (prefix: string, entityId: string) {
+          const root = yield* fileSystem.makeTempDirectoryScoped({ prefix });
+          yield* fileSystem.makeDirectory(path.join(root, "workspace"));
+          yield* fileSystem.writeFileString(
+            path.join(root, "workspace", "workspace.json"),
+            jsonRequestBody({
+              entities: [{ id: entityId, title: entityId, folder: entityId, steps: [] }],
+            }),
+          );
+          return root;
+        });
+        const projectA = ProjectId.make("project-workspace-a");
+        const projectB = ProjectId.make("project-workspace-b");
+        const roots = new Map([
+          [projectA, yield* writeRegistry("t3-workspace-route-a-", "card-a")],
+          [projectB, yield* writeRegistry("t3-workspace-route-b-", "card-b")],
+        ]);
+        yield* buildAppUnderTest({
+          layers: {
+            projectionSnapshotQuery: {
+              getProjectShellById: (projectId) =>
+                Effect.succeed(
+                  Option.map(Option.fromNullishOr(roots.get(projectId)), (workspaceRoot) => ({
+                    id: projectId,
+                    title: projectId,
+                    workspaceRoot,
+                    defaultModelSelection: null,
+                    scripts: [],
+                    createdAt: "2026-10-03T00:00:00.000Z",
+                    updatedAt: "2026-10-03T00:00:00.000Z",
+                  })),
+                ),
+            },
+          },
+        });
+
+        const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+        const readWorkspace = Effect.fnUntraced(function* (cookie: string, body: unknown) {
+          const response = yield* HttpClient.post(PROJECT_WORKSPACE_READ_PATH, {
+            headers: { cookie },
+            body: yield* HttpBody.json(body),
+          });
+          return response;
+        });
+
+        const responseA = yield* readWorkspace(ownerCookie, { projectId: projectA });
+        const bodyA = (yield* responseA.json) as {
+          readonly manifest: { readonly entities: ReadonlyArray<{ readonly id: string }> };
+        };
+        assert.equal(responseA.status, 200);
+        assert.deepEqual(
+          bodyA.manifest.entities.map((entity) => entity.id),
+          ["card-a"],
+        );
+
+        const unknownResponse = yield* readWorkspace(ownerCookie, {
+          projectId: "project-elsewhere",
+        });
+        assert.equal(unknownResponse.status, 200);
+        assert.deepEqual(yield* unknownResponse.json, {
+          _tag: "error",
+          message: "Project not found.",
+        });
+
+        const malformedResponse = yield* readWorkspace(ownerCookie, { project: projectA });
+        assert.equal(malformedResponse.status, 400);
+
+        const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+          headers: { cookie: ownerCookie },
+          body: yield* HttpBody.json({ scopes: ["access:read"] }),
+        });
+        assert.equal(pairingResponse.status, 200);
+        const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
+        const accessOnlyCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
+        const forbiddenResponse = yield* readWorkspace(accessOnlyCookie, { projectId: projectA });
+        assert.equal(forbiddenResponse.status, 403);
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
   it.effect("separates access inventory reads from credential management writes", () =>

@@ -1,5 +1,7 @@
 import * as Schema from "effect/Schema";
 
+import { ProjectId } from "./baseSchemas.ts";
+
 /**
  * Project workspace registry: the Mr. Mak-compatible `workspace/workspace.json`
  * at a project root. A registry lists entities (cards), each owning a folder
@@ -107,3 +109,31 @@ export const ResolvedWorkspaceManifest = Schema.Struct({
   issues: Schema.Array(WorkspaceManifestIssue),
 });
 export type ResolvedWorkspaceManifest = typeof ResolvedWorkspaceManifest.Type;
+
+// ---------------------------------------------------------------------------
+// `POST /api/project-workspace/read`: the browser reads a project's registry.
+// Same Input/Result/PATH trio as `GenerationListInput`. The client sends only
+// the opaque projectId; the server resolves the project's canonical root.
+// ---------------------------------------------------------------------------
+
+export const ProjectWorkspaceReadInput = Schema.Struct({ projectId: ProjectId });
+export type ProjectWorkspaceReadInput = typeof ProjectWorkspaceReadInput.Type;
+
+/** `manifest` is null when the project has no `workspace/workspace.json`. */
+export const ProjectWorkspaceReadSuccess = Schema.Struct({
+  manifest: Schema.NullOr(ResolvedWorkspaceManifest),
+});
+export type ProjectWorkspaceReadSuccess = typeof ProjectWorkspaceReadSuccess.Type;
+
+/**
+ * A read registry (or none), or a typed failure: an unresolved project, or a
+ * registry that exists but cannot be used (malformed, too large, escaping).
+ */
+export const ProjectWorkspaceReadResult = Schema.Union([
+  ProjectWorkspaceReadSuccess,
+  Schema.TaggedStruct("error", { message: Schema.String }),
+]);
+export type ProjectWorkspaceReadResult = typeof ProjectWorkspaceReadResult.Type;
+
+/** Under `/api` so single-origin dev already proxies it (see devProxy.ts). */
+export const PROJECT_WORKSPACE_READ_PATH = "/api/project-workspace/read";
