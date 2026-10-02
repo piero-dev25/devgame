@@ -496,3 +496,37 @@ After the fixes, all seven packages type-check at 0 errors with exit 0.
 | Real Codex turn across runtime modes                                                        | Gated case with `CODEX_BINARY_PATH`                                                    | Not runnable here: the test hardcodes `gpt-5.3-codex`, which a ChatGPT-account Codex login rejects (HTTP 400). Covered by the live browser pass instead |
 | Dock restore, serialization, layout migration, shortcuts                                    | `apps/web/src/dock/**` tests                                                           | 248/248 with editor presence                                                                                                                            |
 | Project/editor scope, wrong-project rejection, Unity routes, spaces, migration ledger guard | `apps/server/src/{editorPresence,unity,spaceEvents}/**`, `Migrations.test.ts`          | 252/252                                                                                                                                                 |
+
+## U2 live gate (integrated client pass)
+
+One integrated pass in a real browser (Chrome DevTools, isolated browser
+context) against `pnpm run dev` in the integration worktree. Server state was
+the worktree's own `.t3` (`baseDir=<worktree>/.t3`); `~/.t3/userdata` was not
+used. The welcome wizard's offer to import real projects and conversations was
+declined; the only project was a disposable git repository with `README.md`
+containing `v1`. Provider: Codex (signed in, GPT-6-Astra), access mode
+Supervised.
+
+| Behavior                                         | Check                                                                                                                                    | Result                                                                                                                                                                                                                   |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Dock on thread routes (fix in `ThreadRouteView`) | Draft route and server route render Sidebar, Chat, Diff, Files, Terminal, Browser, Generation dock panels; dock survives draft promotion | Pass                                                                                                                                                                                                                     |
+| Provider turn                                    | "Edit the file README.md: replace the line v1 with v2…"                                                                                  | Pass: reply `done`, card "1 changed file +1 −1", file on disk is `v2`, thread auto-titled "Update README to v2"                                                                                                          |
+| Approval                                         | Supervised mode raised two command approvals and one file-change approval; composer locked until resolved; sidebar showed Approval state | Pass                                                                                                                                                                                                                     |
+| Checkpoint diff                                  | Diff dock panel, scope "Turn 1"                                                                                                          | Pass: README.md −1 +1                                                                                                                                                                                                    |
+| Interrupt                                        | Long tool-free turn, then Stop generation                                                                                                | Pass: turn ended, thread idle, composer re-enabled                                                                                                                                                                       |
+| Dock restore                                     | Closed Browser panel, reloaded page                                                                                                      | Pass: layout restored without Browser; Diff scope and history intact                                                                                                                                                     |
+| Resume after server restart                      | Stopped the dev server (owned task), restarted on the same state, asked a context-only follow-up                                         | Pass: "I changed line 3 of README.md from v1 to v2."                                                                                                                                                                     |
+| Revert                                           | "Edit from here" on turn 1, "Revert and keep changes"                                                                                    | Pass: chat and provider conversation rewound, prompt returned to composer, files kept as the dialog states for a local-checkout thread. File and git-ref revert for worktree threads is covered by the integration suite |
+| Project scope                                    | Files panel lists only the fixture project; generation panel reads that project's jobs                                                   | Pass                                                                                                                                                                                                                     |
+| Branding                                         | Welcome wizard "Set up DevGame", assistant label "DevGame"                                                                               | Pass                                                                                                                                                                                                                     |
+
+Observations, not merge regressions:
+
+- `approval.resolved` and `context-window.updated` activities are recorded
+  without a turn id by upstream's unchanged ingestion code, so a chat rewind
+  leaves a "Received N updates" row. Same behavior as upstream.
+- The dev splash and touch icon (`apps/web/public/apple-touch-icon.png`) still
+  show the T3 mark. The blob is identical at the merge base, DevGame's tip and
+  upstream: a pre-existing DevGame branding gap, recorded as a follow-up.
+- The upstream real-Codex integration case hardcodes `gpt-5.3-codex`, which a
+  ChatGPT-account Codex login rejects; the live pass above replaces it.

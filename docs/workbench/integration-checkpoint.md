@@ -9,7 +9,7 @@ Orchestrator state for the 2026-10-02 handoff
 | Id  | Milestone                                                           | State       | Evidence                                                                                                            |
 | --- | ------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------- |
 | M1  | Phase U: latest T3 merged, compiling, focused tests, record, pushed | Done        | Merge `b55344d8`, review fixes `0a28a8d4`, pushed; [reconciliation record](./upstream-reconciliation-2026-10-02.md) |
-| M2  | U2 live gate in isolated state                                      | In progress | Contract suites pass (see record); live browser pass next                                                           |
+| M2  | U2 live gate in isolated state                                      | Done        | Contract suites and one integrated browser pass; see the U2 sections of the reconciliation record                   |
 | M3  | PRs 1–8 and M1–M4 slices                                            | Not started | —                                                                                                                   |
 | M4  | Phase C comparison                                                  | Not started | —                                                                                                                   |
 | M5  | Final report                                                        | Not started | —                                                                                                                   |
@@ -50,4 +50,4 @@ client-runtime; mobile, marketing and relay are not installed.
 
 ## Next step
 
-Run the live browser pass: `vp run dev` in the integration worktree (state in `<worktree>/.t3`), one real provider turn, approval, interrupt, checkpoint diff/revert, dock restore, project scope. Then slice PRs 1–8 from the green tip.
+Re-map PRs 1–8 and M1–M4 to post-sync paths, then build slices from the green tip `codex/upstream-sync-2026-10-02`.
