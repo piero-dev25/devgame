@@ -8,6 +8,7 @@ import {
   buildMessageContext,
   resolveUserMessageContext,
 } from "~/lib/composerContextRecords";
+import { buildWorkspacePacket } from "~/projectWorkspace/contextPacket";
 import { collectAmbientContextRecords, extractAmbientMessageContext } from "./ambientContext";
 import { appendEditorSelectionToPrompt } from "./editorSelectionContext";
 import { appendEngineHeadlineToPrompt } from "./engineHeadline";
@@ -196,5 +197,97 @@ describe("extractAmbientMessageContext", () => {
     const message = { text: "just text" };
 
     expect(extractAmbientMessageContext(message).message).toBe(message);
+  });
+});
+
+describe("workspace packet ('Use in chat') on the structured send path", () => {
+  const packet = buildWorkspacePacket({
+    projectId: "project-a",
+    entity: {
+      id: "pitch",
+      title: "Pitch",
+      folder: "pitch",
+      description: "Write the boss rush pitch.",
+      steps: [
+        {
+          name: "Report",
+          path: "report.md",
+          relativePath: "workspace/pitch/report.md",
+          exists: true,
+        },
+        {
+          name: "Deck",
+          path: "deck.html",
+          relativePath: "workspace/pitch/deck.html",
+          exists: false,
+          issue: "missing",
+        },
+      ],
+    },
+    stepIndexes: [0, 1],
+  });
+  const appProjectA = { id: "project-a", workspaceRoot: "/repo/app-a" };
+
+  function sendWithPacket(project: { id: string; workspaceRoot: string }, engineChipState: string) {
+    const ambientRecords = collectAmbientContextRecords({
+      project,
+      engineChipState,
+      workspacePacket: packet,
+      chips,
+      editors,
+    });
+    return {
+      text: appendAmbientContextReferences("Draft the pitch", ambientRecords),
+      context: buildMessageContext({
+        terminalContexts: [],
+        reviewComments: [],
+        previewAnnotations: [],
+        ambientRecords,
+      }),
+    };
+  }
+
+  it("reaches the provider for a project that is not a game, as paths without file contents", () => {
+    const message = sendWithPacket(appProjectA, "none");
+    const providerText = projectComposerContextForProvider({
+      text: message.text,
+      records: decodeMessageContext(message.context).records,
+    });
+
+    expect(providerText).toContain("Draft the pitch");
+    expect(providerText).toContain('<context kind="workspace-packet"');
+    expect(providerText).toContain("workspace/pitch/report.md");
+    expect(providerText).toContain('"missingRefs":["workspace/pitch/deck.html"]');
+    expect(providerText).toContain("Write the boss rush pitch.");
+    expect(providerText).not.toContain('kind="editor-selection"');
+  });
+
+  it("goes first, ahead of the editor context, on a game project", () => {
+    const message = sendWithPacket({ ...appProjectA, workspaceRoot: "/repo/game-a" }, "unity");
+
+    expect(decodeMessageContext(message.context).records.map((record) => record.kind)).toEqual([
+      "workspace-packet",
+      "editor-selection",
+      "engine-state",
+    ]);
+  });
+
+  it("is never sent with a thread of another project", () => {
+    const message = sendWithPacket({ id: "project-b", workspaceRoot: "/repo/app-b" }, "none");
+
+    expect(message.text).toBe("Draft the pitch");
+    expect(message.context).toBeUndefined();
+  });
+
+  it("comes back out of a sent message as its own chip, not as text", () => {
+    const sent = sendWithPacket(appProjectA, "none");
+    const extracted = extractAmbientMessageContext({
+      text: sent.text,
+      context: decodeMessageContext(sent.context),
+    });
+
+    expect(extracted.message.text).toBe("Draft the pitch");
+    expect(extracted.message.context).toBeUndefined();
+    expect(extracted.workspacePacket).toEqual(packet);
   });
 });

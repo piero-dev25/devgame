@@ -8,8 +8,18 @@ import {
 } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { buildWorkspacePacket, type WorkspacePacket } from "../../projectWorkspace/contextPacket";
+import { stageWorkspacePacket } from "../../projectWorkspace/workspacePacketStore";
 import { useQueuedMessageStore } from "../../queuedMessageStore";
 import { sendQueuedMessage } from "./sendQueuedMessage";
+
+function workspacePacket(title: string): WorkspacePacket {
+  return buildWorkspacePacket({
+    projectId: "project-a",
+    entity: { id: title, title, folder: "cards", steps: [] },
+    stepIndexes: [],
+  });
+}
 
 // DevGame (orchestrator decision 1): a queued send carries the same ambient
 // editor context as a direct ChatView send.
@@ -62,7 +72,7 @@ const engineState = {
   payload: { version: 1, editors: ["Godot 4.3 · playing · 0 selected"] },
 };
 
-function enqueue() {
+function enqueue(workspacePacket: WorkspacePacket | null = null) {
   return useQueuedMessageStore.getState().enqueue(threadKey, {
     prompt: "run it",
     images: [],
@@ -70,6 +80,7 @@ function enqueue() {
     terminalContexts: [],
     previewAnnotations: [],
     reviewComments: [],
+    workspacePacket,
     sendSettings: {
       modelSelection,
       runtimeMode: "full-access",
@@ -100,7 +111,11 @@ describe("sendQueuedMessage — ambient editor context", () => {
     await sendQueuedMessage(threadRef, message.id);
 
     expect(io.toast).not.toHaveBeenCalled();
-    expect(io.collect).toHaveBeenCalledWith({ project: io.project, engineChipState: "godot" });
+    expect(io.collect).toHaveBeenCalledWith({
+      project: io.project,
+      engineChipState: "godot",
+      workspacePacket: null,
+    });
     expect(io.run.mock.calls.map((call) => call[1])).toEqual(["start"]);
     expect(io.run.mock.calls[0]?.[2]).toMatchObject({
       input: {
@@ -119,9 +134,27 @@ describe("sendQueuedMessage — ambient editor context", () => {
 
     await sendQueuedMessage(threadRef, message.id);
 
-    expect(io.collect).toHaveBeenCalledWith({ project: io.project, engineChipState: "none" });
+    expect(io.collect).toHaveBeenCalledWith({
+      project: io.project,
+      engineChipState: "none",
+      workspacePacket: null,
+    });
     const input = io.run.mock.calls[0]?.[2] as { input: { message: Record<string, unknown> } };
     expect(input.input.message.text).toBe("run it");
     expect(input.input.message).not.toHaveProperty("context");
+  });
+
+  it("sends the workspace packet staged when it was queued, not one staged later", async () => {
+    const queuedPacket = workspacePacket("Queued card");
+    const message = enqueue(queuedPacket);
+    stageWorkspacePacket(threadRef, "project-a", workspacePacket("Staged later"));
+
+    await sendQueuedMessage(threadRef, message.id);
+
+    expect(io.collect).toHaveBeenCalledWith({
+      project: io.project,
+      engineChipState: "godot",
+      workspacePacket: queuedPacket,
+    });
   });
 });

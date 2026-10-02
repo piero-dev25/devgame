@@ -9,6 +9,7 @@ import { create } from "zustand";
 import type { LocalDispatchSnapshot } from "./components/ChatView.logic";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "./composerDraftStore";
 import type { TerminalContextDraft } from "./lib/terminalContext";
+import type { WorkspacePacket } from "./projectWorkspace/contextPacket";
 import { randomUUID } from "./lib/utils";
 import type { ReviewCommentContext } from "./reviewCommentContext";
 
@@ -38,6 +39,11 @@ export interface QueuedComposerMessage {
   terminalContexts: TerminalContextDraft[];
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
+  /**
+   * DevGame: the workspace packet staged when the message was queued. It
+   * moves with the message, so a packet staged later never rides on it.
+   */
+  workspacePacket?: WorkspacePacket | null;
   sendSettings: QueuedMessageSendSettings;
   /**
    * The newest completed tool activity at queue time. A different id later
