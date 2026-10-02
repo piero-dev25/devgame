@@ -122,6 +122,7 @@ import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
 import * as RunProfiles from "./projectRuntime/RunProfiles.ts";
+import * as RunService from "./projectRuntime/RunService.ts";
 import { projectWorkspaceRouteLayer } from "./projectWorkspace/ProjectWorkspaceRoute.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as EngineTypeResolver from "./project/EngineTypeResolver.ts";
@@ -656,7 +657,11 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
+  // RunService is a stateful singleton: one registry for every route, and its
+  // scope (this runtime's) stops every run it launched at shutdown.
+  Layer.provideMerge(
+    Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive, RunService.layer),
+  ),
   Layer.provideMerge(PersistenceLayerLive),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.
