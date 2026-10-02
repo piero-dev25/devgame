@@ -36,13 +36,21 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { DraftId } from "~/composerDraftStore";
 import { resolveInitialThreadSidebarWidth } from "~/components/threadSidebarWidth";
-import { SIDEBAR_PANEL_ID } from "~/dockActiveSelectionStore";
+import { resolveEngineChipState } from "~/components/ChatView.logic";
+import {
+  SIDEBAR_PANEL_ID,
+  selectActivePanelForKey,
+  useDockActiveSelectionStore,
+} from "~/dockActiveSelectionStore";
+import WorkspacePanel from "~/projectWorkspace/WorkspacePanel";
+import { useProject } from "~/state/entities";
 import type { ThreadSyncPhase } from "~/threadSync";
 import { Orientation, type SerializedDockview } from "dockview";
 import {
   FileDiff,
   Files,
   Globe2,
+  LayoutGrid,
   MessageCircle,
   PanelLeft,
   Sparkles,
@@ -52,11 +60,13 @@ import { useEffect, useRef } from "react";
 
 import {
   BROWSER_PANEL_ID,
+  CHAT_PANEL_ID,
   DIFF_PANEL_ID,
   FILES_PANEL_ID,
   registerChatDockHandle,
   reportChatDockSidebarVisibleChange,
   TERMINAL_PANEL_ID,
+  WORKSPACE_PANEL_ID,
 } from "./chatDockHandle";
 import BrowserDockPanel from "./BrowserDockPanel";
 import { ChatPanel, ThreadRouteContext, type ThreadRouteContextValue } from "./ChatPanel";
@@ -72,10 +82,15 @@ import {
   type PanelRegistry,
   type PresetRegistry,
 } from "./lib/index";
+import {
+  resolveDockLandingFallbackPanelIds,
+  resolveDockLandingPanelId,
+  shouldApplyLateLanding,
+} from "./lib/landingPanel";
 import { TAB_COMPONENT_NO_CLOSE } from "./lib/tabComponents";
 import { SidebarPanel } from "./SidebarPanel";
+import { useRouteProjectRef } from "./useRouteProjectRef";
 
-const CHAT_PANEL_ID = "chat";
 const SIDEBAR_GROUP_ID = "group-sidebar";
 const CHAT_GROUP_ID = "group-chat";
 const DIFF_GROUP_ID = "group-diff";
@@ -83,6 +98,7 @@ const FILES_GROUP_ID = "group-files";
 const TERMINAL_GROUP_ID = "group-terminal";
 const BROWSER_GROUP_ID = "group-browser";
 const GENERATION_GROUP_ID = "group-generation";
+const WORKSPACE_GROUP_ID = "group-workspace";
 
 /**
  * Increment 2b.1's own panel id — kept LOCAL to this file (this fork's usual
@@ -394,6 +410,21 @@ chatDockPanelRegistry.register({
 });
 
 /**
+ * The project Workspace: `workspace/workspace.json` cards and their steps.
+ * Steps open in the Files panel, so this adds no file browser of its own.
+ * Game projects land on it (`lib/landingPanel.ts`); closeable like the other
+ * read-only panels, and reopened through the tab context menu's "Add tab".
+ */
+chatDockPanelRegistry.register({
+  id: WORKSPACE_PANEL_ID,
+  title: "Workspace",
+  icon: LayoutGrid,
+  component: WorkspacePanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
  * Terminal, Browser and Generation further right — the same third-column
  * slot Files occupied before Part A deleted our own version of it, now
@@ -453,6 +484,7 @@ function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_HEIGHT = 800;
   const SIDEBAR_WIDTH = resolveInitialThreadSidebarWidth(null, Number.POSITIVE_INFINITY);
   const CHAT_WIDTH = 640;
+  const WORKSPACE_WIDTH = 400;
   const DIFF_WIDTH = 400;
   const FILES_WIDTH = 400;
   const TERMINAL_WIDTH = 400;
@@ -461,6 +493,7 @@ function buildChatDockPreset(): SerializedDockview {
   const CONTAINER_WIDTH =
     SIDEBAR_WIDTH +
     CHAT_WIDTH +
+    WORKSPACE_WIDTH +
     DIFF_WIDTH +
     FILES_WIDTH +
     TERMINAL_WIDTH +
@@ -485,6 +518,15 @@ function buildChatDockPreset(): SerializedDockview {
             type: "leaf",
             size: CHAT_WIDTH,
             data: { id: CHAT_GROUP_ID, views: [CHAT_PANEL_ID], activeView: CHAT_PANEL_ID },
+          },
+          {
+            type: "leaf",
+            size: WORKSPACE_WIDTH,
+            data: {
+              id: WORKSPACE_GROUP_ID,
+              views: [WORKSPACE_PANEL_ID],
+              activeView: WORKSPACE_PANEL_ID,
+            },
           },
           {
             type: "leaf",
@@ -529,6 +571,7 @@ function buildChatDockPreset(): SerializedDockview {
     panels: {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
+      [WORKSPACE_PANEL_ID]: presetPanelEntry(WORKSPACE_PANEL_ID, "Workspace"),
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
       [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
       [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),
@@ -667,6 +710,36 @@ export function ChatDock(props: ChatDockProps) {
       unsubscribeSidebarVisibility?.();
     };
   }, []);
+  // Game projects land on Workspace, others on Chat (`lib/landingPanel.ts`).
+  // `useRouteProjectRef` subscribes to primitives, so streaming thread
+  // updates do not re-render the dock.
+  const projectRef = useRouteProjectRef(
+    props.routeKind === "draft"
+      ? { routeKind: "draft", draftId: props.draftId }
+      : { routeKind: "server", environmentId: props.environmentId, threadId: props.threadId },
+  );
+  const landingPanelId = resolveDockLandingPanelId(resolveEngineChipState(useProject(projectRef)));
+  const activationKey = `${props.environmentId}:${props.threadId}`;
+  // `activateOnChangeId` is read only when `activationKey` changes, and a
+  // game project's engine is usually still unknown then, so the first open
+  // lands on Chat. Correct it once the engine resolves, unless the thread
+  // already has a remembered tab or the user moved off Chat. Runs after
+  // `DockviewLayout`'s own effects (children first), so a thread switch
+  // that already landed on Workspace finds it active and does nothing.
+  useEffect(() => {
+    const dock = dockviewLayoutRef.current;
+    if (!dock) return;
+    const apply = shouldApplyLateLanding({
+      landingPanelId,
+      rememberedPanelId: selectActivePanelForKey(
+        useDockActiveSelectionStore.getState().byActivationKey,
+        activationKey,
+      ),
+      activePanelId: dock.getActivePanelId(),
+      isPanelOpen: dock.isPanelOpen,
+    });
+    if (apply) dock.openPanel(landingPanelId);
+  }, [activationKey, landingPanelId]);
   // Not memoized: step 1 memoized this object, but constructing a
   // 3-4-field plain object is cheap enough that the memo bought nothing
   // beyond a slightly harder-to-read deps array once a second `routeKind`
@@ -710,8 +783,8 @@ export function ChatDock(props: ChatDockProps) {
         // thread" (a draft's own threadId) both change this string, both
         // must bring Chat forward the same way — team-lead's report named
         // both as regressions, not just the server-thread case.
-        activationKey={`${props.environmentId}:${props.threadId}`}
-        activateOnChangeId={CHAT_PANEL_ID}
+        activationKey={activationKey}
+        activateOnChangeId={resolveDockLandingFallbackPanelIds(landingPanelId)}
         className={className}
       />
     </ThreadRouteContext.Provider>
