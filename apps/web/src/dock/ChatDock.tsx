@@ -42,6 +42,7 @@ import {
   selectActivePanelForKey,
   useDockActiveSelectionStore,
 } from "~/dockActiveSelectionStore";
+import RuntimePanel from "~/projectRuntime/RuntimePanel";
 import WorkspacePanel from "~/projectWorkspace/WorkspacePanel";
 import { useProject } from "~/state/entities";
 import type { ThreadSyncPhase } from "~/threadSync";
@@ -53,6 +54,7 @@ import {
   LayoutGrid,
   MessageCircle,
   PanelLeft,
+  Play,
   Sparkles,
   TerminalSquare,
 } from "lucide-react";
@@ -65,6 +67,7 @@ import {
   FILES_PANEL_ID,
   registerChatDockHandle,
   reportChatDockSidebarVisibleChange,
+  RUNTIME_PANEL_ID,
   TERMINAL_PANEL_ID,
   WORKSPACE_PANEL_ID,
 } from "./chatDockHandle";
@@ -99,6 +102,7 @@ const TERMINAL_GROUP_ID = "group-terminal";
 const BROWSER_GROUP_ID = "group-browser";
 const GENERATION_GROUP_ID = "group-generation";
 const WORKSPACE_GROUP_ID = "group-workspace";
+const RUNTIME_GROUP_ID = "group-runtime";
 
 /**
  * Increment 2b.1's own panel id — kept LOCAL to this file (this fork's usual
@@ -425,6 +429,21 @@ chatDockPanelRegistry.register({
 });
 
 /**
+ * Run: launch and stop the project's `devgame.runtime.json` profiles on the
+ * thread's environment and watch their state and log. The game opens in its
+ * own native window; this is not the Unity editor's Play toolbar.
+ * Closing the tab never stops a run.
+ */
+chatDockPanelRegistry.register({
+  id: RUNTIME_PANEL_ID,
+  title: "Run",
+  icon: Play,
+  component: RuntimePanel,
+  defaultLocation: "right",
+  singleton: true,
+});
+
+/**
  * The default preset: sidebar on the left, chat next to it, Diff, Files,
  * Terminal, Browser and Generation further right — the same third-column
  * slot Files occupied before Part A deleted our own version of it, now
@@ -485,6 +504,7 @@ function buildChatDockPreset(): SerializedDockview {
   const SIDEBAR_WIDTH = resolveInitialThreadSidebarWidth(null, Number.POSITIVE_INFINITY);
   const CHAT_WIDTH = 640;
   const WORKSPACE_WIDTH = 400;
+  const RUNTIME_WIDTH = 400;
   const DIFF_WIDTH = 400;
   const FILES_WIDTH = 400;
   const TERMINAL_WIDTH = 400;
@@ -494,6 +514,7 @@ function buildChatDockPreset(): SerializedDockview {
     SIDEBAR_WIDTH +
     CHAT_WIDTH +
     WORKSPACE_WIDTH +
+    RUNTIME_WIDTH +
     DIFF_WIDTH +
     FILES_WIDTH +
     TERMINAL_WIDTH +
@@ -527,6 +548,11 @@ function buildChatDockPreset(): SerializedDockview {
               views: [WORKSPACE_PANEL_ID],
               activeView: WORKSPACE_PANEL_ID,
             },
+          },
+          {
+            type: "leaf",
+            size: RUNTIME_WIDTH,
+            data: { id: RUNTIME_GROUP_ID, views: [RUNTIME_PANEL_ID], activeView: RUNTIME_PANEL_ID },
           },
           {
             type: "leaf",
@@ -572,6 +598,7 @@ function buildChatDockPreset(): SerializedDockview {
       [SIDEBAR_PANEL_ID]: presetPanelEntry(SIDEBAR_PANEL_ID, "Sidebar"),
       [CHAT_PANEL_ID]: presetPanelEntry(CHAT_PANEL_ID, "Chat"),
       [WORKSPACE_PANEL_ID]: presetPanelEntry(WORKSPACE_PANEL_ID, "Workspace"),
+      [RUNTIME_PANEL_ID]: presetPanelEntry(RUNTIME_PANEL_ID, "Run"),
       [DIFF_PANEL_ID]: presetPanelEntry(DIFF_PANEL_ID, "Diff"),
       [FILES_PANEL_ID]: presetPanelEntry(FILES_PANEL_ID, "Files"),
       [TERMINAL_PANEL_ID]: presetPanelEntry(TERMINAL_PANEL_ID, "Terminal"),

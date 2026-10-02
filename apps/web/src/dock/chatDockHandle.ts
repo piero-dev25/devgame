@@ -72,6 +72,8 @@ export const CHAT_PANEL_ID = "chat";
 /** The project Workspace panel: the default landing panel for game projects
  * (`lib/landingPanel.ts`), so the landing decision needs its id. */
 export const WORKSPACE_PANEL_ID = "workspace";
+/** The project Run panel (launch/stop run profiles); run evidence links back to it. */
+export const RUNTIME_PANEL_ID = "runtime";
 
 export interface ChatDockHandle {
   /** Activates the panel if it's already open anywhere in the live layout;
