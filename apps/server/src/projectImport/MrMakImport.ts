@@ -609,6 +609,7 @@ const make = Effect.gen(function* () {
         bytes: entry.bytes,
         sha256,
         headBlobOid: entry.oid,
+        executable: entry.mode === "100755",
         kind: fileKind(entry.path),
         dirtyInWorktree: dirty.has(entry.path),
         symlinkTarget: symlinkTargets.get(entry.path) ?? null,

@@ -96,6 +96,8 @@ export const MrMakImportEntry = Schema.Struct({
    */
   sha256: Schema.String,
   headBlobOid: Schema.String,
+  /** Committed with mode 100755; the imported copy is made executable too. */
+  executable: Schema.Boolean,
   kind: MrMakImportFileKind,
   /** The working-tree copy differs from HEAD; HEAD is what gets imported. */
   dirtyInWorktree: Schema.Boolean,

@@ -647,15 +647,21 @@ importId})` in apps/server/src/projectImport/importContent.ts. No routes yet (M4
   `receipt.json` (written last) and `replaced/<importId>/` (any destination copy an import
   replaced). `.devgame/import/.gitignore` ignores `staging/` and `replaced/`; the receipt is committed.
 - `importId` hashes the source revision, every planned path and sha256, and the choices. A rerun
-  with the same id returns `unchanged` and writes nothing. A changed source records `changes`
+  with the same id returns `unchanged` and writes nothing; so does a rerun of the same revision
+  that has nothing to write and no changes, whatever its choices. A changed source records `changes`
   (added, modified, removed) against the previous receipt; a file still holding our previous
   copy is `updated`, one the user edited is a `conflict` until `take-source`, and an unchanged
   source file the user edited or deleted stays `kept-local`. Removed source files are never deleted.
-- Baseline commit: the first import into a destination runs `git init` if `.git` is missing and
-  makes one commit, "Import Mr. Mak original content (DevGame import)", of only the files it
-  wrote plus the receipt. Later imports are left uncommitted for review.
+- Baseline commit: every run (including an `unchanged` one) runs `git init` if `.git` is missing,
+  and until HEAD holds `.devgame/import/receipt.json` makes one commit, "Import Mr. Mak original
+  content (DevGame import)", of the receipt and the planned files that still hold the source's
+  bytes, with literal pathspecs. So an interrupted or failed baseline is retried. Once it exists,
+  later imports are left uncommitted for review.
+- Destination safety: the nearest existing folder is resolved through symlinks and checked
+  (source, home, its parents, hidden home folders) before any folder is created. Rollback creates
+  nothing, and refuses an import whose receipt was already published.
 - Bytes are the committed blobs (`git cat-file blob`), verified against the plan's sha256;
-  `transforms` is empty. File modes are not carried over (the plan has no mode field).
+  `transforms` is empty. The plan's `executable` (mode 100755) is carried over to the copy.
 
 **Reuse**
 

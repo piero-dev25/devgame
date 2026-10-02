@@ -43,12 +43,22 @@ const RECEIPT_PATH = `${IMPORT_DIRECTORY}/receipt.json`;
 const GITIGNORE_PATH = `${IMPORT_DIRECTORY}/.gitignore`;
 const READ_ONLY_GIT_ARGS = ["-c", "core.fsmonitor=false"];
 const READ_ONLY_GIT_ENV = { GIT_OPTIONAL_LOCKS: "0" };
+/** Written once every write is staged; before it exists, no write has been moved into place. */
+const STAGED_MARKER = "staged";
+/** Outcomes whose destination copy is the source's bytes, and so belongs in the baseline commit. */
+const BASELINE_OUTCOMES: ReadonlySet<MrMakImportFileOutcome> = new Set([
+  "written",
+  "identical",
+  "updated",
+  "replaced",
+]);
 
 const StagedWrite = Schema.Struct({
   path: Schema.String,
   oid: Schema.String,
   sha256: Schema.String,
   symlink: Schema.Boolean,
+  executable: Schema.Boolean,
   /** sha256 of the destination copy this write moves aside; null when the path was empty. */
   replaces: Schema.NullOr(Schema.String),
 });
@@ -280,10 +290,17 @@ export const makeContentImporter = Effect.gen(function* () {
     yield* fileSystem.remove(stagingDirectory, { recursive: true, force: true });
   });
 
-  /** Resolves the destination, refusing the source, home and anything around them. */
+  /**
+   * Resolves the destination, refusing the source, home and anything around
+   * them. The nearest existing folder is resolved through any symlinks and
+   * checked before a folder is created, and missing folders are created under
+   * that resolved path, unless `ifMissing` is given: then nothing is created
+   * and a missing destination fails with it.
+   */
   const resolveDestination = Effect.fn("importContent.resolveDestination")(function* (
     destinationRoot: string,
     sourceRoot: string | null,
+    ifMissing?: MrMakImportApplyError,
   ) {
     const refuse = (detail: string) =>
       new MrMakImportApplyError({ reason: "unsafe-destination", destinationRoot, detail });
@@ -304,8 +321,33 @@ export const makeContentImporter = Effect.gen(function* () {
     };
     const lexical = check(path.normalize(destinationRoot));
     if (lexical) return yield* lexical;
-    yield* fileSystem.makeDirectory(destinationRoot, { recursive: true });
-    const root = yield* fileSystem.realPath(destinationRoot);
+    let existing = path.normalize(destinationRoot);
+    const missing: Array<string> = [];
+    let ancestor = yield* fileSystem
+      .realPath(existing)
+      .pipe(Effect.asSome, notFound(Option.none()));
+    while (Option.isNone(ancestor)) {
+      const parent = path.dirname(existing);
+      if (parent === existing) return yield* refuse("none of its folders exist.");
+      missing.unshift(path.basename(existing));
+      existing = parent;
+      ancestor = yield* fileSystem.realPath(existing).pipe(Effect.asSome, notFound(Option.none()));
+    }
+    const resolved = path.join(ancestor.value, ...missing);
+    const beforeCreate = check(resolved);
+    if (beforeCreate) return yield* beforeCreate;
+    if (missing.length > 0 && ifMissing !== undefined) return yield* ifMissing;
+    let current = ancestor.value;
+    for (const name of missing) {
+      current = path.join(current, name);
+      yield* fileSystem.makeDirectory(current).pipe(
+        Effect.catchIf(
+          (error) => error.reason._tag === "AlreadyExists",
+          () => Effect.void,
+        ),
+      );
+    }
+    const root = yield* fileSystem.realPath(resolved);
     const real = check(root);
     if (real) return yield* real;
     return root;
@@ -337,6 +379,7 @@ export const makeContentImporter = Effect.gen(function* () {
           oid: entry.headBlobOid,
           sha256: entry.sha256,
           symlink,
+          executable: entry.executable,
           replaces,
         });
       if (
@@ -429,30 +472,44 @@ export const makeContentImporter = Effect.gen(function* () {
     } satisfies StagingManifest;
   });
 
-  /** `git init` when needed; the first import alone commits, and only what it wrote. */
+  /**
+   * `git init` when needed, then one labelled commit until HEAD holds a
+   * receipt: of the receipt and the files that still hold the source's bytes.
+   * Retried on later runs if it never happened (interrupted, failed, no `.git`).
+   */
   const commitBaseline = (
     root: string,
     receipt: MrMakImportReceipt,
-    writes: ReadonlyArray<StagedWrite>,
+    skipped: string,
   ): Effect.Effect<ImportContentResult["commit"]> =>
     Effect.gen(function* () {
       if (!(yield* fileSystem.exists(path.join(root, ".git")))) {
         yield* git.execute({ operation: "MrMakImport.init", cwd: root, args: ["init", "-q"] });
       }
-      if (receipt.previousImportId !== null) {
-        return {
-          status: "skipped",
-          detail: "Later imports are left uncommitted for review.",
-        } as const;
+      const baseline = yield* git.execute({
+        operation: "MrMakImport.baseline",
+        cwd: root,
+        args: ["cat-file", "-e", `HEAD:${RECEIPT_PATH}`],
+        allowNonZeroExit: true,
+      });
+      if (baseline.exitCode === 0) return { status: "skipped", detail: skipped } as const;
+      const paths: Array<string> = [];
+      for (const file of receipt.files) {
+        if (!BASELINE_OUTCOMES.has(file.outcome)) continue;
+        const current = yield* inspect(root, file.path);
+        if ("sha256" in current && current.sha256 === file.destinationSha256) {
+          paths.push(file.path);
+        }
       }
-      const stdin = [...writes.map((write) => write.path), RECEIPT_PATH, GITIGNORE_PATH]
+      const stdin = [...paths, RECEIPT_PATH, GITIGNORE_PATH]
         .map((filePath) => `${filePath}\0`)
         .join("");
+      // Literal: an imported name such as `docs/[d].md` must not match `docs/d.md`.
       const pathspec = ["--pathspec-from-file=-", "--pathspec-file-nul"];
       yield* git.execute({
         operation: "MrMakImport.add",
         cwd: root,
-        args: ["add", "--force", ...pathspec],
+        args: ["--literal-pathspecs", "add", "--force", ...pathspec],
         stdin,
       });
       const message =
@@ -462,7 +519,7 @@ export const makeContentImporter = Effect.gen(function* () {
       const result = yield* git.execute({
         operation: "MrMakImport.commit",
         cwd: root,
-        args: ["commit", "-q", "-m", message, ...pathspec],
+        args: ["--literal-pathspecs", "commit", "-q", "-m", message, ...pathspec],
         stdin,
         allowNonZeroExit: true,
         timeoutMs: 60_000,
@@ -504,14 +561,18 @@ export const makeContentImporter = Effect.gen(function* () {
     yield* ensureDirectory(root, stagingRoot);
 
     const previous = Option.getOrNull(yield* readJson(receiptPath, decodeReceipt));
-    if (previous?.importId === importId) {
-      yield* finishStaging(root, importId);
+    const unchanged = Effect.fn("importContent.unchanged")(function* (receipt: MrMakImportReceipt) {
+      const detail = "Nothing changed since the last import.";
       return {
         status: "unchanged",
         receiptPath,
-        receipt: previous,
-        commit: { status: "skipped", detail: "Nothing changed since the last import." },
+        receipt,
+        commit: yield* commitBaseline(root, receipt, detail),
       } satisfies ImportContentResult;
+    });
+    if (previous?.importId === importId) {
+      yield* finishStaging(root, importId);
+      return yield* unchanged(previous);
     }
     const pending = (yield* fileSystem.readDirectory(path.join(root, stagingRoot))).find(
       (name) => name !== importId,
@@ -523,6 +584,15 @@ export const makeContentImporter = Effect.gen(function* () {
     const resumed = Option.getOrNull(yield* readJson(manifestPath, decodeManifest));
     const manifest = resumed ?? (yield* classify(root, plan, choices, importId, previous));
     if (resumed === null) {
+      // Same source and nothing to write: choices that no longer matter do not make a new import.
+      if (
+        previous !== null &&
+        previous.source.revision === plan.source.revision &&
+        manifest.writes.length === 0 &&
+        manifest.receipt.changes.length === 0
+      ) {
+        return yield* unchanged(previous);
+      }
       yield* writeAtomically(manifestPath, encodeManifest(manifest));
     }
 
@@ -542,9 +612,11 @@ export const makeContentImporter = Effect.gen(function* () {
       if (write.symlink) yield* fileSystem.symlink(bytes.toString("utf8"), staged);
       else yield* fileSystem.writeFile(staged, bytes);
     }
+    yield* fileSystem.writeFileString(path.join(stagingDirectory, STAGED_MARKER), "");
     for (const write of manifest.writes) {
       const current = yield* inspect(root, write.path);
       if (landed(current, write)) continue;
+      if (write.executable) yield* fileSystem.chmod(path.join(filesRoot, write.path), 0o755);
       yield* ensureDirectory(root, posix.dirname(write.path));
       const target = path.join(root, write.path);
       if (current.kind !== "absent") {
@@ -564,7 +636,11 @@ export const makeContentImporter = Effect.gen(function* () {
     }
     yield* writeAtomically(receiptPath, encodeReceipt(receipt));
     yield* finishStaging(root, importId);
-    const commit = yield* commitBaseline(root, receipt, manifest.writes);
+    const commit = yield* commitBaseline(
+      root,
+      receipt,
+      "Later imports are left uncommitted for review.",
+    );
     return { status: "imported", receiptPath, receipt, commit } satisfies ImportContentResult;
   });
 
@@ -573,20 +649,31 @@ export const makeContentImporter = Effect.gen(function* () {
     readonly destinationRoot: string;
     readonly importId: string;
   }) {
-    const root = yield* resolveDestination(input.destinationRoot, null);
+    const nothing = (destinationRoot: string) =>
+      new MrMakImportApplyError({
+        reason: "nothing-to-roll-back",
+        destinationRoot,
+        detail: input.importId,
+      });
+    const root = yield* resolveDestination(
+      input.destinationRoot,
+      null,
+      nothing(input.destinationRoot),
+    );
     const stagingDirectory = path.join(root, IMPORT_DIRECTORY, "staging", input.importId);
     const manifest = /^[0-9a-f]{16}$/.test(input.importId)
       ? Option.getOrNull(
           yield* readJson(path.join(stagingDirectory, "manifest.json"), decodeManifest),
         )
       : null;
-    if (manifest === null) {
-      return yield* new MrMakImportApplyError({
-        reason: "nothing-to-roll-back",
-        destinationRoot: root,
-        detail: input.importId,
-      });
+    if (manifest === null) return yield* nothing(root);
+    // A published receipt means the import completed; only its staging cleanup was cut short.
+    const receipt = yield* readJson(path.join(root, RECEIPT_PATH), decodeReceipt);
+    if (Option.isSome(receipt) && receipt.value.importId === input.importId) {
+      return yield* nothing(root);
     }
+    // Moves start only once every write is staged; before that, nothing landed.
+    const moving = yield* fileSystem.exists(path.join(stagingDirectory, STAGED_MARKER));
     const removed: Array<string> = [];
     const restored: Array<string> = [];
     const kept: Array<string> = [];
@@ -598,10 +685,11 @@ export const makeContentImporter = Effect.gen(function* () {
         current.kind === (write.symlink ? "symlink" : "file") &&
         "sha256" in current &&
         current.sha256 === write.sha256;
-      if (staged.kind === "absent" && ours) {
+      const moved = moving && staged.kind === "absent";
+      if (moved && ours) {
         yield* fileSystem.remove(target);
         removed.push(write.path);
-      } else if (staged.kind === "absent" && current.kind !== "absent") {
+      } else if (moved && current.kind !== "absent") {
         kept.push(write.path);
       }
       const backup = path.join(stagingDirectory, "replaced", write.path);

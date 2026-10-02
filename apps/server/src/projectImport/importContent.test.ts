@@ -7,6 +7,7 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -40,40 +41,50 @@ const withDependencies = <E, R>(service: Layer.Layer<MrMakImport.MrMakImport, E,
   );
 const TestLayer = withDependencies(MrMakImport.layer);
 
-const interruptMovesAfter = (successes: number) =>
+type InterruptedCall = "rename" | "writeFile" | "remove";
+
+/** A file system whose `rename`, `writeFile` or `remove` fails where `fails` says so. */
+const failingFileSystem = (fails: (method: InterruptedCall, path: string) => boolean) =>
   Layer.effect(
     FileSystem.FileSystem,
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
-      let moves = 0;
+      const injected = (method: InterruptedCall, pathOrDescriptor: string) =>
+        Effect.fail(
+          PlatformError.systemError({
+            _tag: "Unknown",
+            module: "FileSystem",
+            method,
+            description: "injected interruption",
+            pathOrDescriptor,
+          }),
+        );
       return {
         ...fileSystem,
         rename: (from: string, to: string) =>
-          from.includes("/.devgame/import/staging/") &&
-          from.includes("/files/") &&
-          ++moves > successes
-            ? Effect.fail(
-                PlatformError.systemError({
-                  _tag: "Unknown",
-                  module: "FileSystem",
-                  method: "rename",
-                  description: "injected interruption",
-                  pathOrDescriptor: from,
-                }),
-              )
-            : fileSystem.rename(from, to),
+          fails("rename", from) ? injected("rename", from) : fileSystem.rename(from, to),
+        writeFile: (...args: Parameters<FileSystem.FileSystem["writeFile"]>) =>
+          fails("writeFile", args[0])
+            ? injected("writeFile", args[0])
+            : fileSystem.writeFile(...args),
+        remove: (...args: Parameters<FileSystem.FileSystem["remove"]>) =>
+          fails("remove", args[0]) ? injected("remove", args[0]) : fileSystem.remove(...args),
       } satisfies FileSystem.FileSystem;
     }),
   );
 
-/**
- * A service whose moves out of a staging `files/` folder fail after the first
- * `successes`. `fresh`, so the test's already-built service is not reused.
- */
-const interruptedAfter = (successes: number) =>
-  withDependencies(
-    Layer.fresh(MrMakImport.layer).pipe(Layer.provide(interruptMovesAfter(successes))),
+/** A service on a failing file system. `fresh`, so the test's already-built service is not reused. */
+const interruptedWhen = (fails: (method: InterruptedCall, path: string) => boolean) =>
+  withDependencies(Layer.fresh(MrMakImport.layer).pipe(Layer.provide(failingFileSystem(fails))));
+const isStaged = (filePath: string) =>
+  filePath.includes("/.devgame/import/staging/") && filePath.includes("/files/");
+/** Moves out of a staging `files/` folder fail after the first `successes`. */
+const interruptedAfter = (successes: number) => {
+  let moves = 0;
+  return interruptedWhen(
+    (method, from) => method === "rename" && isStaged(from) && ++moves > successes,
   );
+};
 const WorkspaceReaderLayer = ProjectWorkspace.layer.pipe(
   Layer.provide(
     WorkspaceFileSystem.layer.pipe(
@@ -193,6 +204,7 @@ const makeFixture = Effect.gen(function* () {
       NodePath.join(source, "workspace/2026_hero/alias.css"),
     );
   }
+  NodeFS.chmodSync(NodePath.join(source, ".agents/skills/alpha/scripts/run.py"), 0o755);
   git(source, "init", "-q");
   git(source, "add", "-A");
   git(source, "commit", "-q", "-m", "initial");
@@ -291,6 +303,15 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importC
         ].toSorted(),
       );
       expect(git(destination, "status", "--porcelain")).toBe("");
+      // The executable bit survives, on disk and in the baseline commit.
+      const script = ".agents/skills/alpha/scripts/run.py";
+      expect(plan.entries.find((entry) => entry.destinationPath === script)?.executable).toBe(true);
+      expect(NodeFS.statSync(NodePath.join(destination, script)).mode & 0o111).not.toBe(0);
+      expect(NodeFS.statSync(NodePath.join(destination, "docs/guide.md")).mode & 0o111).toBe(0);
+      expect(git(destination, "ls-files", "-s", "--", script).split(" ")[0]).toBe("100755");
+      expect(git(destination, "ls-files", "-s", "--", "docs/guide.md").split(" ")[0]).toBe(
+        "100644",
+      );
       expect(snapshotTree(source)).toEqual(sourceBefore);
       expect(snapshotTree(base, destination)).toEqual(outsideBefore);
     }).pipe(Effect.provide(TestLayer)),
@@ -497,6 +518,184 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.importC
       );
       expect(error.reason).toBe("unsafe-destination");
       expect(snapshotTree(source)).toEqual(before);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect(
+    "refuses home, hidden home folders and symlinked parents before creating anything",
+    () =>
+      Effect.gen(function* () {
+        const { base, source, destination } = yield* makeFixture;
+        const plan = yield* planFor(source, destination);
+        const home = NodeOS.homedir();
+        const hidden = `.devgame-import-test-${NodeCrypto.randomUUID()}`;
+        const refused = (target: string) =>
+          importInto(target, { plan }).pipe(
+            Effect.flip,
+            Effect.map((error) => error.reason),
+          );
+        const sourceBefore = snapshotTree(source);
+        try {
+          expect(yield* refused(home)).toBe("unsafe-destination");
+          expect(yield* refused(NodePath.join(home, hidden, "comparison"))).toBe(
+            "unsafe-destination",
+          );
+          if (symlinksSupported) {
+            NodeFS.symlinkSync(source, NodePath.join(base, "source-link"));
+            NodeFS.symlinkSync(home, NodePath.join(base, "home-link"));
+            expect(yield* refused(NodePath.join(base, "source-link/comparison"))).toBe(
+              "unsafe-destination",
+            );
+            expect(yield* refused(NodePath.join(base, "home-link", hidden, "comparison"))).toBe(
+              "unsafe-destination",
+            );
+          }
+          expect(exists(source, "comparison")).toBe(false);
+          expect(snapshotTree(source)).toEqual(sourceBefore);
+          expect(exists(home, hidden)).toBe(false);
+        } finally {
+          NodeFS.rmSync(NodePath.join(home, hidden), { recursive: true, force: true });
+        }
+      }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("a rerun with choices that no longer matter is unchanged and keeps the receipt", () =>
+    Effect.gen(function* () {
+      const { source, destination } = yield* makeFixture;
+      yield* planAndImport(source, destination);
+      write(destination, "docs/guide.md", "# Guide, adapted\n");
+      write(source, "docs/guide.md", "# Guide v2\n");
+      git(source, "add", "docs/guide.md");
+      git(source, "commit", "-q", "-m", "v2");
+      const plan = yield* planFor(source, destination);
+      const conflicted = yield* importInto(destination, { plan });
+      expect(conflicted.receipt.conflicts.map((conflict) => conflict.path)).toEqual([
+        "docs/guide.md",
+      ]);
+      const chosen = yield* importInto(destination, {
+        plan,
+        choices: { "docs/guide.md": "take-source" },
+      });
+      expect(outcomeOf(chosen.receipt, "docs/guide.md")).toBe("replaced");
+      const receiptBefore = read(destination, ".devgame/import/receipt.json");
+
+      const withoutChoice = yield* importInto(destination, { plan });
+      const keepChoice = yield* importInto(destination, {
+        plan,
+        choices: { "docs/guide.md": "keep-destination" },
+      });
+      const sameChoice = yield* importInto(destination, {
+        plan,
+        choices: { "docs/guide.md": "take-source" },
+      });
+
+      expect([withoutChoice.status, keepChoice.status, sameChoice.status]).toEqual([
+        "unchanged",
+        "unchanged",
+        "unchanged",
+      ]);
+      expect(withoutChoice.receipt.importId).toBe(chosen.receipt.importId);
+      expect(read(destination, ".devgame/import/receipt.json")).toBe(receiptBefore);
+      expect(stagingEntries(destination)).toEqual([]);
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("the baseline commit takes glob-like names literally and nothing else", () =>
+    Effect.gen(function* () {
+      const { source, destination } = yield* makeFixture;
+      write(source, "docs/[d].md", "# Bracketed\n");
+      git(source, "add", "docs/[d].md");
+      git(source, "commit", "-q", "-m", "bracketed");
+      write(destination, "docs/d.md", "# Private\n");
+      write(destination, "docs/x.md", "# Also private\n");
+
+      const result = yield* planAndImport(source, destination);
+
+      expect(result.commit.status).toBe("committed");
+      const committed = git(destination, "ls-files").trim().split("\n");
+      expect(committed).toContain("docs/[d].md");
+      expect(committed).not.toContain("docs/d.md");
+      expect(committed).not.toContain("docs/x.md");
+      expect(read(destination, "docs/d.md")).toBe("# Private\n");
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect(
+    "a crash after the receipt is published cannot be rolled back and the rerun commits",
+    () =>
+      Effect.gen(function* () {
+        const { source, destination } = yield* makeFixture;
+        const plan = yield* planFor(source, destination);
+        const crashed = yield* importInto(destination, { plan }).pipe(
+          Effect.provide(
+            interruptedWhen(
+              (method, filePath) =>
+                method === "remove" && /\/\.devgame\/import\/staging\/[0-9a-f]{16}$/.test(filePath),
+            ),
+          ),
+          Effect.flip,
+        );
+        expect(crashed.reason).toBe("filesystem");
+        const receipt = readReceipt(destination);
+        expect(stagingEntries(destination)).toEqual([receipt.importId]);
+        expect(exists(destination, ".git")).toBe(false);
+
+        const rollback = yield* withService((service) =>
+          service.rollbackImport({ destinationRoot: destination, importId: receipt.importId }),
+        ).pipe(Effect.flip);
+        expect(rollback.reason).toBe("nothing-to-roll-back");
+        for (const entry of plan.entries) {
+          expect([entry.destinationPath, exists(destination, entry.destinationPath)]).toEqual([
+            entry.destinationPath,
+            true,
+          ]);
+        }
+
+        const rerun = yield* importInto(destination, { plan });
+        expect(rerun.status).toBe("unchanged");
+        expect(rerun.commit).toEqual({ status: "committed", detail: null });
+        expect(git(destination, "log", "--format=%s").trim()).toBe(
+          "Import Mr. Mak original content (DevGame import)",
+        );
+        expect(git(destination, "status", "--porcelain")).toBe("");
+        expect(stagingEntries(destination)).toEqual([]);
+
+        const again = yield* importInto(destination, { plan });
+        expect(again.commit.status).toBe("skipped");
+        expect(git(destination, "log", "--format=%s").trim().split("\n")).toHaveLength(1);
+      }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("rolling back an import cut short while staging reports nothing as kept", () =>
+    Effect.gen(function* () {
+      const { base, source, destination } = yield* makeFixture;
+      write(destination, "docs/guide.md", "# My guide\n");
+      const plan = yield* planFor(source, destination);
+      yield* importInto(destination, { plan, choices: { "docs/guide.md": "take-source" } }).pipe(
+        Effect.provide(
+          interruptedWhen((method, filePath) => method === "writeFile" && isStaged(filePath)),
+        ),
+        Effect.flip,
+      );
+      const [importId = ""] = stagingEntries(destination);
+
+      const result = yield* withService((service) =>
+        service.rollbackImport({ destinationRoot: destination, importId }),
+      );
+
+      expect(result).toEqual({ removed: [], restored: [], kept: [] });
+      expect(read(destination, "docs/guide.md")).toBe("# My guide\n");
+      expect(stagingEntries(destination)).toEqual([]);
+
+      // Rolling back somewhere that does not exist creates nothing.
+      const missing = yield* withService((service) =>
+        service.rollbackImport({
+          destinationRoot: NodePath.join(base, "never", "made"),
+          importId,
+        }),
+      ).pipe(Effect.flip);
+      expect(missing.reason).toBe("nothing-to-roll-back");
+      expect(exists(base, "never")).toBe(false);
     }).pipe(Effect.provide(TestLayer)),
   );
 
