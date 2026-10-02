@@ -29,6 +29,20 @@
       "evidence": {
         "logPatterns": ["VFX capture probe:.*effect age 0\\.65(,|$)", "screenshot saved:"]
       }
+    },
+    {
+      "id": "capture-fire-front-0.65",
+      "name": "CAPTURE: fire front at 0.65 s (capture_kaigen_vfx.sh, no build)",
+      "executable": "tools/capture_kaigen_vfx.sh",
+      "args": ["1", "front", "0.65", "{{runDir}}/fire-front-t00_65.png", "--no-build"],
+      "outputs": [
+        { "name": "capture", "kind": "image", "path": "{{runDir}}/fire-front-t00_65.png" },
+        { "name": "game-log", "kind": "log", "path": "{{runDir}}/fire-front-t00_65.log" }
+      ],
+      "evidence": {
+        "logPatterns": ["VFX capture probe:.*effect age 0\\.65(,|$)", "screenshot saved:"],
+        "build": "Runtime/out/macos/debug/kaigen-horde-spike"
+      }
     }
   ]
 }

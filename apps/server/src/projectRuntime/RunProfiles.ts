@@ -7,7 +7,8 @@
  * process; the runner spawns `absExecutable` with `args` and no shell.
  *
  * A plan is exactly what the profile says: the executable it names, its
- * literal argv and its cwd. Nothing is interpolated, and no build or install
+ * literal argv and its cwd. Nothing is interpolated (the runner fills in only
+ * `{{runDir}}`, the run's own directory), and no build or install
  * step is ever added, so launching a profile runs the existing build as is.
  *
  * Every path is checked lexically (no absolute paths, no `..`) and by
@@ -20,6 +21,7 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import {
+  RUN_DIR_TOKEN,
   RUN_PROFILES_FILE_NAME,
   RunProfilesFile,
   type RunProfile,
@@ -127,7 +129,18 @@ export interface RunProfileStatus {
 }
 
 /**
- * What the runner spawns: no shell, no build step, argv passed through untouched.
+ * A declared output. A `run` output lives in the run's own directory, which
+ * exists only once the run has an id: `runRelativePath` follows `{{runDir}}/`.
+ */
+export type LaunchPlanOutput = RunProfileOutput &
+  (
+    | { readonly location: "project"; readonly absPath: string }
+    | { readonly location: "run"; readonly runRelativePath: string }
+  );
+
+/**
+ * What the runner spawns: no shell, no build step, argv passed through untouched
+ * apart from {@link RUN_DIR_TOKEN}, which {@link bindRunDirectory} fills in.
  *
  * Resolving creates nothing. Before spawning, the runner creates the parent
  * directory of each declared output, and it records the child's stdout and
@@ -140,9 +153,43 @@ export interface LaunchPlan {
   readonly args: ReadonlyArray<string>;
   readonly absCwd: string;
   readonly envAllowList: ReadonlyArray<string>;
-  readonly outputs: ReadonlyArray<RunProfileOutput & { readonly absPath: string }>;
+  readonly outputs: ReadonlyArray<LaunchPlanOutput>;
   readonly logPatterns: ReadonlyArray<string>;
+  /** Whether each run is recorded as evidence: the profile has `evidence` or outputs. */
+  readonly recordsEvidence: boolean;
+  /** The build fingerprinted for evidence (`evidence.build`, else the executable). */
+  readonly build: { readonly path: string; readonly absPath: string };
+  readonly workspaceCard: { readonly entityId: string; readonly stepPath: string | null } | null;
 }
+
+/** An output with its absolute path, once the run directory is known. */
+export type BoundOutput = RunProfileOutput & {
+  readonly location: "project" | "run";
+  /** Project-root-relative, or relative to the run directory. */
+  readonly relativePath: string;
+  readonly absPath: string;
+};
+
+/** The plan's argv and outputs with {@link RUN_DIR_TOKEN} replaced by the run's directory. */
+export const bindRunDirectory = (
+  plan: LaunchPlan,
+  runDir: string,
+): { readonly args: ReadonlyArray<string>; readonly outputs: ReadonlyArray<BoundOutput> } => ({
+  args: plan.args.map((arg) => arg.replaceAll(RUN_DIR_TOKEN, runDir)),
+  outputs: plan.outputs.map((output) => {
+    const { name, kind, path } = output;
+    return output.location === "project"
+      ? { name, kind, path, location: "project", relativePath: path, absPath: output.absPath }
+      : {
+          name,
+          kind,
+          path,
+          location: "run",
+          relativePath: output.runRelativePath,
+          absPath: `${runDir}/${output.runRelativePath}`,
+        };
+  }),
+});
 
 /** Service tag for reading run profiles and resolving launch plans. */
 export class RunProfiles extends Context.Service<
@@ -185,6 +232,21 @@ const isValidRegExp = (pattern: string) => {
   } catch {
     return false;
   }
+};
+
+/**
+ * `{{runDir}}/captures/a.png` gives `captures/a.png`. Null when the token is
+ * not the leading component, or the rest is not a plain relative path.
+ */
+const runRelativeOutputPath = (outputPath: string): string | null => {
+  const prefix = `${RUN_DIR_TOKEN}/`;
+  if (!outputPath.startsWith(prefix)) return null;
+  const rest = outputPath.slice(prefix.length);
+  if (rest.includes(RUN_DIR_TOKEN) || rest.includes("\\")) return null;
+  const segments = rest.split("/");
+  return segments.some((segment) => segment === "" || segment === "." || segment === "..")
+    ? null
+    : rest;
 };
 
 type Checked =
@@ -341,7 +403,7 @@ const make = Effect.gen(function* () {
       }
     }
 
-    const outputs: Array<RunProfileOutput & { absPath: string }> = [];
+    const outputs: Array<LaunchPlanOutput> = [];
     let escapedOutputPath: string | null = null;
     const outputNames = new Set<string>();
     for (const output of profile.outputs ?? []) {
@@ -352,6 +414,19 @@ const make = Effect.gen(function* () {
         });
       }
       outputNames.add(output.name);
+      if (output.path.includes(RUN_DIR_TOKEN)) {
+        const runRelativePath = runRelativeOutputPath(output.path);
+        if (runRelativePath === null) {
+          escapedOutputPath ??= output.path;
+          issues.push({
+            kind: "output-escape",
+            message: `Output "${output.name}" path "${output.path}" must be ${RUN_DIR_TOKEN}/ followed by a path inside the run directory.`,
+          });
+        } else {
+          outputs.push({ ...output, location: "run", runRelativePath });
+        }
+        continue;
+      }
       const checked = yield* checkOutputPath(roots, output.path);
       if (checked._tag === "escape") {
         escapedOutputPath ??= output.path;
@@ -360,9 +435,23 @@ const make = Effect.gen(function* () {
           message: `Output "${output.name}" path "${output.path}" is not inside the project root.`,
         });
       } else {
-        outputs.push({ ...output, absPath: checked.absPath });
+        outputs.push({ ...output, location: "project", absPath: checked.absPath });
       }
     }
+
+    // A missing build is not an issue: its provenance is then recorded as unknown.
+    const buildPath = profile.evidence?.build ?? profile.executable;
+    const build =
+      profile.evidence?.build === undefined
+        ? executable
+        : yield* checkPath(roots, profile.evidence.build, false);
+    if (build._tag === "escape" && profile.evidence?.build !== undefined) {
+      issues.push({
+        kind: "build-escape",
+        message: `Build "${buildPath}" is not inside the project root.`,
+      });
+    }
+    const workspaceCard = profile.evidence?.workspaceCard;
 
     const logPatterns = profile.evidence?.logPatterns ?? [];
     for (const pattern of logPatterns) {
@@ -375,7 +464,10 @@ const make = Effect.gen(function* () {
     }
 
     const plan: LaunchPlan | null =
-      issues.length === 0 && executable._tag === "ok" && cwd._tag === "ok"
+      issues.length === 0 &&
+      executable._tag === "ok" &&
+      cwd._tag === "ok" &&
+      build._tag !== "escape"
         ? {
             profileId: profile.id,
             absExecutable: executable.absPath,
@@ -384,6 +476,12 @@ const make = Effect.gen(function* () {
             envAllowList: profile.envAllowList ?? [],
             outputs,
             logPatterns,
+            recordsEvidence: profile.evidence !== undefined || outputs.length > 0,
+            build: { path: buildPath, absPath: build.absPath },
+            workspaceCard:
+              workspaceCard === undefined
+                ? null
+                : { entityId: workspaceCard.entityId, stepPath: workspaceCard.stepPath ?? null },
           }
         : null;
     return { status: { profile, valid: issues.length === 0, issues }, plan, escapedOutputPath };

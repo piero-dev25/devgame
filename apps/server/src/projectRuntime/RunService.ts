@@ -291,16 +291,17 @@ const make = (options: RunServiceOptions) =>
     ) {
       const { projectId } = entry;
       const { runId } = entry.state;
+      const runDir = path.join(stateDir, "runs", encodeURIComponent(projectId), runId);
+      const bound = RunProfiles.bindRunDirectory(plan, runDir);
       const runScope = yield* Scope.fork(serviceScope);
       const spawned = yield* Effect.gen(function* () {
-        const runDir = path.join(stateDir, "runs", encodeURIComponent(projectId), runId);
         yield* fileSystem.makeDirectory(runDir, { recursive: true });
-        for (const output of plan.outputs) {
+        for (const output of bound.outputs) {
           yield* fileSystem.makeDirectory(path.dirname(output.absPath), { recursive: true });
         }
         const logFile = yield* fileSystem.open(path.join(runDir, "run.log"), { flag: "a" });
         const handle = yield* spawner.spawn(
-          ChildProcess.make(plan.absExecutable, [...plan.args], {
+          ChildProcess.make(plan.absExecutable, [...bound.args], {
             cwd: plan.absCwd,
             env: childEnv(plan.envAllowList),
             extendEnv: false,
