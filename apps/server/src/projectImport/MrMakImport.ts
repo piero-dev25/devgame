@@ -29,7 +29,10 @@ import {
   type MrMakImportFileKind,
   type MrMakImportIssue,
   type MrMakImportPlan,
+  type MrMakImportApplySuccess,
+  type MrMakImportPlanSummary,
   type MrMakImportRoot,
+  type MrMakImportStatusSuccess,
 } from "@t3tools/contracts";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Context from "effect/Context";
@@ -56,6 +59,12 @@ import {
   type ImportSkillsResult,
   type MrMakSkillImportError,
 } from "./importSkills.ts";
+import {
+  makeImportReview,
+  type ApplyReviewedRequest,
+  type ImportReviewRequest,
+  type MrMakImportReviewError,
+} from "./importReview.ts";
 import { checkSkillDiscovery, registrySkillProbe } from "./skillDiscovery.ts";
 import {
   extractHrefs,
@@ -170,6 +179,28 @@ export class MrMakImport extends Context.Service<
       readonly destinationRoot: string;
       readonly expected?: ReadonlyArray<string> | undefined;
     }) => Effect.Effect<ReadonlyArray<MrMakSkillDiscoveryReport>, MrMakImportApplyError>;
+    /**
+     * The dry run the user reviews: totals, conflicts by the apply rules (file
+     * and skill), exclusions, requirements, what the destination is, and a
+     * fingerprint. Writes nothing.
+     */
+    readonly review: (
+      input: ImportReviewRequest,
+    ) => Effect.Effect<MrMakImportPlanSummary, MrMakImportPlanError | MrMakImportApplyError>;
+    /**
+     * Imports a reviewed plan: refused when its fingerprint moved, when a
+     * conflict has no choice, or for an existing project without confirmation.
+     */
+    readonly apply: (
+      input: ApplyReviewedRequest,
+    ) => Effect.Effect<
+      MrMakImportApplySuccess,
+      MrMakImportPlanError | MrMakImportApplyError | MrMakSkillImportError | MrMakImportReviewError
+    >;
+    /** A project's import, read from its receipt, with each imported file's origin now. */
+    readonly status: (input: {
+      readonly destinationRoot: string;
+    }) => Effect.Effect<MrMakImportStatusSuccess>;
   }
 >()("t3/projectImport/MrMakImport") {}
 
@@ -712,8 +743,19 @@ const make = Effect.gen(function* () {
     return yield* checkSkillDiscovery(cwd, expected, registrySkillProbe(providerRegistry));
   });
 
+  const reviewed = yield* makeImportReview({
+    plan,
+    previewConflicts: content.previewConflicts,
+    previewSkills: skills.previewSkills,
+    importContent: content.importContent,
+    importSkills: skills.importSkills,
+  });
+
   return MrMakImport.of({
     plan,
+    review: reviewed.review,
+    apply: reviewed.apply,
+    status: reviewed.status,
     importContent: content.importContent,
     rollbackImport: content.rollback,
     importSkills: skills.importSkills,

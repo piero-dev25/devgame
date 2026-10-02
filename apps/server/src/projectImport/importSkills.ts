@@ -32,6 +32,7 @@ import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "../processRunner.ts";
@@ -82,6 +83,11 @@ export interface ImportSkillsRequest {
   readonly skillChoices?: ReadonlyArray<MrMakSkillConflictChoice> | undefined;
   /** File-level choices for the rest of the plan, as for importContent. */
   readonly choices?: ImportContentRequest["choices"];
+}
+
+export interface SkillPreviewRequest {
+  readonly plan: MrMakImportPlan;
+  readonly destinationRoot: string;
 }
 
 export interface ImportSkillsResult extends ImportContentResult {
@@ -153,29 +159,29 @@ export const makeSkillImporter = (
       return hashes;
     });
 
-    const importSkills = Effect.fn("MrMakImport.importSkills")(function* (
-      request: ImportSkillsRequest,
-    ) {
-      const { plan } = request;
-      const fail = (
-        reason: MrMakSkillImportError["reason"],
-        skills: ReadonlyArray<string> = [],
-        cause?: unknown,
-      ) => new MrMakSkillImportError({ reason, skills: [...skills], cause });
-      const skillEntries = plan.entries.filter((entry) => entry.root === AGENTS);
+    /** The plan's `.agents/skills` entries by skill name. */
+    const groupSkills = (plan: MrMakImportPlan) => {
       const bySkill = new Map<string, Array<MrMakImportEntry>>();
-      for (const entry of skillEntries) {
+      for (const entry of plan.entries.filter((candidate) => candidate.root === AGENTS)) {
         const skill = skillOf(entry);
         if (!skill) continue;
         const list = bySkill.get(skill.name) ?? [];
         list.push(entry);
         bySkill.set(skill.name, list);
       }
-      if (bySkill.size === 0) return yield* fail("no-skills");
+      return bySkill;
+    };
 
-      // What the destination already holds, and which of it a previous import put there.
+    /**
+     * What the destination already holds, which of it a previous import put
+     * there, and the source skills whose name a different destination skill uses.
+     */
+    const destinationSkills = Effect.fn("importSkills.destinationSkills")(function* (
+      destinationRoot: string,
+      bySkill: ReadonlyMap<string, ReadonlyArray<MrMakImportEntry>>,
+    ) {
       const root = yield* fileSystem
-        .realPath(request.destinationRoot)
+        .realPath(destinationRoot)
         .pipe(Effect.orElseSucceed(() => null));
       const previous =
         root === null
@@ -206,10 +212,6 @@ export const makeSkillImporter = (
           })
         );
       });
-
-      const choices = new Map((request.skillChoices ?? []).map((choice) => [choice.skill, choice]));
-      const unknown = [...choices.keys()].filter((name) => !bySkill.has(name));
-      if (unknown.length > 0) return yield* fail("invalid-choice", unknown);
       const conflicts: Array<string> = [];
       for (const [name, entries] of bySkill) {
         if (
@@ -219,6 +221,29 @@ export const makeSkillImporter = (
           conflicts.push(name);
         }
       }
+      return { root, takenAt, conflicts };
+    });
+
+    const importSkills = Effect.fn("MrMakImport.importSkills")(function* (
+      request: ImportSkillsRequest,
+    ) {
+      const { plan } = request;
+      const fail = (
+        reason: MrMakSkillImportError["reason"],
+        skills: ReadonlyArray<string> = [],
+        cause?: unknown,
+      ) => new MrMakSkillImportError({ reason, skills: [...skills], cause });
+      const skillEntries = plan.entries.filter((entry) => entry.root === AGENTS);
+      const bySkill = groupSkills(plan);
+      if (bySkill.size === 0) return yield* fail("no-skills");
+      const { root, takenAt, conflicts } = yield* destinationSkills(
+        request.destinationRoot,
+        bySkill,
+      );
+
+      const choices = new Map((request.skillChoices ?? []).map((choice) => [choice.skill, choice]));
+      const unknown = [...choices.keys()].filter((name) => !bySkill.has(name));
+      if (unknown.length > 0) return yield* fail("invalid-choice", unknown);
       const unresolved = conflicts.filter((name) => !choices.has(name));
       if (unresolved.length > 0) return yield* fail("skill-conflict", unresolved);
       // Keeping the destination's skill only means something where it has one.
@@ -451,19 +476,51 @@ export const makeSkillImporter = (
       return { ...result, skills } satisfies ImportSkillsResult;
     });
 
+    /**
+     * Without writing: each source skill, whether a different destination skill
+     * already uses its name, and the plan laid out as an import without skill
+     * choices would place it (each sync-skills file again under `.claude/skills`).
+     */
+    const previewSkills = Effect.fn("MrMakImport.previewSkills")(function* (
+      request: SkillPreviewRequest,
+    ) {
+      const bySkill = groupSkills(request.plan);
+      const { conflicts } = yield* destinationSkills(request.destinationRoot, bySkill);
+      return {
+        skills: [...bySkill].map(([name, list]) => ({
+          name,
+          files: list.length,
+          conflict: conflicts.includes(name),
+        })),
+        entries: request.plan.entries.flatMap((entry) =>
+          entry.root === AGENTS && isDistributed(entry)
+            ? [
+                entry,
+                {
+                  ...entry,
+                  destinationPath: `${CLAUDE}/${entry.sourcePath.slice(AGENTS.length + 1)}`,
+                },
+              ]
+            : [entry],
+        ),
+      };
+    });
+
+    const asApplyError = (destinationRoot: string) => (cause: PlatformError.PlatformError) =>
+      Effect.fail(
+        new MrMakImportApplyError({
+          reason: "filesystem",
+          destinationRoot,
+          detail: cause.message,
+          cause,
+        }),
+      );
+
     return {
       importSkills: (request: ImportSkillsRequest) =>
         importSkills(request).pipe(
-          Effect.catchTag("PlatformError", (cause) =>
-            Effect.fail(
-              new MrMakImportApplyError({
-                reason: "filesystem",
-                destinationRoot: request.destinationRoot,
-                detail: cause.message,
-                cause,
-              }),
-            ),
-          ),
+          Effect.catchTag("PlatformError", asApplyError(request.destinationRoot)),
         ),
+      previewSkills,
     };
   });

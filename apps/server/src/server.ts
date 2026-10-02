@@ -131,6 +131,11 @@ import {
 } from "./projectRuntime/RunRoute.ts";
 import * as RunService from "./projectRuntime/RunService.ts";
 import { projectWorkspaceRouteLayer } from "./projectWorkspace/ProjectWorkspaceRoute.ts";
+import {
+  importApplyRouteLayer,
+  importPlanRouteLayer,
+  importStatusRouteLayer,
+} from "./projectImport/MrMakImportRoute.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as EngineTypeResolver from "./project/EngineTypeResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -802,6 +807,10 @@ export const makeRoutesLayer = Layer.mergeAll(
     runStartRouteLayer,
     runStopRouteLayer,
     runStatusRouteLayer,
+    // MrMakImport is ambient through the runtime chain; no provideRequest needed.
+    importPlanRouteLayer,
+    importApplyRouteLayer,
+    importStatusRouteLayer,
   ),
   McpHttpServer.layer(GenerationServiceLive).pipe(Layer.provide(McpSessionRegistry.layer)),
   // Last, so no route layer can replace the server's one TracerDisabledWhen.

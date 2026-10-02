@@ -760,7 +760,38 @@ export const makeContentImporter = Effect.gen(function* () {
         ),
       );
 
+  /**
+   * The conflicts `importContent` would report for `plan` with no choices,
+   * judged by the same rules (a file still holding our previous copy is an
+   * update, not a conflict). Reads only; a missing destination has none.
+   */
+  const previewConflicts = Effect.fn("MrMakImport.previewConflicts")(function* (request: {
+    readonly plan: MrMakImportPlan;
+    readonly destinationRoot: string;
+  }) {
+    const sourceRoot = yield* fileSystem.realPath(request.plan.source.repositoryPath);
+    const missing = new MrMakImportApplyError({
+      reason: "filesystem",
+      destinationRoot: request.destinationRoot,
+      detail: "the destination does not exist.",
+    });
+    const root = yield* resolveDestination(request.destinationRoot, sourceRoot, missing);
+    const previous = Option.getOrNull(
+      yield* readJson(path.join(root, RECEIPT_PATH), decodeReceipt),
+    );
+    const plan = {
+      ...request.plan,
+      entries: request.plan.entries.filter((entry) => isPlainRelativePath(entry.destinationPath)),
+    };
+    const classified = yield* classify(root, plan, {}, "preview", previous, {});
+    return classified.receipt.conflicts;
+  });
+
   return {
+    previewConflicts: (request: {
+      readonly plan: MrMakImportPlan;
+      readonly destinationRoot: string;
+    }) => previewConflicts(request).pipe(asApplyError(request.destinationRoot)),
     importContent: (request: ImportContentRequest) =>
       importContent(request).pipe(asApplyError(request.destinationRoot)),
     rollback: (input: { readonly destinationRoot: string; readonly importId: string }) =>
