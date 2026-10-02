@@ -52,6 +52,7 @@ import {
   resolveImportDialogView,
   type ImportDialogState,
   type SkillChoice,
+  updateDecisions,
 } from "./importDialogView";
 
 function Section(props: { title: string; children: ReactNode }) {
@@ -100,6 +101,7 @@ export function ImportDialog(props: {
     sourceProjectId: null,
     destinationProjectId,
     dryRun: null,
+    decisionsPairKey: null,
     choices: {},
     skillChoices: {},
     confirmExistingProject: false,
@@ -132,13 +134,13 @@ export function ImportDialog(props: {
     if (outcome._tag === "ok") props.onImported();
   };
 
+  // Decisions belong to the source and destination shown now (`updateDecisions`).
+  const decide = (update: Parameters<typeof updateDecisions>[1]) =>
+    setState((previous) => updateDecisions({ ...previous, destinationProjectId }, update));
   const setChoice = (path: string, choice: MrMakImportConflictChoice | undefined) =>
-    setState((previous) => ({ ...previous, choices: withEntry(previous.choices, path, choice) }));
+    decide((decisions) => ({ choices: withEntry(decisions.choices, path, choice) }));
   const setSkillChoice = (skill: string, choice: SkillChoice | undefined) =>
-    setState((previous) => ({
-      ...previous,
-      skillChoices: withEntry(previous.skillChoices, skill, choice),
-    }));
+    decide((decisions) => ({ skillChoices: withEntry(decisions.skillChoices, skill, choice) }));
 
   const { plan, receipt } = view;
   return (
@@ -200,12 +202,9 @@ export function ImportDialog(props: {
                 <div className="flex items-center gap-2">
                   <Checkbox
                     id={`${id}-confirm`}
-                    checked={current.confirmExistingProject}
+                    checked={plan.destination.confirmed}
                     onCheckedChange={(checked) =>
-                      setState((previous) => ({
-                        ...previous,
-                        confirmExistingProject: checked === true,
-                      }))
+                      decide(() => ({ confirmExistingProject: checked === true }))
                     }
                   />
                   <Label htmlFor={`${id}-confirm`}>Import into this project anyway</Label>

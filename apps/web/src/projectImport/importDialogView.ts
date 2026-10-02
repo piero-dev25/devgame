@@ -3,7 +3,8 @@
  * dialog stays a thin renderer (apps/web has no DOM test environment).
  *
  * The flow is dry run, review, choose, apply, receipt. A dry run belongs to the
- * source and destination it was run on: change either and it no longer counts.
+ * source and destination it was run on: change either and it no longer counts,
+ * nor do the conflict choices and the confirmation made for it.
  * Apply is offered only for the current dry run, with a choice for every
  * conflict, and never twice for one plan. The server checks the same things
  * again (the plan's fingerprint, the choices), so this only avoids requests
@@ -34,7 +35,12 @@ export interface ImportDialogState {
         readonly outcome: ImportRequestOutcome<MrMakImportPlanSummary>;
       }
     | null;
-  /** Per conflicting path; kept across re-runs, sent only for the current plan's conflicts. */
+  /**
+   * The source/destination pair the decisions below were made on. They count
+   * for that pair only (kept across its re-runs), never for another one.
+   */
+  readonly decisionsPairKey: string | null;
+  /** Per conflicting path; sent only for the current plan's conflicts. */
   readonly choices: Readonly<Record<string, MrMakImportConflictChoice>>;
   readonly skillChoices: Readonly<Record<string, SkillChoice>>;
   readonly confirmExistingProject: boolean;
@@ -57,7 +63,12 @@ export interface ImportPlanView {
     /** Files edited in the source's working tree; the committed copy is what gets imported. */
     readonly dirtyCount: number;
   };
-  readonly destination: { readonly path: string; readonly warning: string | null };
+  readonly destination: {
+    readonly path: string;
+    readonly warning: string | null;
+    /** The user confirmed importing into this existing project, for this pair. */
+    readonly confirmed: boolean;
+  };
   readonly counts: ReadonlyArray<{ readonly label: string; readonly value: string }>;
   readonly nothingToImport: boolean;
   readonly conflicts: ReadonlyArray<{
@@ -136,6 +147,41 @@ const OUTCOME_LABELS = {
 export const importPairKey = (sourceProjectId: ProjectId, destinationProjectId: ProjectId) =>
   `${sourceProjectId}\u0000${destinationProjectId}`;
 
+const currentPairKey = (state: ImportDialogState) =>
+  state.sourceProjectId === null
+    ? null
+    : importPairKey(state.sourceProjectId, state.destinationProjectId);
+
+type ImportDecisions = Pick<ImportDialogState, "choices" | "skillChoices" | "confirmExistingProject">;
+
+const NO_DECISIONS: ImportDecisions = { choices: {}, skillChoices: {}, confirmExistingProject: false };
+
+/** The decisions that count for the current pair: none when they were made on another. */
+function decisionsFor(state: ImportDialogState): ImportDecisions {
+  const pairKey = currentPairKey(state);
+  return pairKey !== null && state.decisionsPairKey === pairKey ? state : NO_DECISIONS;
+}
+
+/**
+ * `state` with a conflict choice, skill choice or confirmation changed, made
+ * on the current pair. Decisions left from another pair are dropped first.
+ */
+export function updateDecisions(
+  state: ImportDialogState,
+  update: (current: ImportDecisions) => Partial<ImportDecisions>,
+): ImportDialogState {
+  const current = decisionsFor(state);
+  const { choices, skillChoices, confirmExistingProject } = current;
+  return {
+    ...state,
+    choices,
+    skillChoices,
+    confirmExistingProject,
+    ...update(current),
+    decisionsPairKey: currentPairKey(state),
+  };
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -161,7 +207,7 @@ function describeFailure(
   }
 }
 
-function toPlanView(state: ImportDialogState, summary: MrMakImportPlanSummary): ImportPlanView {
+function toPlanView(decisions: ImportDecisions, summary: MrMakImportPlanSummary): ImportPlanView {
   const byRule = new Map<MrMakImportExclusionRule, Array<string>>();
   for (const exclusion of summary.exclusions) {
     byRule.set(exclusion.rule, [...(byRule.get(exclusion.rule) ?? []), exclusion.path]);
@@ -181,6 +227,7 @@ function toPlanView(state: ImportDialogState, summary: MrMakImportPlanSummary): 
         summary.destination.kind === "existing"
           ? "This project already has its own files. Import into a new comparison project unless you mean to mix them."
           : null,
+      confirmed: decisions.confirmExistingProject,
     },
     counts: [
       { label: "Files", value: String(summary.totals.files) },
@@ -195,12 +242,12 @@ function toPlanView(state: ImportDialogState, summary: MrMakImportPlanSummary): 
     nothingToImport: summary.totals.files === 0,
     conflicts: summary.conflicts.map((conflict) => ({
       ...conflict,
-      choice: state.choices[conflict.path] ?? null,
+      choice: decisions.choices[conflict.path] ?? null,
     })),
     skillConflicts: skillConflicts.map((skill) => ({
       name: skill.name,
       files: skill.files,
-      choice: state.skillChoices[skill.name] ?? null,
+      choice: decisions.skillChoices[skill.name] ?? null,
       renamedTo: `${skill.name}-mrmak`,
     })),
     exclusions: [...byRule].map(([rule, paths]) => ({
@@ -251,7 +298,9 @@ function toReceiptView(applied: MrMakImportApplySuccess): ImportReceiptView {
 
 export function resolveImportDialogView(state: ImportDialogState): ImportDialogView {
   const source = state.sourceProjectId;
-  const pairKey = source === null ? null : importPairKey(source, state.destinationProjectId);
+  const pairKey = currentPairKey(state);
+  // Choices and the confirmation made for another source or destination do not count here.
+  const decisions = decisionsFor(state);
   const dryRunBlockedReason =
     source === null
       ? "Choose the Mr. Mak project to import from."
@@ -269,7 +318,7 @@ export function resolveImportDialogView(state: ImportDialogState): ImportDialogV
     current && current.outcome._tag !== "ok"
       ? describeFailure("run the dry run", current.outcome)
       : null;
-  const plan = summary === null ? null : toPlanView(state, summary);
+  const plan = summary === null ? null : toPlanView(decisions, summary);
 
   const applied =
     state.apply?.status === "done" && state.apply.planId === summary?.planId ? state.apply : null;
@@ -294,7 +343,7 @@ export function resolveImportDialogView(state: ImportDialogState): ImportDialogV
             ? "Nothing to import: the plan lists no files."
             : unresolved > 0
               ? `Choose what to do with ${unresolved === 1 ? "1 conflict" : `${unresolved} conflicts`} first.`
-              : summary?.destination.kind === "existing" && !state.confirmExistingProject
+              : summary?.destination.kind === "existing" && !decisions.confirmExistingProject
                 ? "Confirm importing into a project that already has its own files."
                 : null);
 
@@ -313,7 +362,7 @@ export function resolveImportDialogView(state: ImportDialogState): ImportDialogV
           skillChoices: plan.skillConflicts.flatMap((skill) =>
             skill.choice === null ? [] : [{ skill: skill.name, action: skill.choice }],
           ),
-          confirmExistingProject: state.confirmExistingProject,
+          confirmExistingProject: decisions.confirmExistingProject,
         };
 
   return {

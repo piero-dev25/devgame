@@ -5,7 +5,12 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { importPairKey, resolveImportDialogView, type ImportDialogState } from "./importDialogView";
+import {
+  importPairKey,
+  resolveImportDialogView,
+  updateDecisions,
+  type ImportDialogState,
+} from "./importDialogView";
 
 const MRMAK = ProjectId.make("project-mrmak");
 const OTHER_SOURCE = ProjectId.make("project-other");
@@ -62,6 +67,7 @@ const reviewed = (
     pairKey: importPairKey(MRMAK, COMPARISON),
     outcome: { _tag: "ok", value: plan },
   },
+  decisionsPairKey: importPairKey(MRMAK, COMPARISON),
   choices: {},
   skillChoices: {},
   confirmExistingProject: false,
@@ -176,6 +182,51 @@ describe("resolveImportDialogView", () => {
       }),
     );
     expect([rerunning.plan, rerunning.applyBlockedReason]).toEqual([null, "Running the dry run…"]);
+  });
+
+  it("never carries choices or a confirmation over to another source or destination", () => {
+    const existing = summary({ destination: { path: "/projects/game", kind: "existing" } });
+    const decided = reviewed(existing, { ...allChosen, confirmExistingProject: true });
+    expect(resolveImportDialogView(decided).applyRequest).not.toBeNull();
+
+    // Source B's dry run conflicts on the same paths and skill as A's did.
+    const otherPair = importPairKey(OTHER_SOURCE, COMPARISON);
+    const switched = resolveImportDialogView({
+      ...decided,
+      sourceProjectId: OTHER_SOURCE,
+      dryRun: { status: "done", pairKey: otherPair, outcome: { _tag: "ok", value: existing } },
+    });
+    expect(switched.plan?.conflicts.map((conflict) => conflict.choice)).toEqual([null, null]);
+    expect(switched.plan?.skillConflicts.map((skill) => skill.choice)).toEqual([null]);
+    expect(switched.plan?.destination.confirmed).toBe(false);
+    expect([switched.applyBlockedReason, switched.applyRequest]).toEqual([
+      "Choose what to do with 3 conflicts first.",
+      null,
+    ]);
+
+    // The panel moved to another destination while the dialog was open.
+    const game = ProjectId.make("project-game");
+    const moved = resolveImportDialogView({
+      ...decided,
+      destinationProjectId: game,
+      dryRun: {
+        status: "done",
+        pairKey: importPairKey(MRMAK, game),
+        outcome: { _tag: "ok", value: existing },
+      },
+    });
+    expect(moved.applyRequest).toBeNull();
+
+    // A choice made on the new pair starts from nothing; the old pair's are dropped.
+    const chosen = updateDecisions({ ...decided, sourceProjectId: OTHER_SOURCE }, () => ({
+      choices: { "docs/readme.md": "keep-destination" },
+    }));
+    expect(chosen).toMatchObject({
+      decisionsPairKey: otherPair,
+      choices: { "docs/readme.md": "keep-destination" },
+      skillChoices: {},
+      confirmExistingProject: false,
+    });
   });
 
   it("says when there is nothing to import", () => {
