@@ -25,10 +25,13 @@ export const MRMAK_IMPORT_ROOTS = [
 export const MrMakImportRoot = Schema.Literals(MRMAK_IMPORT_ROOTS);
 export type MrMakImportRoot = typeof MrMakImportRoot.Type;
 
-/** Wire input. Both projects are opaque ids resolved on the server. */
+/**
+ * Wire input of the dry run. Both projects are opaque ids the user picked,
+ * resolved to their roots on the server; they must differ.
+ */
 export const MrMakImportPlanInput = Schema.Struct({
   sourceProjectId: ProjectId,
-  destinationProjectId: Schema.optionalKey(ProjectId),
+  destinationProjectId: ProjectId,
   roots: Schema.optionalKey(Schema.Array(MrMakImportRoot)),
 });
 export type MrMakImportPlanInput = typeof MrMakImportPlanInput.Type;
@@ -352,3 +355,142 @@ export const MrMakImportReceipt = Schema.Struct({
   skills: Schema.optionalKey(MrMakSkillImportSummary),
 });
 export type MrMakImportReceipt = typeof MrMakImportReceipt.Type;
+
+// ---------------------------------------------------------------------------
+// `POST /api/project-import/{plan,apply,status}`: the browser reviews an import
+// (dry run), applies exactly the plan it reviewed, and reads a project's import
+// state. Same Input/Result/PATH trios as `ProjectWorkspaceReadInput`. Imported
+// files are never served through these routes: they open in the Files panel.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the destination project is before the import:
+ * - `empty`: nothing but `.git` and the starter files of a new DevGame project.
+ * - `comparison`: an earlier import's destination (it holds a receipt).
+ * - `existing`: any other project. Applying needs `confirmExistingProject`.
+ */
+export const MrMakImportDestinationKind = Schema.Literals(["empty", "comparison", "existing"]);
+export type MrMakImportDestinationKind = typeof MrMakImportDestinationKind.Type;
+
+/** The dry run as the dialog shows it: the plan without its per-file entries. */
+export const MrMakImportPlanSummary = Schema.Struct({
+  /** Fingerprint of everything below; apply refuses a plan whose fingerprint moved. */
+  planId: Schema.String,
+  source: Schema.Struct({
+    path: Schema.String,
+    revision: Schema.String,
+    branch: Schema.NullOr(Schema.String),
+    /** Tracked files edited in the source's working tree; their committed copy is imported. */
+    dirtyPaths: Schema.Array(Schema.String),
+  }),
+  destination: Schema.Struct({ path: Schema.String, kind: MrMakImportDestinationKind }),
+  roots: Schema.Array(MrMakImportRoot),
+  totals: MrMakImportPlan.fields.totals,
+  /** Files the destination changed; each needs a choice. Files of conflicting skills are not listed. */
+  conflicts: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
+  skills: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      files: Schema.Number,
+      /** A different destination skill has this name; it needs a `MrMakSkillConflictChoice`. */
+      conflict: Schema.Boolean,
+    }),
+  ),
+  skillFiles: MrMakImportPlan.fields.skills,
+  exclusions: Schema.Array(MrMakImportExclusion),
+  requirements: Schema.Array(MrMakImportRequirement),
+  issues: Schema.Array(MrMakImportIssue),
+  excludedStores: MrMakImportPlan.fields.excludedStores,
+});
+export type MrMakImportPlanSummary = typeof MrMakImportPlanSummary.Type;
+
+const MrMakImportRouteError = Schema.TaggedStruct("error", { message: Schema.String });
+
+export const MrMakImportPlanResult = Schema.Union([MrMakImportPlanSummary, MrMakImportRouteError]);
+export type MrMakImportPlanResult = typeof MrMakImportPlanResult.Type;
+
+export const MrMakImportApplyInput = Schema.Struct({
+  ...MrMakImportPlanInput.fields,
+  /** The reviewed plan's `planId`. */
+  planId: Schema.String,
+  /** Per conflicting destination path. */
+  choices: Schema.Record(Schema.String, MrMakImportConflictChoice),
+  skillChoices: Schema.Array(MrMakSkillConflictChoice),
+  /** The user confirmed importing into a destination of kind `existing`. */
+  confirmExistingProject: Schema.Boolean,
+});
+export type MrMakImportApplyInput = typeof MrMakImportApplyInput.Type;
+
+/** A receipt without its per-file list, as the dialog and the Workspace panel show it. */
+export const MrMakImportReceiptSummary = Schema.Struct({
+  importId: Schema.String,
+  previousImportId: Schema.NullOr(Schema.String),
+  source: MrMakImportReceipt.fields.source,
+  completedAt: Schema.String,
+  /** Files per outcome. */
+  outcomes: Schema.Record(MrMakImportFileOutcome, Schema.Number),
+  conflicts: MrMakImportReceipt.fields.conflicts,
+  changes: Schema.Struct({ added: Schema.Number, modified: Schema.Number, removed: Schema.Number }),
+  exclusions: Schema.Number,
+  transforms: Schema.Array(Schema.String),
+  skills: Schema.NullOr(
+    Schema.Struct({
+      skills: MrMakSkillImportSummary.fields.skills,
+      verified: Schema.Boolean,
+    }),
+  ),
+});
+export type MrMakImportReceiptSummary = typeof MrMakImportReceiptSummary.Type;
+
+export const MrMakImportApplySuccess = Schema.Struct({
+  status: Schema.Literals(["imported", "unchanged"]),
+  /** Destination-relative. */
+  receiptPath: Schema.String,
+  commit: Schema.Struct({
+    status: Schema.Literals(["committed", "skipped", "failed"]),
+    detail: Schema.NullOr(Schema.String),
+  }),
+  receipt: MrMakImportReceiptSummary,
+});
+export type MrMakImportApplySuccess = typeof MrMakImportApplySuccess.Type;
+
+export const MrMakImportApplyResult = Schema.Union([
+  MrMakImportApplySuccess,
+  MrMakImportRouteError,
+]);
+export type MrMakImportApplyResult = typeof MrMakImportApplyResult.Type;
+
+export const MrMakImportStatusInput = Schema.Struct({ projectId: ProjectId });
+export type MrMakImportStatusInput = typeof MrMakImportStatusInput.Type;
+
+/**
+ * Where a project file comes from, against its import receipt:
+ * - `original`: the import placed it and its bytes are unchanged since.
+ * - `adapted`: the import placed it (or kept the user's copy) and it differs now.
+ * - `removed`: the import placed it and it is gone.
+ * - `devgame`: not from the import (listed under `processes`, `context` and the skill trees only).
+ */
+export const MrMakImportFileOrigin = Schema.Literals(["original", "adapted", "removed", "devgame"]);
+export type MrMakImportFileOrigin = typeof MrMakImportFileOrigin.Type;
+
+/** `import` is null when the project holds no import receipt. Read from disk on every call. */
+export const MrMakImportStatusSuccess = Schema.Struct({
+  import: Schema.NullOr(
+    Schema.Struct({
+      receipt: MrMakImportReceiptSummary,
+      files: Schema.Array(Schema.Struct({ path: Schema.String, origin: MrMakImportFileOrigin })),
+    }),
+  ),
+});
+export type MrMakImportStatusSuccess = typeof MrMakImportStatusSuccess.Type;
+
+export const MrMakImportStatusResult = Schema.Union([
+  MrMakImportStatusSuccess,
+  MrMakImportRouteError,
+]);
+export type MrMakImportStatusResult = typeof MrMakImportStatusResult.Type;
+
+/** Under `/api` so single-origin dev already proxies them (see devProxy.ts). */
+export const MRMAK_IMPORT_PLAN_PATH = "/api/project-import/plan";
+export const MRMAK_IMPORT_APPLY_PATH = "/api/project-import/apply";
+export const MRMAK_IMPORT_STATUS_PATH = "/api/project-import/status";

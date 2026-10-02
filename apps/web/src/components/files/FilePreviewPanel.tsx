@@ -104,6 +104,8 @@ interface FilePreviewPanelProps {
   availableEditors: ReadonlyArray<EditorId>;
   revealLine: number | null;
   revealRequestId: number;
+  /** Show the file without editing it, such as one opened from an import's original. */
+  readOnly?: boolean;
   onOpenFile: (relativePath: string) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
   selectedFilePending: boolean;
@@ -916,6 +918,7 @@ export default function FilePreviewPanel({
   availableEditors,
   revealLine,
   revealRequestId,
+  readOnly,
   onOpenFile,
   onPendingChange,
   selectedFilePending,
@@ -944,6 +947,7 @@ export default function FilePreviewPanel({
   // A file outside the workspace (an absolute path) is shown, never edited.
   const isHostFile =
     attachment !== undefined || (relativePath !== null && isAbsolutePath(relativePath));
+  const isReadOnly = isHostFile || readOnly === true;
   // Media and PDFs render from their absolute path, so their contents are never
   // shown. The read still runs: a folder named `assets.png` is only knowable as a
   // folder from the read failure, and the server stats before reading, so a folder
@@ -1255,7 +1259,7 @@ export default function FilePreviewPanel({
                 relativePath={relativePath}
                 threadRef={threadRef}
                 contents={file.data.contents}
-                readOnly={isHostFile}
+                readOnly={isReadOnly}
                 onPendingChange={onPendingChange}
               />
             ) : tableDelimiter && renderTable ? (
@@ -1265,7 +1269,7 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 delimiter={tableDelimiter}
               />
-            ) : file.data.truncated || isHostFile ? (
+            ) : file.data.truncated || isReadOnly ? (
               <SourceFilePreview
                 name={relativePath}
                 text={file.data.contents}

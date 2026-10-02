@@ -34,6 +34,7 @@ import {
   type PreparedConnection,
 } from "@t3tools/client-runtime/connection";
 import { environmentEndpointUrl } from "@t3tools/client-runtime/environment";
+import type { RemoteEnvironmentRequestError } from "@t3tools/client-runtime/rpc";
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import { executeAuthenticatedEnvironmentHttpRequest } from "@t3tools/client-runtime/state/environmentHttpAuth";
 import { EnvironmentHttpCommonError } from "@t3tools/contracts";
@@ -149,3 +150,43 @@ export const postForkEnvironmentRoute = Effect.fn("web.forkEnvironmentRoute.post
     });
   },
 );
+
+/** Why a fork route request produced no result, worded for the user. */
+export type ForkRouteFailure =
+  /** This connection lacks the route's scope; fork routes answer a text 403. */
+  | { readonly _tag: "notPermitted" }
+  /** No answer: the request could not be sent or timed out. */
+  | { readonly _tag: "unreachable"; readonly message: string }
+  /**
+   * The environment answered, but not with a result: an auth error, another
+   * error status, or a body that does not match the contract.
+   */
+  | { readonly _tag: "failed"; readonly message: string };
+
+const isConnectionBlockedError = Schema.is(ConnectionBlockedError);
+const UNREADABLE_RESPONSE = "It answered with a response this app could not read.";
+
+/** Sorts a failed `postForkEnvironmentRoute` (or its decode) into "no answer" versus "answered with an error". */
+export function classifyForkRouteFailure(
+  error: RemoteEnvironmentRequestError | Schema.SchemaError,
+): ForkRouteFailure {
+  switch (error._tag) {
+    case "RemoteEnvironmentAuthTimeoutError":
+      return { _tag: "unreachable", message: error.message };
+    case "RemoteEnvironmentAuthFetchError":
+      // A rejected access token surfaces here wrapped; that is an auth answer, not a network failure.
+      return isConnectionBlockedError(error.cause)
+        ? { _tag: "failed", message: error.cause.detail }
+        : { _tag: "unreachable", message: error.message };
+    case "RemoteEnvironmentAuthUndeclaredStatusError":
+      return error.status === 403
+        ? { _tag: "notPermitted" }
+        : { _tag: "failed", message: `It answered with status ${error.status}.` };
+    case "RemoteEnvironmentAuthInvalidJsonError":
+    case "SchemaError":
+      return { _tag: "failed", message: UNREADABLE_RESPONSE };
+    default:
+      // Every typed environment error (auth, scope, bad request, internal) is a server answer.
+      return { _tag: "failed", message: error.message };
+  }
+}

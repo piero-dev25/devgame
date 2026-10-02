@@ -794,6 +794,34 @@ Depends on: M1, M2. Estimate: ~300 lines.
 
 Depends on: PR3, M2, M3. Estimate: ~600 lines.
 
+**As built (2026-10-03), superseding the plan below and M4-server where they differ**
+
+- Routes in apps/server/src/projectImport/MrMakImportRoute.ts: `POST /api/project-import/plan`
+  (orchestration:read), `/apply` (orchestration:operate), `/status` (orchestration:read). The
+  source and destination are two project ids the user picked, resolved to their roots on the
+  server; no path crosses the wire, and source equal to destination is refused.
+- `MrMakImport.review` is the dry run: plan totals, conflicts judged by importContent's own rules
+  (`previewConflicts`), skill conflicts by importSkills' (`previewSkills`), exclusions,
+  requirements, the destination's kind (`empty`, `comparison` = holds a receipt, `existing`) and a
+  `planId` fingerprint. `apply` re-plans and refuses a moved fingerprint (`stale-plan`), a
+  conflict or skill conflict with no choice, and an `existing` destination without
+  `confirmExistingProject`. There is no plan cache.
+- No provenance field was added to workspace entities. `status` reads the receipt and hashes each
+  imported file: `original`, `adapted`, `removed`, plus `devgame` for unlisted files under
+  `processes/`, `context/` and both skill trees. Only plain relative receipt paths are hashed,
+  never through a symlink, and only regular files (streamed). The web sorts cards by their step
+  files' origins (apps/web/src/projectWorkspace/workspaceCollections.ts): Original lists every
+  imported item, an adapted one marked so (it is also in Adaptation), so collections survive
+  project switches and restarts. Status is read on mount, refresh and after an import; it does
+  not poll.
+- The dry run also lays a conflicting skill out as import-renamed would (`<name>-mrmak`) and lists
+  that folder's file conflicts, so a re-import never leaves one unreviewed.
+- Web: "Import from Mr. Mak…" in the Workspace panel header opens ImportDialog
+  (apps/web/src/projectImport/). Conflict choices and the existing-project confirmation belong to
+  the source/destination pair they were made on. No command palette entry. Every file opens
+  through `openFileInDock` (sandboxed Files preview); from Original it opens read-only (the
+  current bytes, not the imported revision's). Mobile: not supported (no dock, no fork routes).
+
 **Reuse**
 
 - apps/web/src/projectWorkspace/WorkspacePanel.tsx (PR3) — host the Import action and the collection switch, instead of adding another dock column

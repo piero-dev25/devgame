@@ -170,6 +170,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
 import * as RunService from "./projectRuntime/RunService.ts";
+import * as MrMakImport from "./projectImport/MrMakImport.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
@@ -976,6 +977,7 @@ const buildAppUnderTest = (options?: {
             ...options?.layers?.terminalManager,
           }),
           Layer.mock(RunService.RunService)({ ...options?.layers?.runService }),
+          Layer.mock(MrMakImport.MrMakImport)({}),
           WorktreeSetupTracker.layer,
           ProjectCloneTracker.layer.pipe(
             Layer.provide(

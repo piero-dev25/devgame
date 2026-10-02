@@ -203,9 +203,15 @@ import { PullRequestLinkPreview } from "./pullRequest/PullRequestLinkPreview";
  * DevGame (task #61): files open in the Files dock panel, not the right panel.
  * fileExplorerStore records which file is open; showing the panel is the
  * dock's job. Every upstream right-panel `openFile` call site routes here.
+ * `readOnly` shows the file without editing it.
  */
-export function openFileInDock(threadRef: ScopedThreadRef, path: string, line?: number): void {
-  useFileExplorerStore.getState().openFile(threadRef, path, line);
+export function openFileInDock(
+  threadRef: ScopedThreadRef,
+  path: string,
+  line?: number,
+  options?: { readonly readOnly?: boolean },
+): void {
+  useFileExplorerStore.getState().openFile(threadRef, path, line, options);
   openChatDockPanel(FILES_PANEL_ID);
 }
 

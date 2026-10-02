@@ -9,6 +9,11 @@
  * this thread's next message (`contextPacket.ts`, `workspacePacketStore.ts`)
  * and opens Chat. Nothing is attached until the user presses it.
  *
+ * "Import from Mr. Mak…" opens `ImportDialog` for this project. Once a
+ * project holds an import, a switch shows its "Original Mr. Mak" and
+ * "DevGame Adaptation" collections (`workspaceCollections.ts`), each card,
+ * workflow, context file and skill labelled with its origin.
+ *
  * IDENTITY: `ThreadRouteContext`, like `FilesDockPanel`, so drafts are told
  * apart from "no thread" and still show their project's cards.
  *
@@ -18,16 +23,19 @@ import type { ScopedThreadRef } from "@t3tools/contracts";
 import {
   AlertTriangle,
   FileText,
+  Import,
   LayoutGrid,
   Loader2,
   MessageSquarePlus,
   Pin,
   RefreshCw,
 } from "lucide-react";
-import { type ReactNode, useContext } from "react";
+import { type ReactNode, useContext, useState } from "react";
 
 import { openFileInDock } from "~/components/ChatMarkdown";
+import { Badge } from "~/components/ui/badge";
 import { toastManager } from "~/components/ui/toast";
+import { Toggle, ToggleGroup } from "~/components/ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useComposerDraftStore } from "~/composerDraftStore";
 import { CHAT_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
@@ -40,8 +48,17 @@ import { useEnvironmentQuery } from "~/state/query";
 import { RunEvidenceSummary } from "~/projectRuntime/RunEvidenceSummary";
 import { cardEvidence, type RunEvidenceSummaryView } from "~/projectRuntime/runEvidenceView";
 import { runtimeStatusAtom } from "~/projectRuntime/runtimeStatusAtom";
+import { ImportDialog } from "~/projectImport/ImportDialog";
+import { importStatusAtom } from "~/projectImport/importStatusAtom";
 
 import { buildWorkspacePacket } from "./contextPacket";
+import {
+  resolveWorkspaceCollections,
+  type WorkspaceCollectionId,
+  type WorkspaceCollections,
+  type WorkspaceFileItem,
+  type WorkspaceItemOrigin,
+} from "./workspaceCollections";
 import { projectWorkspaceAtom } from "./projectWorkspaceAtom";
 import { stageWorkspacePacket, workspacePacketBlockedReason } from "./workspacePacketStore";
 import {
@@ -94,6 +111,23 @@ function UseInChatButton(props: {
   );
 }
 
+const ORIGIN_BADGES: Readonly<
+  Record<WorkspaceItemOrigin, { label: string; variant: "info" | "warning" | "secondary" }>
+> = {
+  mrmak: { label: "Mr. Mak", variant: "info" },
+  adapted: { label: "Adapted", variant: "warning" },
+  devgame: { label: "DevGame", variant: "secondary" },
+};
+
+function OriginBadge(props: { origin: WorkspaceItemOrigin }) {
+  const badge = ORIGIN_BADGES[props.origin];
+  return (
+    <Badge size="sm" variant={badge.variant}>
+      {badge.label}
+    </Badge>
+  );
+}
+
 function WorkspaceCard(props: {
   card: WorkspaceCardView;
   onOpen: ((relativePath: string) => void) | null;
@@ -101,6 +135,8 @@ function WorkspaceCard(props: {
   useInChat: UseInChat | null;
   /** The newest run evidence linked to this card, or null. */
   evidence: RunEvidenceSummaryView | null;
+  /** Set for a project that holds an import. */
+  origin?: WorkspaceItemOrigin | undefined;
 }) {
   const { card, useInChat } = props;
   return (
@@ -111,6 +147,7 @@ function WorkspaceCard(props: {
           <span className="truncate">{card.title}</span>
         </p>
         <div className="flex shrink-0 items-center gap-1">
+          {props.origin ? <OriginBadge origin={props.origin} /> : null}
           {(card.status ?? card.category) ? (
             <span className="rounded-full border border-border/60 px-2 py-0.5 text-3xs uppercase tracking-wide text-muted-foreground">
               {card.status ?? card.category}
@@ -187,11 +224,109 @@ function WorkspaceCard(props: {
   );
 }
 
+/** One openable file or skill, labelled with where it comes from. */
+function OpenRow(props: {
+  label: string;
+  origin: WorkspaceItemOrigin;
+  path: string | null;
+  removed?: boolean;
+  onOpen: ((relativePath: string) => void) | null;
+}) {
+  const openable = props.path !== null && !props.removed && props.onOpen !== null;
+  return (
+    <button
+      type="button"
+      disabled={!openable}
+      onClick={() => {
+        if (props.path !== null) props.onOpen?.(props.path);
+      }}
+      className={cn(
+        "flex min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left text-2xs",
+        openable ? "text-foreground hover:bg-muted/60" : "cursor-default text-muted-foreground/70",
+      )}
+    >
+      <FileText className="size-3 shrink-0 text-muted-foreground" />
+      <span className="min-w-0 truncate">{props.label}</span>
+      {props.removed ? (
+        <span className="shrink-0 text-3xs text-muted-foreground">removed here</span>
+      ) : null}
+      <span className="ml-auto shrink-0">
+        <OriginBadge origin={props.origin} />
+      </span>
+    </button>
+  );
+}
+
+function FileSection(props: {
+  title: string;
+  items: ReadonlyArray<WorkspaceFileItem>;
+  onOpen: ((relativePath: string) => void) | null;
+}) {
+  if (props.items.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-0.5 border-t border-border/40 px-3 py-2">
+      <h3 className="text-2xs font-medium text-muted-foreground">{props.title}</h3>
+      {props.items.map((item) => (
+        <OpenRow
+          key={item.path}
+          label={item.name}
+          origin={item.origin}
+          path={item.path}
+          removed={item.removed}
+          onOpen={props.onOpen}
+        />
+      ))}
+    </section>
+  );
+}
+
+/** "Original Mr. Mak" (read-only, with its source and revision) or "DevGame Adaptation". */
+function CollectionSwitch(props: {
+  collections: WorkspaceCollections;
+  selected: WorkspaceCollectionId;
+  onSelect: (id: WorkspaceCollectionId) => void;
+}) {
+  const { provenance } = props.collections;
+  return (
+    <div className="flex shrink-0 flex-col gap-1.5 border-b border-border/60 px-3 py-2">
+      <ToggleGroup
+        aria-label="Workspace collection"
+        className="w-full *:flex-1"
+        value={[props.selected]}
+        onValueChange={(next) => {
+          const value = next[0];
+          if (value === "original" || value === "adaptation") props.onSelect(value);
+        }}
+      >
+        <Toggle value="original">Original Mr. Mak</Toggle>
+        <Toggle value="adaptation">DevGame Adaptation</Toggle>
+      </ToggleGroup>
+      {props.selected === "original" ? (
+        <p className="break-all text-3xs text-muted-foreground">
+          Read-only. Imported from {provenance.repositoryPath} at {provenance.revision.slice(0, 12)}
+          {provenance.branch ? ` (${provenance.branch})` : ""}. Items marked Adapted changed here
+          since and open as they are now.
+        </p>
+      ) : (
+        <p className="text-3xs text-muted-foreground">
+          What this project adapted from Mr. Mak or made itself.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function WorkspaceBody(props: {
   view: WorkspacePanelView;
   onRetry: () => void;
   useInChat: UseInChat | null;
   evidenceFor: (entityId: string) => RunEvidenceSummaryView | null;
+  /** Null for a project that holds no import. */
+  collections: WorkspaceCollections | null;
+  collectionId: WorkspaceCollectionId;
+  onCollectionChange: (id: WorkspaceCollectionId) => void;
+  /** Why the import state could not be read, when it could not. */
+  importNotice: string | null;
 }) {
   const { view } = props;
   switch (view.kind) {
@@ -250,10 +385,21 @@ function WorkspaceBody(props: {
       );
     case "ready": {
       const threadRef = view.threadRef;
+      const collections = props.collections;
+      // Every file, imported HTML included, opens in the Files panel's sandboxed
+      // preview; from "Original Mr. Mak" it opens read-only.
+      const openOptions =
+        collections !== null && props.collectionId === "original" ? { readOnly: true } : undefined;
       const onOpen =
         threadRef === null
           ? null
-          : (relativePath: string) => openFileInDock(threadRef, relativePath);
+          : (relativePath: string) =>
+              openFileInDock(threadRef, relativePath, undefined, openOptions);
+      const collection = collections ? collections[props.collectionId] : null;
+      const cards: ReadonlyArray<{
+        readonly card: WorkspaceCardView;
+        readonly origin: WorkspaceItemOrigin | undefined;
+      }> = collection?.cards ?? view.cards.map((card) => ({ card, origin: undefined }));
       return (
         <div className="flex min-h-0 flex-1 flex-col">
           {view.issues.length > 0 ||
@@ -272,21 +418,56 @@ function WorkspaceBody(props: {
               ))}
             </div>
           ) : null}
-          {view.cards.length === 0 ? (
+          {props.importNotice ? (
+            <p className="shrink-0 border-b border-border/60 px-3 py-1.5 text-2xs text-muted-foreground">
+              {props.importNotice}
+            </p>
+          ) : null}
+          {collections ? (
+            <CollectionSwitch
+              collections={collections}
+              selected={props.collectionId}
+              onSelect={props.onCollectionChange}
+            />
+          ) : null}
+          {cards.length === 0 && collection === null ? (
             <CenteredMessage>The workspace registry lists no cards yet.</CenteredMessage>
           ) : (
-            <ul className="min-h-0 flex-1 overflow-y-auto">
-              {view.cards.map((card) => (
-                <WorkspaceCard
-                  key={card.key}
-                  card={card}
-                  onOpen={onOpen}
-                  openBlockedReason={view.openBlockedReason}
-                  useInChat={props.useInChat}
-                  evidence={props.evidenceFor(card.entity.id)}
-                />
-              ))}
-            </ul>
+            <div className="min-h-0 flex-1 overflow-y-auto">
+              <ul>
+                {cards.map(({ card, origin }) => (
+                  <WorkspaceCard
+                    key={card.key}
+                    card={card}
+                    onOpen={onOpen}
+                    openBlockedReason={view.openBlockedReason}
+                    useInChat={props.useInChat}
+                    evidence={props.evidenceFor(card.entity.id)}
+                    origin={origin}
+                  />
+                ))}
+              </ul>
+              {collection ? (
+                <>
+                  <FileSection title="Workflows" items={collection.workflows} onOpen={onOpen} />
+                  <FileSection title="Context" items={collection.context} onOpen={onOpen} />
+                  {collection.skills.length > 0 ? (
+                    <section className="flex flex-col gap-0.5 border-t border-border/40 px-3 py-2">
+                      <h3 className="text-2xs font-medium text-muted-foreground">Skills</h3>
+                      {collection.skills.map((skill) => (
+                        <OpenRow
+                          key={skill.name}
+                          label={skill.name}
+                          origin={skill.origin}
+                          path={skill.openPath}
+                          onOpen={onOpen}
+                        />
+                      ))}
+                    </section>
+                  ) : null}
+                </>
+              ) : null}
+            </div>
           )}
         </div>
       );
@@ -306,6 +487,12 @@ export default function WorkspacePanel(_props: PanelProps) {
   );
   const evidenceFor = (entityId: string) =>
     cardEvidence({ data: runtimeQuery.data, error: runtimeQuery.error }, entityId)[0] ?? null;
+  // The project's import, from its receipt: it is there again after a switch or reopen.
+  const importQuery = useEnvironmentQuery(
+    projectRef === null ? null : importStatusAtom(projectRef),
+  );
+  const [collectionId, setCollectionId] = useState<WorkspaceCollectionId>("original");
+  const [importOpen, setImportOpen] = useState(false);
   const view = resolveWorkspacePanelView({
     target:
       route === null
@@ -370,26 +557,60 @@ export default function WorkspacePanel(_props: PanelProps) {
           },
         };
 
+  // Error first: after a failure `data` still holds the previous success.
+  const collections =
+    view.kind === "ready" && importQuery.error === null
+      ? resolveWorkspaceCollections({ cards: view.cards, status: importQuery.data })
+      : null;
+  const refresh = () => {
+    query.refresh();
+    importQuery.refresh();
+  };
+
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      {project ? (
+      {project && projectRef ? (
         <div className="flex shrink-0 items-center gap-2 border-b border-border/60 px-3 py-1.5">
           <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{project.title}</p>
           <button
             type="button"
-            onClick={query.refresh}
+            onClick={() => setImportOpen(true)}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-3xs text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+          >
+            <Import className="size-3" />
+            Import from Mr. Mak…
+          </button>
+          <button
+            type="button"
+            onClick={refresh}
             aria-label="Refresh workspace"
             className="inline-flex shrink-0 items-center rounded p-1 text-muted-foreground hover:bg-muted/60 hover:text-foreground"
           >
             <RefreshCw className="size-3" />
           </button>
+          {importOpen ? (
+            <ImportDialog
+              open
+              onOpenChange={setImportOpen}
+              destination={{ ref: projectRef, path: project.workspaceRoot }}
+              onImported={refresh}
+            />
+          ) : null}
         </div>
       ) : null}
       <WorkspaceBody
         view={view}
-        onRetry={query.refresh}
+        onRetry={refresh}
         useInChat={useInChat}
         evidenceFor={evidenceFor}
+        collections={collections}
+        collectionId={collectionId}
+        onCollectionChange={setCollectionId}
+        importNotice={
+          importQuery.error === null
+            ? null
+            : `Could not read this project's Mr. Mak import: ${importQuery.error}`
+        }
       />
     </div>
   );
