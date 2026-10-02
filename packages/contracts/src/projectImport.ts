@@ -229,9 +229,91 @@ export const MrMakImportFileOutcome = Schema.Literals([
 export type MrMakImportFileOutcome = typeof MrMakImportFileOutcome.Type;
 
 /**
+ * For a source skill whose name a different destination skill already uses:
+ * keep the destination's and skip the source's, or import the source's under
+ * `newName` (default `<skill>-mrmak`).
+ */
+export const MrMakSkillConflictChoice = Schema.Struct({
+  skill: Schema.String,
+  action: Schema.Literals(["keep-existing", "import-renamed"]),
+  newName: Schema.optionalKey(Schema.String),
+});
+export type MrMakSkillConflictChoice = typeof MrMakSkillConflictChoice.Type;
+
+/**
+ * A provider, tool, env var or MCP server a skill's SKILL.md or scripts name.
+ * Listed only: an import never calls, installs or signs up for any of them.
+ */
+export const MrMakSkillRequirement = Schema.Struct({
+  kind: Schema.Literals(["paid-provider", "tool", "env-var", "mcp-server"]),
+  name: Schema.String,
+  /** The first source file naming it. */
+  source: Schema.String,
+});
+export type MrMakSkillRequirement = typeof MrMakSkillRequirement.Type;
+
+/**
+ * Skills copied into `.agents/skills` (the shared source Codex and Antigravity
+ * read) and materialized into `.claude/skills` (all Claude reads) by the
+ * sync-skills rule: no dot-entries, `__pycache__`, `node_modules` or compiled Python.
+ */
+export const MrMakSkillImportSummary = Schema.Struct({
+  skills: Schema.Array(
+    Schema.Struct({
+      original: Schema.String,
+      active: Schema.String,
+      action: Schema.Literals(["imported", "renamed", "kept-existing"]),
+      /** Files of the full tree, dot-entries included. */
+      files: Schema.Number,
+      /** Files materialized into `.claude/skills`. */
+      distributionFiles: Schema.Number,
+      requirements: Schema.Array(MrMakSkillRequirement),
+    }),
+  ),
+  /** Original name to active name, for every imported skill. */
+  names: Schema.Record(Schema.String, Schema.String),
+  /** Every source skill file with its unmodified sha256 at the source revision. */
+  baseline: Schema.Array(Schema.Struct({ path: Schema.String, sha256: Schema.String })),
+  totals: Schema.Struct({
+    skills: Schema.Number,
+    files: Schema.Number,
+    distributionFiles: Schema.Number,
+    /** Only in `.agents/skills`: the files the sync rule skips. */
+    agentsOnlyFiles: Schema.Number,
+  }),
+  /** Checked on disk after the copy: both trees hold the expected bytes and SKILL.md links resolve. */
+  equivalence: Schema.Struct({
+    verified: Schema.Boolean,
+    differences: Schema.Array(
+      Schema.Struct({
+        path: Schema.String,
+        problem: Schema.Literals(["missing", "different", "broken-link"]),
+      }),
+    ),
+  }),
+});
+export type MrMakSkillImportSummary = typeof MrMakSkillImportSummary.Type;
+
+/**
+ * Which imported skills a provider's own discovery reports as project skills
+ * of the destination. `shadowed`: found, but resolved to a copy outside the
+ * project (Claude's user scope wins on a name collision).
+ */
+export const MrMakSkillDiscoveryReport = Schema.Struct({
+  provider: Schema.Literals(["claude", "codex"]),
+  status: Schema.Literals(["checked", "unavailable"]),
+  projectRoot: Schema.String,
+  discovered: Schema.Array(Schema.String),
+  missing: Schema.Array(Schema.String),
+  shadowed: Schema.Array(Schema.String),
+});
+export type MrMakSkillDiscoveryReport = typeof MrMakSkillDiscoveryReport.Type;
+
+/**
  * Completion receipt, written into the destination at
  * `.devgame/import/receipt.json` only after every file is in place. Files are
- * copied byte-for-byte from the source's committed HEAD, so `transforms` is empty.
+ * copied byte-for-byte from the source's committed HEAD; `transforms` lists the
+ * one exception, a renamed skill's references to its own name.
  */
 export const MrMakImportReceipt = Schema.Struct({
   version: Schema.Literal(1),
@@ -266,5 +348,7 @@ export const MrMakImportReceipt = Schema.Struct({
   conflicts: Schema.Array(Schema.Struct({ path: Schema.String, reason: Schema.String })),
   exclusions: Schema.Array(MrMakImportExclusion),
   transforms: Schema.Array(Schema.String),
+  /** Set by a skill import. */
+  skills: Schema.optionalKey(MrMakSkillImportSummary),
 });
 export type MrMakImportReceipt = typeof MrMakImportReceipt.Type;
