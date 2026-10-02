@@ -23,6 +23,7 @@ import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { makeProviderRegistryLayer } from "../provider/testUtils/providerRegistryMock.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
@@ -37,6 +38,7 @@ const withDependencies = <E, R>(service: Layer.Layer<MrMakImport.MrMakImport, E,
   service.pipe(
     Layer.provide(GitVcsDriver.layer.pipe(Layer.provide(VcsProcess.layer))),
     Layer.provide(ProcessRunner.layer),
+    Layer.provide(makeProviderRegistryLayer()),
     Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mrmak-content-test-" })),
   );
 const TestLayer = withDependencies(MrMakImport.layer);

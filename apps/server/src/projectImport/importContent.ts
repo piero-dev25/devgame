@@ -4,7 +4,8 @@
  *
  * The plan decides what to copy; this only decides how. Bytes come from the
  * source's committed blobs (`git cat-file blob <oid>`), never its working tree,
- * and are copied unchanged. Everything lives under `<destination>/.devgame/import/`:
+ * and are copied unchanged, except for a renamed skill's references to its own
+ * name (`rewrites`). Everything lives under `<destination>/.devgame/import/`:
  * a staging manifest is written before any copy, each file is staged under
  * `staging/<importId>/files/` and then moved into place with a rename, and
  * `receipt.json` is written last. A destination copy is only replaced when it
@@ -23,6 +24,7 @@ import {
   type MrMakImportConflictChoice,
   type MrMakImportFileOutcome,
   type MrMakImportPlan,
+  type MrMakSkillImportSummary,
 } from "@t3tools/contracts";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
 import * as DateTime from "effect/DateTime";
@@ -36,6 +38,7 @@ import * as Schema from "effect/Schema";
 import { writeFileStringAtomically } from "../atomicWrite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { rewriteSkillReferences } from "./mrMakImportContent.ts";
 
 const posix = NodePath.posix;
 const IMPORT_DIRECTORY = ".devgame/import";
@@ -61,6 +64,8 @@ const StagedWrite = Schema.Struct({
   executable: Schema.Boolean,
   /** sha256 of the destination copy this write moves aside; null when the path was empty. */
   replaces: Schema.NullOr(Schema.String),
+  /** A renamed skill's file: its references to `from` become `to`; `sha256` is of the result. */
+  rewrite: Schema.optionalKey(Schema.Struct({ from: Schema.String, to: Schema.String })),
 });
 type StagedWrite = typeof StagedWrite.Type;
 const StagingManifest = Schema.Struct({
@@ -88,6 +93,7 @@ export class MrMakImportApplyError extends Schema.TaggedError<MrMakImportApplyEr
       "destination-changed",
       "source-read",
       "filesystem",
+      "nothing-to-verify",
     ]),
     destinationRoot: Schema.String,
     detail: Schema.String,
@@ -110,6 +116,8 @@ export class MrMakImportApplyError extends Schema.TaggedError<MrMakImportApplyEr
         return `Reading ${this.detail} from the source repository failed.`;
       case "filesystem":
         return `Import into ${this.destinationRoot} failed: ${this.detail}`;
+      case "nothing-to-verify":
+        return `Nothing to verify in ${this.destinationRoot}: ${this.detail}`;
     }
   }
 }
@@ -121,6 +129,15 @@ export interface ImportContentRequest {
   readonly destinationRoot: string;
   /** Per destination path; a conflict is only overwritten with `take-source`. */
   readonly choices?: Readonly<Record<string, MrMakImportConflictChoice>> | undefined;
+  /**
+   * Per destination path: rewrite a renamed skill's references to its old
+   * name. That entry's `sha256` and `bytes` must be those of the rewritten file.
+   */
+  readonly rewrites?: Readonly<Record<string, { readonly from: string; readonly to: string }>>;
+  /** Runs once every file is in place; its result is published in the receipt. */
+  readonly summarizeSkills?: (
+    destinationRoot: string,
+  ) => Effect.Effect<MrMakSkillImportSummary, PlatformError.PlatformError>;
 }
 
 export interface ImportContentResult {
@@ -262,7 +279,10 @@ export const makeContentImporter = Effect.gen(function* () {
         timeout: "5 minutes",
       })
       .pipe(Effect.option);
-    const bytes = Buffer.concat(chunks);
+    const blob = Buffer.concat(chunks);
+    const bytes = write.rewrite
+      ? Buffer.from(rewriteSkillReferences(blob, write.rewrite.from, write.rewrite.to))
+      : blob;
     if (Option.isNone(result) || result.value.code !== 0 || sha256(bytes) !== write.sha256) {
       return yield* new MrMakImportApplyError({
         reason: "source-read",
@@ -360,14 +380,22 @@ export const makeContentImporter = Effect.gen(function* () {
     choices: Readonly<Record<string, MrMakImportConflictChoice>>,
     importId: string,
     previous: MrMakImportReceipt | null,
+    rewrites: NonNullable<ImportContentRequest["rewrites"]>,
   ) {
     const before = new Map(previous?.files.map((file) => [file.path, file]));
     const files: Array<MrMakImportReceipt["files"][number]> = [];
     const conflicts: Array<{ path: string; reason: string }> = [];
     const writes: Array<StagedWrite> = [];
+    const transforms: Array<string> = [];
     for (const entry of plan.entries) {
       const filePath = entry.destinationPath;
       const symlink = entry.symlinkTarget !== null;
+      const rewrite = rewrites[filePath];
+      if (rewrite) {
+        transforms.push(
+          `${filePath}: references to skill ${rewrite.from} renamed to ${rewrite.to}`,
+        );
+      }
       const accepted = [entry.sha256, entry.crlfCheckout?.sha256];
       const current = yield* inspect(root, filePath);
       const last = before.get(filePath);
@@ -381,6 +409,7 @@ export const makeContentImporter = Effect.gen(function* () {
           symlink,
           executable: entry.executable,
           replaces,
+          ...(rewrite ? { rewrite: { from: rewrite.from, to: rewrite.to } } : {}),
         });
       if (
         current.kind === (symlink ? "symlink" : "file") &&
@@ -467,7 +496,7 @@ export const makeContentImporter = Effect.gen(function* () {
         changes,
         conflicts,
         exclusions: plan.exclusions,
-        transforms: [],
+        transforms,
       },
     } satisfies StagingManifest;
   });
@@ -582,7 +611,8 @@ export const makeContentImporter = Effect.gen(function* () {
     const stagingDirectory = path.join(root, stagingRoot, importId);
     const manifestPath = path.join(stagingDirectory, "manifest.json");
     const resumed = Option.getOrNull(yield* readJson(manifestPath, decodeManifest));
-    const manifest = resumed ?? (yield* classify(root, plan, choices, importId, previous));
+    const manifest =
+      resumed ?? (yield* classify(root, plan, choices, importId, previous, request.rewrites ?? {}));
     if (resumed === null) {
       // Same source and nothing to write: choices that no longer matter do not make a new import.
       if (
@@ -630,7 +660,12 @@ export const makeContentImporter = Effect.gen(function* () {
     }
 
     const completedAt = yield* nowIso;
-    const receipt = { ...manifest.receipt, completedAt };
+    const skills = request.summarizeSkills ? yield* request.summarizeSkills(root) : undefined;
+    const receipt: MrMakImportReceipt = {
+      ...manifest.receipt,
+      completedAt,
+      ...(skills ? { skills } : {}),
+    };
     if (!(yield* fileSystem.exists(path.join(root, GITIGNORE_PATH)))) {
       yield* writeAtomically(path.join(root, GITIGNORE_PATH), "staging/\nreplaced/\n");
     }
