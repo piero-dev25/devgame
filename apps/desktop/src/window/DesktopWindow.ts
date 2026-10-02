@@ -811,7 +811,7 @@ export const make = Effect.gen(function* () {
         // an un-openable scheme (about:, mailto:) must not burn the 3s
         // cooldown and suppress a legitimate deflect behind it.
         if (
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          Option.isSome(ElectronShell.parseSafeWebUrl(url)) &&
           ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
         ) {
           void runPromise(electronShell.openExternal(url));
@@ -855,7 +855,7 @@ export const make = Effect.gen(function* () {
         }
         event.preventDefault();
         if (
-          Option.isSome(ElectronShell.parseSafeExternalUrl(url)) &&
+          Option.isSome(ElectronShell.parseSafeWebUrl(url)) &&
           ElectronShell.shouldAllowExternalDeflect(guestWebContents.id)
         ) {
           void runPromise(electronShell.openExternal(url));

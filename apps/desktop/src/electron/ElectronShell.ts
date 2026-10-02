@@ -132,6 +132,25 @@ export function parseSafeExternalUrl(rawUrl: unknown): Option.Option<string> {
   }
 }
 
+/**
+ * Web-only variant for URLs a third-party preview page navigates to. Unlike
+ * `parseSafeExternalUrl` it never admits editor deep links, so a previewed page
+ * cannot hand `shell.openExternal` a `vscode://vscode-remote/ssh-remote+...`
+ * URL by navigating or redirecting to it.
+ */
+export function parseSafeWebUrl(rawUrl: unknown): Option.Option<string> {
+  if (typeof rawUrl !== "string") {
+    return Option.none();
+  }
+
+  try {
+    const url = new URL(rawUrl);
+    return SAFE_WEB_PROTOCOLS.has(url.protocol) ? Option.some(url.href) : Option.none();
+  } catch {
+    return Option.none();
+  }
+}
+
 export class ElectronShell extends Context.Service<
   ElectronShell,
   {

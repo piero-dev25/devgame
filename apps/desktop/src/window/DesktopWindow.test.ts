@@ -1602,6 +1602,61 @@ describe("DesktopWindow", () => {
   );
 
   it.effect(
+    "a previewed page cannot deflect editor SSH deep links to the OS (navigate or redirect)",
+    () =>
+      Effect.gen(function* () {
+        const fakeWindow = makeFakeBrowserWindow();
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const openedExternalUrls: unknown[] = [];
+        const layer = makeTestLayer({
+          window: fakeWindow.window,
+          createCount,
+          mainWindow,
+          openedExternalUrls,
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+
+          const didAttachWebview = fakeWindow.webContentsListeners.get("did-attach-webview");
+          if (!didAttachWebview) {
+            return yield* Effect.die("did-attach-webview listener was not registered");
+          }
+          const guestListeners = new Map<string, (...args: Array<unknown>) => void>();
+          const guestWebContents = {
+            id: 4244,
+            getURL: () => "http://127.0.0.1:5733/game",
+            on: (eventName: string, listener: (...args: Array<unknown>) => void) => {
+              guestListeners.set(eventName, listener);
+            },
+          };
+          didAttachWebview({}, guestWebContents);
+          guestListeners.get("did-navigate")?.({}, "http://127.0.0.1:5733/game");
+
+          const willNavigate = guestListeners.get("will-navigate");
+          const willRedirect = guestListeners.get("will-redirect");
+          if (!willNavigate || !willRedirect) {
+            return yield* Effect.die("guest navigation listeners were not registered");
+          }
+          const prevented: string[] = [];
+          for (const [listener, url] of [
+            [willNavigate, "vscode://vscode-remote/ssh-remote+attacker.example.com/home"],
+            [willRedirect, "cursor://vscode-remote/ssh-remote+attacker.example.com/home"],
+            [willNavigate, "zed://ssh/attacker.example.com/home"],
+          ] as const) {
+            listener({ preventDefault: () => prevented.push(url) }, url);
+          }
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.lengthOf(prevented, 3, "every editor deep link navigation is blocked in-panel");
+          assert.lengthOf(openedExternalUrls, 0, "no editor deep link reaches openExternal");
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect(
     "app-initiated load in flight exempts will-redirect (review F6 — typing a URL into a loaded tab must not deflect on the target's redirect), and enforcement resumes after did-navigate clears it",
     () =>
       Effect.gen(function* () {
