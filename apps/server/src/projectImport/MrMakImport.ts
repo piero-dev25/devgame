@@ -43,6 +43,7 @@ import {
   makeBatchParser,
   requirementsFrom,
   resolveLink,
+  resolveSymlink,
 } from "./mrMakImportContent.ts";
 
 const posix = NodePath.posix;
@@ -63,6 +64,14 @@ const STEP_ISSUE = {
   missing: "missing-step",
   escape: "escape",
   malformed: "malformed-path",
+  "not-selected": "not-selected-step",
+} as const;
+/** Link statuses that break once the plan is imported, with the issue each one raises. */
+const LINK_ISSUE = {
+  missing: ["missing-link", "does not exist in HEAD."],
+  escape: ["escape-link", "climbs out of the repository."],
+  malformed: ["malformed-link", "is not a portable relative link."],
+  "not-selected": ["not-selected-link", "points at a file this import does not include."],
 } as const;
 /** Credential files outside the roots, checked by stat only. */
 const KNOWN_CREDENTIAL_PATHS = [".claude/settings.local.json", ".codex/auth.json"];
@@ -140,6 +149,19 @@ const parseDirtyPaths = (stdout: string): Array<string> => {
     if (record[0] === "R" || record[0] === "C") index++;
   }
   return paths;
+};
+
+/** `git check-attr -z <path...> text eol` output as `[path, text, eol]` per path. */
+const parseCheckAttr = (stdout: string): Array<[string, string, string]> => {
+  const values = new Map<string, { text: string; eol: string }>();
+  const fields = stdout.split("\0");
+  for (let index = 0; index + 2 < fields.length; index += 3) {
+    const [filePath = "", attribute = "", value = ""] = fields.slice(index, index + 3);
+    const row = values.get(filePath) ?? { text: "unspecified", eol: "unspecified" };
+    if (attribute === "text" || attribute === "eol") row[attribute] = value;
+    values.set(filePath, row);
+  }
+  return [...values].map(([filePath, row]) => [filePath, row.text, row.eol]);
 };
 
 const topLevelRule = (name: string): [MrMakImportExclusionRule, string] => {
@@ -251,8 +273,10 @@ const make = Effect.gen(function* () {
     }
     const head = yield* runGit("head", ["rev-parse", "--verify", "-q", "HEAD^{commit}"]);
     if (head.exitCode !== 0) return yield* fail("no-head")();
+    // Every later read names this commit, so a commit landing mid-plan cannot mix revisions.
+    const revision = head.stdout.trim();
     const branch = yield* runGit("branch", ["symbolic-ref", "--short", "-q", "HEAD"]);
-    const tree = yield* runGit("tree", ["ls-tree", "-r", "-l", "-z", "--full-tree", "HEAD"]);
+    const tree = yield* runGit("tree", ["ls-tree", "-r", "-l", "-z", "--full-tree", revision]);
     const status = yield* runGit("status", [
       "status",
       "--porcelain=v1",
@@ -355,8 +379,48 @@ const make = Effect.gen(function* () {
       if (scanText || entry.mode === "120000" || entry.path === REGISTRY_PATH) keep.add(entry.oid);
     }
 
-    const oids = [...new Set([...selected, ...requirementPaths].map((entry) => entry.oid))];
-    const parser = makeBatchParser(keep);
+    // Every committed symlink, in a root or not, so chains can be followed through HEAD.
+    const symlinks = headEntries.filter((entry) => entry.mode === "120000");
+    for (const link of symlinks) keep.add(link.oid);
+
+    // Line endings a checkout applies, from HEAD's own .gitattributes.
+    const regularSelected = selected.filter((entry) => entry.mode !== "120000");
+    const crlfMode = new Map<string, "text" | "auto">();
+    if (regularSelected.length > 0) {
+      const attributes = yield* processRunner
+        .run({
+          command: "git",
+          args: [
+            ...READ_ONLY_GIT_ARGS,
+            "check-attr",
+            `--source=${revision}`,
+            "-z",
+            "--stdin",
+            "text",
+            "eol",
+          ],
+          cwd: realSource,
+          env: READ_ONLY_GIT_ENV,
+          stdin: regularSelected.map((entry) => `${entry.path}\0`).join(""),
+          maxOutputBytes: LISTING_MAX_BYTES,
+          timeout: "2 minutes",
+        })
+        .pipe(Effect.mapError(fail("git")));
+      if (attributes.code !== 0) return yield* fail("git")();
+      for (const [filePath, text, eol] of parseCheckAttr(attributes.stdout)) {
+        if (eol === "crlf" && text !== "unset") {
+          crlfMode.set(filePath, text === "auto" ? "auto" : "text");
+        }
+      }
+    }
+    const crlfOids = new Set(
+      regularSelected.filter((entry) => crlfMode.has(entry.path)).map((entry) => entry.oid),
+    );
+
+    const oids = [
+      ...new Set([...selected, ...requirementPaths, ...symlinks].map((entry) => entry.oid)),
+    ];
+    const parser = makeBatchParser(keep, crlfOids);
     if (oids.length > 0) {
       const batch = yield* processRunner
         .run({
@@ -373,24 +437,33 @@ const make = Effect.gen(function* () {
         .pipe(Effect.mapError(fail("git")));
       if (batch.code !== 0 || parser.blobs.size !== oids.length) return yield* fail("git")();
     }
-    const blob = (oid: string) => parser.blobs.get(oid) ?? { sha256: "", text: null };
+    const blob = (oid: string) => parser.blobs.get(oid) ?? { sha256: "", text: null, crlf: null };
+    /** What a checkout writes when it differs from the blob: LF turned into CRLF. */
+    const crlfCheckout = (entry: TreeEntry) => {
+      const mode = crlfMode.get(entry.path);
+      const checkout = blob(entry.oid).crlf;
+      if (mode === undefined || checkout === null || !checkout.loneLf) return null;
+      if (mode === "auto" && checkout.crOrNul) return null;
+      return { bytes: checkout.bytes, sha256: checkout.sha256 };
+    };
 
-    // Symlinks must point inside their own root; escaping ones are never planned.
+    // Symlinks must resolve inside their own root, following any committed
+    // symlink met on the way; escaping ones are never planned.
+    const linkTargets = new Map(symlinks.map((link) => [link.path, blob(link.oid).text ?? ""]));
+    const symlinkTargets = new Map<string, string>();
     const included = selected.filter((entry) => {
       if (entry.mode !== "120000") return true;
-      const target = blob(entry.oid).text ?? "";
-      const resolved = posix.normalize(posix.join(posix.dirname(entry.path), target));
-      const escapes =
-        posix.isAbsolute(target) ||
-        (resolved !== entry.root && !resolved.startsWith(`${entry.root}/`));
-      if (escapes) {
+      const resolved = resolveSymlink(entry.path, entry.root, linkTargets);
+      if (resolved === null) {
         issues.push({
           kind: "escape",
           path: entry.path,
-          detail: `Symlink to ${target} leaves ${entry.root}/.`,
+          detail: `Symlink to ${linkTargets.get(entry.path) ?? ""} leaves ${entry.root}/.`,
         });
+        return false;
       }
-      return !escapes;
+      symlinkTargets.set(entry.path, resolved);
+      return true;
     });
     const linkContext = { included: new Set(included.map((entry) => entry.path)), head: headPaths };
 
@@ -415,13 +488,18 @@ const make = Effect.gen(function* () {
           if (
             link.status === "missing" ||
             link.status === "escape" ||
-            link.status === "malformed"
+            link.status === "malformed" ||
+            link.status === "not-selected"
           ) {
             issues.push({
               kind: STEP_ISSUE[link.status],
               path: link.resolved ?? `workspace/${entity.folder}/${step.path}`,
               detail: `Step "${step.name}" of card "${entity.id}": ${
-                link.status === "missing" ? "no such file in HEAD" : `not a path inside workspace/`
+                link.status === "missing"
+                  ? "no such file in HEAD"
+                  : link.status === "not-selected"
+                    ? "a file this import does not include"
+                    : "not a path inside workspace/"
               }.`,
             });
           }
@@ -434,22 +512,40 @@ const make = Effect.gen(function* () {
       input.destinationRoot === undefined
         ? null
         : yield* fileSystem.realPath(input.destinationRoot).pipe(Effect.orElseSucceed(() => null));
+    /**
+     * The destination path itself is never followed: a symlink entry is compared
+     * by its link text, and a symlink where a regular file is planned is a
+     * conflict. Its parent folders are resolved and must stay inside the root.
+     */
     const destinationState = Effect.fn("MrMakImport.destinationState")(function* (
       relativePath: string,
-      sha256: string,
+      expected:
+        | { readonly kind: "symlink"; readonly text: string }
+        | { readonly kind: "file"; readonly sha256s: ReadonlyArray<string> },
     ) {
       if (input.destinationRoot === undefined) return "not-checked" as const;
       if (realDestination === null) return "new" as const;
-      const target = yield* fileSystem
-        .realPath(path.join(realDestination, relativePath))
+      const parent = yield* fileSystem
+        .realPath(path.join(realDestination, posix.dirname(relativePath)))
         .pipe(Effect.orElseSucceed(() => null));
-      if (target === null) return "new" as const;
+      if (parent === null) return "new" as const;
       // Anything we cannot prove identical is a conflict; M2 never overwrites one.
-      if (isOutside(realDestination, target)) return "exists-different" as const;
+      if (isOutside(realDestination, parent)) return "exists-different" as const;
+      const target = path.join(parent, posix.basename(relativePath));
+      const linkText = yield* fileSystem.readLink(target).pipe(Effect.option);
+      if (linkText._tag === "Some") {
+        return expected.kind === "symlink" && linkText.value === expected.text
+          ? ("exists-identical" as const)
+          : ("exists-different" as const);
+      }
+      if (!(yield* fileSystem.exists(target).pipe(Effect.orElseSucceed(() => true)))) {
+        return "new" as const;
+      }
+      if (expected.kind === "symlink") return "exists-different" as const;
       const bytes = yield* fileSystem.readFile(target).pipe(Effect.orElseSucceed(() => null));
       if (bytes === null) return "exists-different" as const;
       const destinationSha = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
-      return destinationSha === sha256
+      return expected.sha256s.includes(destinationSha)
         ? ("exists-identical" as const)
         : ("exists-different" as const);
     });
@@ -467,15 +563,26 @@ const make = Effect.gen(function* () {
                 resolveLink(entry.path, href, linkContext),
               );
       for (const link of links) {
-        if (entry.path !== REGISTRY_PATH && link.status === "missing") {
-          issues.push({
-            kind: "missing-link",
-            path: entry.path,
-            detail: `${link.href} does not exist in HEAD.`,
-          });
+        if (
+          entry.path === REGISTRY_PATH ||
+          link.status === "resolved" ||
+          link.status === "external"
+        ) {
+          continue;
         }
+        const [kind, problem] = LINK_ISSUE[link.status];
+        issues.push({ kind, path: entry.path, detail: `${link.href} ${problem}` });
       }
-      const destination: MrMakImportDestinationState = yield* destinationState(entry.path, sha256);
+      const crlfCheckoutState = isLink ? null : crlfCheckout(entry);
+      const destination: MrMakImportDestinationState = yield* destinationState(
+        entry.path,
+        isLink
+          ? { kind: "symlink", text: text ?? "" }
+          : {
+              kind: "file",
+              sha256s: crlfCheckoutState ? [sha256, crlfCheckoutState.sha256] : [sha256],
+            },
+      );
       entries.push({
         root: entry.root,
         sourcePath: entry.path,
@@ -485,9 +592,8 @@ const make = Effect.gen(function* () {
         headBlobOid: entry.oid,
         kind: fileKind(entry.path),
         dirtyInWorktree: dirty.has(entry.path),
-        symlinkTarget: isLink
-          ? posix.normalize(posix.join(posix.dirname(entry.path), text ?? ""))
-          : null,
+        symlinkTarget: symlinkTargets.get(entry.path) ?? null,
+        crlfCheckout: crlfCheckoutState,
         destination,
         links,
       });
@@ -504,7 +610,7 @@ const make = Effect.gen(function* () {
     return {
       source: {
         repositoryPath: realSource,
-        revision: head.stdout.trim(),
+        revision,
         branch: branch.exitCode === 0 ? branch.stdout.trim() || null : null,
         dirtyPaths,
       },

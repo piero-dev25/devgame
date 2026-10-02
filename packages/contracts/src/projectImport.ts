@@ -90,14 +90,26 @@ export const MrMakImportEntry = Schema.Struct({
   sourcePath: Schema.String,
   destinationPath: Schema.String,
   bytes: Schema.Number,
-  /** sha256 of the committed blob (of the link text, for a symlink). */
+  /**
+   * sha256 of the committed blob (of the link text, for a symlink). Line
+   * endings are as committed; see `crlfCheckout`.
+   */
   sha256: Schema.String,
   headBlobOid: Schema.String,
   kind: MrMakImportFileKind,
   /** The working-tree copy differs from HEAD; HEAD is what gets imported. */
   dirtyInWorktree: Schema.Boolean,
-  /** Repository-relative target when the committed entry is a symlink. */
+  /**
+   * Repository-relative target when the committed entry is a symlink, resolved
+   * through any committed symlinks on the way.
+   */
   symlinkTarget: Schema.NullOr(Schema.String),
+  /**
+   * Set when HEAD's `.gitattributes` makes a checkout write this file with CRLF
+   * line endings (`eol=crlf`): the size and sha256 of those checkout bytes. A
+   * destination holding either form counts as identical.
+   */
+  crlfCheckout: Schema.NullOr(Schema.Struct({ bytes: Schema.Number, sha256: Schema.String })),
   destination: MrMakImportDestinationState,
   links: Schema.Array(MrMakImportLink),
 });
@@ -139,12 +151,21 @@ export const MrMakImportRequirement = Schema.Struct({
 });
 export type MrMakImportRequirement = typeof MrMakImportRequirement.Type;
 
+/**
+ * Something that would be wrong or broken after import. `escape` is a symlink
+ * or registry step leaving its root; the `-link` kinds are file links whose
+ * status is not `resolved` or `external`; the `-step` kinds are registry steps.
+ */
 export const MrMakImportIssue = Schema.Struct({
   kind: Schema.Literals([
     "escape",
     "malformed-path",
     "missing-step",
+    "not-selected-step",
     "missing-link",
+    "escape-link",
+    "malformed-link",
+    "not-selected-link",
     "registry-malformed",
   ]),
   path: Schema.String,

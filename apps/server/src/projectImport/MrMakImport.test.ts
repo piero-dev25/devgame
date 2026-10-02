@@ -35,11 +35,28 @@ const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0
 const REGISTRY = `{"entities": [{"id": "hero", "title": "Hero", "folder": "2026_hero", "steps": [
   {"name": "Board", "path": "index.html"},
   {"name": "Gone", "path": "missing.md"},
-  {"name": "Sneaky", "path": "../../package.json"}
+  {"name": "Sneaky", "path": "../../package.json"},
+  {"name": "Cached", "path": "__pycache__/step.pyc"}
 ]}]}`;
 const HTML = `<link rel="stylesheet" href="../_shared/report.css">
 <img src="img/hero.png"><img src="img/gone.png"><a href="#top">top</a>
-<a href="https://example.com/x">x</a><script src="/abs.js"></script>`;
+<a href="https://example.com/x">x</a><script src="/abs.js"></script>
+<img src=img/unquoted-gone.png><img srcset="img/hero.png 1x, img/set-gone.png 2x">`;
+const CODEX_CONFIG = `model = "gpt"
+[mcp_servers.fal]
+command = "npx"
+args = ["-y", "FAL_ARG=sk-toml-arg"]
+env = { FAL_KEY = "sk-toml-inline", "OTHER_KEY" = 'v,NOT_A_KEY = sk-toml-quoted' }
+
+[mcp_servers.fal.env]
+FAL_SECRET = "sk-toml-table"
+
+[mcp_servers.gh]
+command = "gh"
+env.GH_TOKEN = "sk-toml-dotted"
+env_vars = ["PASS_THROUGH"]
+`;
+const PS1 = "Write-Host hi\nexit 0\n";
 
 const encodePlan = Schema.encodeSync(fromJsonStringPretty(MrMakImportPlan));
 
@@ -56,6 +73,8 @@ const git = (cwd: string, ...args: ReadonlyArray<string>) =>
       "user.email=t@example.com",
       "-c",
       "commit.gpgsign=false",
+      "-c",
+      "core.safecrlf=false",
       ...args,
     ],
     { cwd, encoding: "utf8", env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" } },
@@ -80,8 +99,14 @@ const makeFixture = Effect.gen(function* () {
     "workspace/2026_hero/index.html": HTML,
     "workspace/2026_hero/img/hero.png": PNG,
     "workspace/2026_hero/notes.md":
-      "[goals](../../context/goals.md) [app](../../src/app.ts) [win](C:\\Users\\me\\a.png)\n",
+      "[goals](../../context/goals.md) [app](../../src/app.ts) [win](C:\\Users\\me\\a.png)\n" +
+      "[out](../../../outside-secret.txt) [sp](<my file.png>)\n",
+    "workspace/2026_hero/my file.png": PNG,
+    "workspace/2026_hero/__pycache__/step.pyc": "compiled\n",
     "workspace/2026_hero/bad\\name.md": "windows path\n",
+    "docs/setup.ps1": PS1,
+    ".gitattributes": "*.ps1 text eol=crlf\n",
+    ".codex/config.toml": CODEX_CONFIG,
     "workspace/_shared/report.css": 'body { background: url("../2026_hero/img/hero.png"); }\n',
     "context/goals.md": "# Goals\n",
     "docs/guide.md": "# Guide v1\n",
@@ -113,6 +138,21 @@ const makeFixture = Effect.gen(function* () {
       "../_shared/report.css",
       NodePath.join(source, "workspace/2026_hero/alias.css"),
     );
+    // Chains: each link's own text stays inside workspace/, but following the
+    // committed links on the way leaves it (or loops).
+    const links: Record<string, string> = {
+      "workspace/up": "../..",
+      "workspace/via.txt": "up/outside-secret.txt",
+      "workspace/etc": "/etc",
+      "workspace/hosts": "etc/hosts",
+      "workspace/loop-a": "loop-b",
+      "workspace/loop-b": "loop-a",
+      "workspace/shared": "_shared",
+      "workspace/2026_hero/chain.css": "../shared/report.css",
+    };
+    for (const [link, target] of Object.entries(links)) {
+      NodeFS.symlinkSync(target, NodePath.join(source, link));
+    }
   }
   git(source, "init", "-q");
   git(source, "add", "-A");
@@ -263,7 +303,14 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
         ["2026_hero/index.html", "resolved"],
         ["2026_hero/missing.md", "missing"],
         ["2026_hero/../../package.json", "escape"],
+        ["2026_hero/__pycache__/step.pyc", "not-selected"],
       ]);
+      expect(result.issues).toContainEqual(
+        expect.objectContaining({
+          kind: "not-selected-step",
+          path: "workspace/2026_hero/__pycache__/step.pyc",
+        }),
+      );
       expect(result.issues).toContainEqual(
         expect.objectContaining({ kind: "missing-step", path: "workspace/2026_hero/missing.md" }),
       );
@@ -286,6 +333,8 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
         ["img/gone.png", "workspace/2026_hero/img/gone.png", "missing"],
         ["https://example.com/x", null, "external"],
         ["/abs.js", null, "external"],
+        ["img/unquoted-gone.png", "workspace/2026_hero/img/unquoted-gone.png", "missing"],
+        ["img/set-gone.png", "workspace/2026_hero/img/set-gone.png", "missing"],
       ]);
       expect(linksOf("workspace/_shared/report.css")).toEqual([
         ["../2026_hero/img/hero.png", "workspace/2026_hero/img/hero.png", "resolved"],
@@ -294,7 +343,24 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
         ["../../context/goals.md", "context/goals.md", "resolved"],
         ["../../src/app.ts", "src/app.ts", "not-selected"],
         ["C:\\Users\\me\\a.png", null, "malformed"],
+        ["../../../outside-secret.txt", null, "escape"],
+        ["my file.png", "workspace/2026_hero/my file.png", "resolved"],
       ]);
+      // Every link that would break after import is an issue, and counted.
+      const linkIssues = result.issues
+        .filter((issue) => issue.kind.endsWith("-link"))
+        .map((issue) => [issue.kind, issue.path, issue.detail.split(" ")[0]]);
+      expect(linkIssues.toSorted()).toEqual(
+        [
+          ["missing-link", "workspace/2026_hero/index.html", "img/gone.png"],
+          ["missing-link", "workspace/2026_hero/index.html", "img/unquoted-gone.png"],
+          ["missing-link", "workspace/2026_hero/index.html", "img/set-gone.png"],
+          ["not-selected-link", "workspace/2026_hero/notes.md", "../../src/app.ts"],
+          ["malformed-link", "workspace/2026_hero/notes.md", "C:\\Users\\me\\a.png"],
+          ["escape-link", "workspace/2026_hero/notes.md", "../../../outside-secret.txt"],
+        ].toSorted(),
+      );
+      expect(result.totals.issues).toBe(result.issues.length);
       expect(result.issues).toContainEqual({
         kind: "missing-link",
         path: "workspace/2026_hero/index.html",
@@ -315,6 +381,90 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
       expect(entry(result, "workspace/2026_hero/alias.css")?.symlinkTarget).toBe(
         "workspace/_shared/report.css",
       );
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect.skipIf(!symlinksSupported)("follows committed symlink chains before trusting one", () =>
+    Effect.gen(function* () {
+      const { source } = yield* makeFixture;
+      const result = yield* plan({ sourceRoot: source });
+
+      const escapes = result.issues
+        .filter((issue) => issue.kind === "escape")
+        .map((issue) => issue.path);
+      for (const path of [
+        "workspace/up",
+        "workspace/via.txt",
+        "workspace/etc",
+        "workspace/hosts",
+        "workspace/loop-a",
+        "workspace/loop-b",
+      ]) {
+        expect([path, entry(result, path)]).toEqual([path, undefined]);
+        expect(escapes).toContain(path);
+      }
+      // A chain that stays inside the root is planned with its final target.
+      expect(entry(result, "workspace/shared")?.symlinkTarget).toBe("workspace/_shared");
+      expect(entry(result, "workspace/2026_hero/chain.css")?.symlinkTarget).toBe(
+        "workspace/_shared/report.css",
+      );
+    }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect.skipIf(!symlinksSupported)(
+    "compares destination symlinks by link text and never follows them",
+    () =>
+      Effect.gen(function* () {
+        const { base, source } = yield* makeFixture;
+        const same = NodePath.join(base, "dest-same");
+        const committed = (path: string) => git(source, "show", `HEAD:${path}`);
+        write(same, "workspace/_shared/report.css", committed("workspace/_shared/report.css"));
+        NodeFS.mkdirSync(NodePath.join(same, "workspace/2026_hero"), { recursive: true });
+        NodeFS.symlinkSync(
+          "../_shared/report.css",
+          NodePath.join(same, "workspace/2026_hero/alias.css"),
+        );
+        // A symlink to identical content where a regular file is planned.
+        write(same, "elsewhere.md", committed("workspace/2026_hero/notes.md"));
+        NodeFS.symlinkSync(
+          "../../elsewhere.md",
+          NodePath.join(same, "workspace/2026_hero/notes.md"),
+        );
+        // A regular file holding the link text where a symlink is planned.
+        const flat = NodePath.join(base, "dest-flat");
+        write(flat, "workspace/2026_hero/alias.css", "../_shared/report.css");
+
+        const sameResult = yield* plan({ sourceRoot: source, destinationRoot: same });
+        expect({
+          alias: entry(sameResult, "workspace/2026_hero/alias.css")?.destination,
+          report: entry(sameResult, "workspace/_shared/report.css")?.destination,
+          notes: entry(sameResult, "workspace/2026_hero/notes.md")?.destination,
+        }).toEqual({
+          alias: "exists-identical",
+          report: "exists-identical",
+          notes: "exists-different",
+        });
+        const flatResult = yield* plan({ sourceRoot: source, destinationRoot: flat });
+        expect(entry(flatResult, "workspace/2026_hero/alias.css")?.destination).toBe(
+          "exists-different",
+        );
+      }).pipe(Effect.provide(TestLayer)),
+  );
+
+  it.effect("records the CRLF checkout of eol=crlf files and accepts it at the destination", () =>
+    Effect.gen(function* () {
+      const { source, destination } = yield* makeFixture;
+      const crlf = PS1.replaceAll("\n", "\r\n");
+      write(destination, "docs/setup.ps1", crlf);
+      const result = yield* plan({ sourceRoot: source, destinationRoot: destination });
+
+      expect(entry(result, "docs/setup.ps1")).toMatchObject({
+        sha256: sha256(PS1),
+        bytes: Buffer.byteLength(PS1),
+        crlfCheckout: { sha256: sha256(crlf), bytes: Buffer.byteLength(crlf) },
+        destination: "exists-identical",
+      });
+      expect(entry(result, "docs/guide.md")?.crlfCheckout).toBeNull();
     }).pipe(Effect.provide(TestLayer)),
   );
 
@@ -349,6 +499,18 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
       expect(result.requirements).toEqual(
         expect.arrayContaining([
           { source: ".mcp.json", kind: "mcp-server", name: "fal", keys: ["FAL_KEY"] },
+          {
+            source: ".codex/config.toml",
+            kind: "mcp-server",
+            name: "fal",
+            keys: ["FAL_KEY", "OTHER_KEY", "FAL_SECRET"],
+          },
+          {
+            source: ".codex/config.toml",
+            kind: "mcp-server",
+            name: "gh",
+            keys: ["GH_TOKEN", "PASS_THROUGH"],
+          },
           { source: ".env.example", kind: "env-var", name: "FAL_KEY", keys: [] },
           {
             source: ".agents/skills/alpha/SKILL.md",
@@ -359,7 +521,11 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("MrMakImport.plan", 
         ]),
       );
       const serialized = encodePlan({ ...result, entries: [] });
-      expect(serialized).not.toMatch(/sk-live-value|example-value|SECRET_DESCRIPTION/);
+      expect(serialized).not.toMatch(/sk-live-value|example-value|SECRET_DESCRIPTION|sk-toml/);
+      expect(serialized).not.toMatch(/NOT_A_KEY|FAL_ARG/);
+      expect(
+        result.requirements.filter((requirement) => requirement.source === ".codex/config.toml"),
+      ).toHaveLength(2);
     }).pipe(Effect.provide(TestLayer)),
   );
 
