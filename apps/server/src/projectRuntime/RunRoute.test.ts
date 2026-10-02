@@ -113,6 +113,10 @@ const projectionLayer = (roots: ReadonlyMap<ProjectId, string> | "fail") =>
     },
   });
 
+/** The service over that projection; it checks threads against it too. */
+const serviceWithProjection = (roots: ReadonlyMap<ProjectId, string> | "fail") =>
+  ServiceLayer.pipe(Layer.provideMerge(projectionLayer(roots)));
+
 const PROFILES_JSON = JSON.stringify({
   version: 1,
   profiles: [
@@ -170,9 +174,7 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
             yield* dispatchRunStatus(makeSession(OPERATE), { projectId: PROJECT_A }),
           );
           expect("runs" in status && status.runs).toEqual([]);
-        }).pipe(
-          Effect.provide(Layer.merge(ServiceLayer, projectionLayer(new Map([[PROJECT_A, root]])))),
-        );
+        }).pipe(Effect.provide(serviceWithProjection(new Map([[PROJECT_A, root]]))));
       }),
     );
 
@@ -182,7 +184,7 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
           projectId: PROJECT_A,
         });
         expect(outcome).toEqual({ _tag: "insufficientScope" });
-      }).pipe(Effect.provide(Layer.merge(ServiceLayer, projectionLayer(new Map())))),
+      }).pipe(Effect.provide(serviceWithProjection(new Map()))),
     );
   });
 
@@ -200,16 +202,14 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
         expect(valueOf(yield* dispatchRunStatus(session, { projectId: PROJECT_B }))).toEqual(
           notFound,
         );
-      }).pipe(
-        Effect.provide(Layer.merge(ServiceLayer, projectionLayer(new Map([[PROJECT_A, "x"]])))),
-      ),
+      }).pipe(Effect.provide(serviceWithProjection(new Map([[PROJECT_A, "x"]])))),
     );
 
     it.effect("answers 'Could not resolve project.' when the projection fails", () =>
       Effect.gen(function* () {
         const outcome = yield* dispatchRunStatus(makeSession(OPERATE), { projectId: PROJECT_A });
         expect(valueOf(outcome)).toEqual({ _tag: "error", message: "Could not resolve project." });
-      }).pipe(Effect.provide(Layer.merge(ServiceLayer, projectionLayer("fail")))),
+      }).pipe(Effect.provide(serviceWithProjection("fail"))),
     );
 
     it.effect("launches from the project's canonical root and records its own thread", () =>
@@ -238,14 +238,11 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
           expect("runs" in foreignStatus && foreignStatus.runs).toEqual([]);
         }).pipe(
           Effect.provide(
-            Layer.merge(
-              ServiceLayer,
-              projectionLayer(
-                new Map([
-                  [PROJECT_A, root],
-                  [PROJECT_B, `${root}/elsewhere`],
-                ]),
-              ),
+            serviceWithProjection(
+              new Map([
+                [PROJECT_A, root],
+                [PROJECT_B, `${root}/elsewhere`],
+              ]),
             ),
           ),
         );
@@ -272,14 +269,11 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
           expect("runs" in status && status.runs).toEqual([]);
         }).pipe(
           Effect.provide(
-            Layer.merge(
-              ServiceLayer,
-              projectionLayer(
-                new Map([
-                  [PROJECT_A, root],
-                  [PROJECT_B, root],
-                ]),
-              ),
+            serviceWithProjection(
+              new Map([
+                [PROJECT_A, root],
+                [PROJECT_B, root],
+              ]),
             ),
           ),
         );
@@ -309,9 +303,7 @@ it.layer(TestLayer, { excludeTestServices: true })("project runtime routes", (it
             message:
               'Run profile "broken": executable "bin/not-built" does not exist. Build it first.',
           });
-        }).pipe(
-          Effect.provide(Layer.merge(ServiceLayer, projectionLayer(new Map([[PROJECT_A, root]])))),
-        );
+        }).pipe(Effect.provide(serviceWithProjection(new Map([[PROJECT_A, root]]))));
       }),
     );
   });

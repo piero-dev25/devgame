@@ -9,7 +9,7 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
-import { ProjectId, RUN_PROFILES_FILE_NAME } from "@t3tools/contracts";
+import { ProjectId, RUN_PROFILES_FILE_NAME, ThreadId } from "@t3tools/contracts";
 import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -22,6 +22,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
@@ -32,11 +33,15 @@ import * as RunService from "./RunService.ts";
 
 const PROJECT = ProjectId.make("run-service-project");
 const OTHER_PROJECT = ProjectId.make("run-service-other");
+const OWN_THREAD = ThreadId.make("run-service-thread");
+const OTHER_THREAD = ThreadId.make("run-service-other-thread");
 
 /**
  * The fake game. `idle` waits forever; `exit <code>` exits on its own;
  * `stubborn` ignores SIGTERM and starts a grandchild in its process group;
- * `chatty <bytes>` writes that much output, then exits.
+ * `chatty <bytes>` writes that much output, then exits; `launcher` starts a
+ * helper in its process group that shares its stdout and ignores SIGTERM,
+ * waits until the helper is listening, then exits 0.
  */
 const FAKE_GAME = `#!${process.execPath}
 const [mode, arg] = process.argv.slice(2);
@@ -47,6 +52,14 @@ if (mode === "exit") {
   process.exitCode = Number(arg);
 } else if (mode === "chatty") {
   process.stdout.write("x".repeat(Number(arg)) + "done\\n");
+} else if (mode === "launcher") {
+  const helperSource = "process.on('SIGTERM', () => process.stdout.write('helper ignoring SIGTERM ')); setInterval(() => {}, 60000); process.send('listening');";
+  const helper = require("node:child_process").spawn(process.execPath, ["-e", helperSource], { stdio: ["ignore", "inherit", "inherit", "ipc"] });
+  helper.once("message", () => {
+    process.stdout.write("helper=" + helper.pid + "\\n");
+    helper.disconnect();
+    helper.unref();
+  });
 } else {
   if (mode === "stubborn") {
     process.on("SIGTERM", () => process.stdout.write("ignoring SIGTERM\\n"));
@@ -70,6 +83,7 @@ const PROFILES = [
   profile("idle-2", ["idle"]),
   profile("stubborn", ["stubborn"]),
   profile("early-exit", ["exit", "3"]),
+  profile("launcher", ["launcher"]),
   profile("chatty", ["chatty", "40000"], {
     outputs: [{ name: "shot", kind: "image", path: "work/captures/shot.png" }],
   }),
@@ -97,6 +111,26 @@ const makeServiceLayer = () =>
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
       ),
+    ),
+    // Which project each known thread belongs to.
+    Layer.provide(
+      Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({
+        getThreadCheckpointContext: (threadId) => {
+          const projectId =
+            threadId === OWN_THREAD ? PROJECT : threadId === OTHER_THREAD ? OTHER_PROJECT : null;
+          return Effect.succeed(
+            projectId === null
+              ? Option.none()
+              : Option.some({
+                  threadId,
+                  projectId,
+                  workspaceRoot: "/unused",
+                  worktreePath: null,
+                  checkpoints: [],
+                }),
+          );
+        },
+      }),
     ),
     // The child may see only PATH, HOME and what its profile allows.
     Layer.provide(
@@ -146,8 +180,8 @@ const setup = Effect.gen(function* () {
   const receipts = yield* service.subscribeReceipts;
   const awaitReceipt = (predicate: (receipt: RunService.RunReceipt) => boolean) =>
     receipts.pipe(Stream.filter(predicate), Stream.runHead, Effect.map(Option.getOrThrow));
-  const start = (profileId: string, projectId = PROJECT) =>
-    service.start({ projectId, workspaceRoot: root, profileId, threadId: null });
+  const start = (profileId: string, projectId = PROJECT, threadId: ThreadId | null = null) =>
+    service.start({ projectId, workspaceRoot: root, profileId, threadId });
   const runs = (projectId = PROJECT) =>
     service.status({ projectId, workspaceRoot: root }).pipe(Effect.map((status) => status.runs));
   /** Waits on log receipts until the run's tail contains `text`. */
@@ -283,6 +317,24 @@ it.layer(TestLayer, { excludeTestServices: true })("RunService", (it) => {
       }).pipe(Effect.provide(makeServiceLayer())),
     );
 
+    it.effect(
+      "records the project's own thread and refuses another project's or an unknown one",
+      () =>
+        Effect.gen(function* () {
+          const h = yield* setup;
+
+          for (const threadId of [OTHER_THREAD, ThreadId.make("unknown-thread")]) {
+            const error = yield* h.start("idle-2", PROJECT, threadId).pipe(Effect.flip);
+            expect(error).toBeInstanceOf(RunService.RunThreadNotInProject);
+            expect(error.message).toBe("Thread not found in this project.");
+          }
+          expect(yield* h.runs()).toEqual([]);
+
+          const { run } = yield* h.start("idle-2", PROJECT, OWN_THREAD);
+          expect(run.threadId).toBe(OWN_THREAD);
+        }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
     it.effect("keeps the game running when the caller is interrupted", () =>
       Effect.gen(function* () {
         const h = yield* setup;
@@ -348,6 +400,28 @@ it.layer(TestLayer, { excludeTestServices: true })("RunService", (it) => {
       }).pipe(Effect.provide(makeServiceLayer())),
     );
 
+    it.effect("reports a program that exited 0 at once and stops what it left in its group", () =>
+      Effect.gen(function* () {
+        const h = yield* setup;
+
+        const { run } = yield* h.start("launcher");
+        // The helper only sees SIGTERM after the launcher exited and the run began cleaning up.
+        const tail = yield* h.awaitLog(run.runId, "helper ignoring SIGTERM");
+        const helper = Number(/helper=(\d+)/.exec(tail)?.[1]);
+
+        // The program is gone: the run reads as exited and does not block a new launch.
+        const [state] = yield* h.runs();
+        expect(state).toMatchObject({ runId: run.runId, status: "exited", exitCode: 0 });
+        const again = yield* h.start("launcher");
+        expect(again.alreadyRunning).toBe(false);
+
+        // Stop reaches the helper too, waiting until the group is empty.
+        const stopped = yield* h.service.stop({ projectId: PROJECT, runId: run.runId });
+        expect(stopped).toMatchObject({ status: "exited", exitCode: 0, signal: null });
+        expect(isAlive(helper)).toBe(false);
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
     it.effect("refuses an unknown run id or another project's run and signals nothing", () =>
       Effect.gen(function* () {
         const h = yield* setup;
@@ -396,5 +470,33 @@ it.layer(TestLayer, { excludeTestServices: true })("RunService", (it) => {
       ]);
       expect(isAlive(unrelated)).toBe(true);
     }),
+  );
+
+  it.effect(
+    "stops what an exited program left behind when the service shuts down mid-cleanup",
+    () =>
+      Effect.gen(function* () {
+        const scope = yield* Scope.make();
+        const context = yield* Layer.buildWithScope(makeServiceLayer(), scope);
+
+        const helper = yield* Effect.gen(function* () {
+          const h = yield* setup;
+          const { run } = yield* h.start("launcher");
+          // The run is now waiting out the helper's SIGTERM grace.
+          const tail = yield* h.awaitLog(run.runId, "helper ignoring SIGTERM");
+          return Number(/helper=(\d+)/.exec(tail)?.[1]);
+        }).pipe(Effect.provide(context));
+        // If the service misses it, the test still kills it by the pid it printed.
+        yield* Effect.addFinalizer(() =>
+          Effect.sync(() => {
+            if (isAlive(helper)) process.kill(helper, "SIGKILL");
+          }),
+        );
+        expect(isAlive(helper)).toBe(true);
+
+        yield* Scope.close(scope, Exit.void);
+
+        expect(isAlive(helper)).toBe(false);
+      }),
   );
 });

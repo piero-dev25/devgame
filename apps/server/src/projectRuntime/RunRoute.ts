@@ -96,22 +96,13 @@ export const dispatchRunStart = (
     Effect.gen(function* () {
       const project = yield* resolveProjectRoot(input.projectId);
       if (project._tag === "error") return project.value;
-      const threadId = input.threadId ?? null;
-      if (threadId !== null) {
-        const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-        const thread = yield* snapshotQuery
-          .getThreadCheckpointContext(threadId)
-          .pipe(Effect.orElseSucceed(() => Option.none()));
-        if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
-          return errorValue("Thread not found in this project.");
-        }
-      }
       const runService = yield* RunService.RunService;
+      // The service checks that the thread belongs to the project.
       return yield* runService.start({
         projectId: input.projectId,
         workspaceRoot: project.workspaceRoot,
         profileId: input.profileId,
-        threadId,
+        threadId: input.threadId ?? null,
       });
     }),
   );

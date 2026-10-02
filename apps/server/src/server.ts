@@ -661,12 +661,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
-  Layer.provideMerge(ProviderRuntimeLayerLive),
   // RunService is a stateful singleton: one registry for every route, and its
-  // scope (this runtime's) stops every run it launched at shutdown.
-  Layer.provideMerge(
-    Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive, RunService.layer),
-  ),
+  // scope (this runtime's) stops every run it launched at shutdown. It sits
+  // above ProviderRuntimeLayerLive so the orchestration projection (for its
+  // thread check) is in reach.
+  Layer.provideMerge(RunService.layer),
+  Layer.provideMerge(ProviderRuntimeLayerLive),
+  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
   // Both read a user-owned file out of the state directory and stream changes
   // to clients; neither depends on the other.

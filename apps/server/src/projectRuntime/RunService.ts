@@ -11,8 +11,10 @@
  * A run spawns the launch plan's absolute executable with its literal argv and
  * no shell, in its own process group. Stop and shutdown signal only that group
  * through the handle captured at spawn (SIGTERM, then SIGKILL after a bounded
- * grace). Nothing is ever found or killed by name, and after a restart the
- * registry is empty: earlier processes are never adopted.
+ * grace). A run lasts as long as its program: when the program exits, with any
+ * code, whatever it left in its group is stopped the same way, so nothing
+ * outlives the run. Nothing is ever found or killed by name, and after a
+ * restart the registry is empty: earlier processes are never adopted.
  *
  * The child's stdout and stderr are drained continuously into
  * `<stateDir>/runs/<projectId>/<runId>/run.log`, with a bounded tail kept in
@@ -33,6 +35,7 @@ import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as PubSub from "effect/PubSub";
@@ -43,6 +46,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as ServerConfig from "../config.ts";
+import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as RunProfiles from "./RunProfiles.ts";
 
 export class RunLaunchFailed extends Schema.TaggedError<RunLaunchFailed>()("RunLaunchFailed", {
@@ -60,6 +64,16 @@ export class RunNotOwned extends Schema.TaggedError<RunNotOwned>()("RunNotOwned"
 }) {
   override get message(): string {
     return `No run "${this.runId}" was started for this project by this server.`;
+  }
+}
+
+/** The thread is unknown, or belongs to another project. */
+export class RunThreadNotInProject extends Schema.TaggedError<RunThreadNotInProject>()(
+  "RunThreadNotInProject",
+  { threadId: Schema.String },
+) {
+  override get message(): string {
+    return "Thread not found in this project.";
   }
 }
 
@@ -98,7 +112,8 @@ export class RunService extends Context.Service<
      * Launch a profile of the project rooted at `workspaceRoot` (the caller
      * resolves it server-side). If the same profile of the same project is
      * starting or running, nothing is spawned and that run is returned with
-     * `alreadyRunning: true`. Never builds or installs anything.
+     * `alreadyRunning: true`. A `threadId` must belong to the project. Never
+     * builds or installs anything.
      */
     readonly start: (input: {
       readonly projectId: ProjectId;
@@ -107,11 +122,12 @@ export class RunService extends Context.Service<
       readonly threadId: ThreadId | null;
     }) => Effect.Effect<
       { readonly run: RunState; readonly alreadyRunning: boolean },
-      RunProfiles.RunProfileResolveError | RunLaunchFailed
+      RunProfiles.RunProfileResolveError | RunLaunchFailed | RunThreadNotInProject
     >;
     /**
      * Stop one of the project's runs and wait until it has exited. Only that
-     * run's process group is signalled. A run that already ended is returned as is.
+     * run's process group is signalled. A run whose program already exited is
+     * returned as is, once whatever it left in its group has been stopped.
      */
     readonly stop: (input: {
       readonly projectId: ProjectId;
@@ -172,6 +188,7 @@ const make = (options: RunServiceOptions) =>
     const { stateDir } = yield* ServerConfig.ServerConfig;
     const hostEnv = yield* HostProcessEnvironment;
     const hostPlatform = yield* HostProcessPlatform;
+    const snapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
     const stopGrace = options.stopGrace ?? Duration.seconds(5);
 
     // Run scopes close in parallel at shutdown, so stopping N runs takes one grace period.
@@ -206,7 +223,18 @@ const make = (options: RunServiceOptions) =>
         entry.state = { ...entry.state, logTail };
       });
 
-    /** Waits for the process, records how it ended, then releases its pipes and log file. */
+    /**
+     * Signals the run's process group and waits until it is empty (SIGTERM, then
+     * SIGKILL after the grace). Also ends what a program left behind after it
+     * exited; once the group is empty there is nothing to signal.
+     */
+    const endGroup = (handle: ChildProcessSpawner.ChildProcessHandle) =>
+      handle.kill({ killSignal: "SIGTERM", forceKillAfter: stopGrace }).pipe(Effect.ignore);
+
+    /**
+     * Waits for the program, records how it ended, ends what it left in its
+     * group, then releases the pipes and log file.
+     */
     const watch = (
       entry: RunEntry,
       handle: ChildProcessSpawner.ChildProcessHandle,
@@ -234,16 +262,22 @@ const make = (options: RunServiceOptions) =>
           Effect.forkIn(runScope),
         );
         const exit = yield* handle.exitCode.pipe(Effect.result);
-        // Output written just before exit may still be in the pipes.
-        yield* Fiber.await(drain).pipe(Effect.timeoutOption(DRAIN_AFTER_EXIT));
-        yield* Scope.close(runScope, Exit.void);
-
         const exitCode = exit._tag === "Success" ? Number(exit.success) : null;
         const signal = exit._tag === "Failure" ? signalFromExitError(exit.failure) : null;
         const status = entry.stopRequested ? "stopped" : "exited";
         const endedAt = yield* nowIso;
+        // Recorded as soon as the program is gone: status never shows a dead
+        // program as running, and the profile can be launched again.
         yield* Effect.sync(() => {
           entry.state = { ...entry.state, status, exitCode, signal, endedAt };
+        });
+        // A launcher or a forked helper may still hold the pipes. Stopping it
+        // first also lets the drain finish instead of waiting out its timeout.
+        yield* endGroup(handle);
+        // Output written just before exit may still be in the pipes.
+        yield* Fiber.await(drain).pipe(Effect.timeoutOption(DRAIN_AFTER_EXIT));
+        yield* Scope.close(runScope, Exit.void);
+        yield* Effect.sync(() => {
           entry.handle = null;
           forgetOldRuns(projectId);
         });
@@ -279,6 +313,9 @@ const make = (options: RunServiceOptions) =>
             forceKillAfter: stopGrace,
           }),
         );
+        // Runs before the spawner's own release, which skips the group when the
+        // program exited 0. Shutdown during cleanup still ends what it left behind.
+        yield* Effect.addFinalizer(() => endGroup(handle));
         return { handle, logFile };
       }).pipe(Effect.provideService(Scope.Scope, runScope), Effect.result);
 
@@ -312,6 +349,21 @@ const make = (options: RunServiceOptions) =>
     });
 
     const start: RunService["Service"]["start"] = Effect.fn("RunService.start")(function* (input) {
+      if (input.threadId !== null) {
+        const threadId = input.threadId;
+        const thread = yield* snapshotQuery
+          .getThreadCheckpointContext(threadId)
+          .pipe(
+            Effect.catch((cause) =>
+              Effect.logError("project runtime: thread lookup failed", { threadId, cause }).pipe(
+                Effect.as(Option.none()),
+              ),
+            ),
+          );
+        if (Option.isNone(thread) || thread.value.projectId !== input.projectId) {
+          return yield* new RunThreadNotInProject({ threadId });
+        }
+      }
       const plan = yield* runProfiles.resolve(input.workspaceRoot, input.profileId);
       const runId = NodeCrypto.randomUUID();
       const startedAt = yield* nowIso;
@@ -365,7 +417,8 @@ const make = (options: RunServiceOptions) =>
       }
       yield* Deferred.await(entry.launched);
       const handle = entry.handle;
-      if (handle !== null) {
+      // Once the program has exited, its run is already cleaning up; just wait for it.
+      if (handle !== null && isLive(entry.state.status)) {
         entry.stopRequested = true;
         // Signals the process group captured at spawn: SIGTERM, then SIGKILL after the grace.
         yield* handle.kill({ killSignal: "SIGTERM", forceKillAfter: stopGrace }).pipe(
