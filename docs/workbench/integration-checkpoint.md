@@ -6,13 +6,13 @@ Orchestrator state for the 2026-10-02 handoff
 
 ## Milestones
 
-| Id  | Milestone                                                           | State              | Evidence                                                                           |
-| --- | ------------------------------------------------------------------- | ------------------ | ---------------------------------------------------------------------------------- |
-| M1  | Phase U: latest T3 merged, compiling, focused tests, record, pushed | Review in progress | Merge `b55344d8`; [reconciliation record](./upstream-reconciliation-2026-10-02.md) |
-| M2  | U2 live gate in isolated state                                      | Not started        | —                                                                                  |
-| M3  | PRs 1–8 and M1–M4 slices                                            | Not started        | —                                                                                  |
-| M4  | Phase C comparison                                                  | Not started        | —                                                                                  |
-| M5  | Final report                                                        | Not started        | —                                                                                  |
+| Id  | Milestone                                                           | State       | Evidence                                                                                                            |
+| --- | ------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------- |
+| M1  | Phase U: latest T3 merged, compiling, focused tests, record, pushed | Done        | Merge `b55344d8`, review fixes `0a28a8d4`, pushed; [reconciliation record](./upstream-reconciliation-2026-10-02.md) |
+| M2  | U2 live gate in isolated state                                      | In progress | Contract suites pass (see record); live browser pass next                                                           |
+| M3  | PRs 1–8 and M1–M4 slices                                            | Not started | —                                                                                                                   |
+| M4  | Phase C comparison                                                  | Not started | —                                                                                                                   |
+| M5  | Final report                                                        | Not started | —                                                                                                                   |
 
 ## Pins
 
@@ -50,4 +50,4 @@ client-runtime; mobile, marketing and relay are not installed.
 
 ## Next step
 
-Close adversarial review findings on the merge, then start the U2 live gate.
+Run the live browser pass: `vp run dev` in the integration worktree (state in `<worktree>/.t3`), one real provider turn, approval, interrupt, checkpoint diff/revert, dock restore, project scope. Then slice PRs 1–8 from the green tip.
