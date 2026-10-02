@@ -121,6 +121,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as ProjectWorkspace from "./projectWorkspace/ProjectWorkspace.ts";
+import { projectWorkspaceRouteLayer } from "./projectWorkspace/ProjectWorkspaceRoute.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as EngineTypeResolver from "./project/EngineTypeResolver.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -768,6 +769,8 @@ export const makeRoutesLayer = Layer.mergeAll(
     // an ORDINARY (non-route) consumer.
     generationListRouteLayer.pipe(HttpRouter.provideRequest(GenerationServiceLive)),
     generationAssetRouteLayer.pipe(HttpRouter.provideRequest(GenerationServiceLive)),
+    // ProjectWorkspace is ambient through WorkspaceLayerLive; no provideRequest needed.
+    projectWorkspaceRouteLayer,
   ),
   McpHttpServer.layer(GenerationServiceLive).pipe(Layer.provide(McpSessionRegistry.layer)),
   // Last, so no route layer can replace the server's one TracerDisabledWhen.
