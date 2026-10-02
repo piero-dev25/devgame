@@ -175,6 +175,8 @@ interface EvidenceContext {
   readonly launch: RunEvidence.LaunchProvenance;
   readonly plan: RunProfiles.LaunchPlan;
   readonly outputs: ReadonlyArray<RunProfiles.BoundOutput>;
+  readonly workspaceRoot: string;
+  readonly runDir: string;
   readonly logPath: string;
 }
 
@@ -213,6 +215,8 @@ const make = (options: RunServiceOptions) =>
     const publish = (receipt: RunReceipt) => PubSub.publish(receipts, receipt);
     /** Insertion-ordered; mutated only inside synchronous blocks, so check-and-reserve is atomic. */
     const runs = new Map<string, RunEntry>();
+    /** The newest failed evidence registration per project, until one succeeds. */
+    const registerFailures = new Map<ProjectId, string>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
     const forgetOldRuns = (projectId: ProjectId) => {
@@ -303,6 +307,8 @@ const make = (options: RunServiceOptions) =>
           yield* runEvidence
             .register({
               projectId,
+              workspaceRoot: evidence.workspaceRoot,
+              runDir: evidence.runDir,
               runId,
               profileId: entry.state.profileId,
               threadId: entry.state.threadId,
@@ -319,8 +325,21 @@ const make = (options: RunServiceOptions) =>
               logPatterns: evidence.plan.logPatterns,
             })
             .pipe(
+              Effect.andThen(Effect.sync(() => registerFailures.delete(projectId))),
               Effect.catch((error) =>
-                Effect.logWarning("project runtime: run evidence not recorded", { runId, error }),
+                Effect.logWarning("project runtime: run evidence not recorded", {
+                  runId,
+                  error,
+                }).pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      registerFailures.set(
+                        projectId,
+                        `Evidence of the run that ended at ${endedAt} was not recorded: ${error.message}`,
+                      );
+                    }),
+                  ),
+                ),
               ),
             );
         }
@@ -344,6 +363,8 @@ const make = (options: RunServiceOptions) =>
             launch: yield* runEvidence.captureLaunch({ workspaceRoot, build: plan.build }),
             plan,
             outputs: bound.outputs,
+            workspaceRoot,
+            runDir,
             logPath,
           }
         : null;
@@ -499,18 +520,19 @@ const make = (options: RunServiceOptions) =>
           .filter((entry) => entry.projectId === input.projectId)
           .map((entry) => entry.state)
           .toReversed();
-        // An unreadable registry hides evidence; it never hides the runs.
-        const evidence = yield* runEvidence
-          .latest(input)
-          .pipe(
-            Effect.catch((error) =>
-              Effect.logWarning("project runtime: run evidence unreadable", { error }).pipe(
-                Effect.as([]),
-              ),
-            ),
-          );
+        // An unreadable registry hides evidence, and says so; it never hides the runs.
+        const read = yield* runEvidence.latest(input).pipe(Effect.result);
+        if (read._tag === "Failure") {
+          yield* Effect.logWarning("project runtime: run evidence unreadable", {
+            error: read.failure,
+          });
+        }
         return {
-          evidence,
+          evidence: read._tag === "Success" ? read.success : [],
+          evidenceError:
+            read._tag === "Failure"
+              ? read.failure.message
+              : (registerFailures.get(input.projectId) ?? null),
           profiles:
             loaded._tag === "Success"
               ? loaded.success.map(({ profile, valid, issues }) => ({

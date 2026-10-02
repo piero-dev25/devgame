@@ -35,6 +35,8 @@ import * as RunService from "./RunService.ts";
 
 const PROJECT = ProjectId.make("run-service-project");
 const OTHER_PROJECT = ProjectId.make("run-service-other");
+/** Only the unreadable-registry test uses it, so its broken registry affects no other test. */
+const BAD_REGISTRY_PROJECT = ProjectId.make("run-service-bad-registry");
 const OWN_THREAD = ThreadId.make("run-service-thread");
 const OTHER_THREAD = ThreadId.make("run-service-other-thread");
 
@@ -440,6 +442,39 @@ it.layer(TestLayer, { excludeTestServices: true })("RunService", (it) => {
         expect(record?.outcome).toBe("failed");
         expect(record?.checks[0]).toMatchObject({ status: "mismatch" });
         expect(record?.checks[0]?.line).toContain("effect age 0.50");
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
+    it.effect("says why evidence is missing when the registry cannot be read", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const h = yield* setup;
+        const registry = `${stateDir}/runs/${BAD_REGISTRY_PROJECT}/evidence.json`;
+        yield* fileSystem.makeDirectory(`${stateDir}/runs/${BAD_REGISTRY_PROJECT}`, {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(registry, '{"version": 7}');
+
+        const { run } = yield* h.start("capture-0.65", BAD_REGISTRY_PROJECT);
+        yield* h.awaitReceipt((r) => r._tag === "exited" && r.runId === run.runId);
+        const unreadable = yield* h.service.status({
+          projectId: BAD_REGISTRY_PROJECT,
+          workspaceRoot: h.root,
+        });
+        // Readable again, the registry still lacks the run that ended meanwhile.
+        yield* fileSystem.remove(registry);
+        const afterRepair = yield* h.service.status({
+          projectId: BAD_REGISTRY_PROJECT,
+          workspaceRoot: h.root,
+        });
+
+        expect(unreadable.evidence).toEqual([]);
+        expect(unreadable.evidenceError).toBe(
+          `The run evidence registry at ${registry} could not be read.`,
+        );
+        expect(afterRepair.evidence).toEqual([]);
+        expect(afterRepair.evidenceError).toContain("was not recorded");
       }).pipe(Effect.provide(makeServiceLayer())),
     );
 

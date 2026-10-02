@@ -258,49 +258,92 @@ describe("resolveRuntimePanelView: missing manifest", () => {
     expect(row.canLaunch).toBe(false);
   });
 
-  it("shows a profile's recorded evidence even when the server no longer lists its run", () => {
-    const evidence: RunEvidenceView = {
-      record: {
-        schema: "devgame.run-evidence/1",
-        runId: "run-before-restart",
-        projectId: ProjectId.make("project-1"),
-        profileId: "arena",
-        threadId: null,
-        workspaceCard: null,
-        source: { revision: "unknown", dirty: "unknown" },
-        build: { path: "bin/game", bytes: "unknown", mtime: "unknown", sha256: "unknown" },
-        startedAt: "2026-10-03T09:00:00.000Z",
-        endedAt: "2026-10-03T09:00:05.000Z",
-        registeredAt: "2026-10-03T09:00:05.000Z",
-        runStatus: "exited",
-        exitCode: 3,
-        signal: null,
-        log: {
-          absolutePath: "/state/run.log",
-          exists: true,
-          bytes: 10,
-          bytesReceived: 10,
-          sha256: null,
-          problem: null,
-        },
-        checks: [],
-        artifacts: [],
-        outcome: "failed",
-        failures: ["The program exited with code 3."],
+  const evidence: RunEvidenceView = {
+    record: {
+      schema: "devgame.run-evidence/1",
+      runId: "run-before-restart",
+      projectId: ProjectId.make("project-1"),
+      profileId: "arena",
+      threadId: null,
+      workspaceCard: null,
+      source: { revision: "unknown", dirty: "unknown" },
+      build: { path: "bin/game", bytes: "unknown", mtime: "unknown", sha256: "unknown" },
+      startedAt: "2026-10-03T09:00:00.000Z",
+      endedAt: "2026-10-03T09:00:05.000Z",
+      registeredAt: "2026-10-03T09:00:05.000Z",
+      runStatus: "exited",
+      exitCode: 3,
+      signal: null,
+      log: {
+        absolutePath: "/state/run.log",
+        exists: true,
+        bytes: 10,
+        bytesReceived: 10,
+        sha256: null,
+        problem: null,
       },
-      freshness: "stale",
-      freshnessReasons: ["Build changed: bin/game is gone or unreadable now."],
-    };
+      checks: [],
+      artifacts: [],
+      outcome: "failed",
+      failures: ["The program exited with code 3."],
+    },
+    freshness: "stale",
+    freshnessReasons: ["Build changed: bin/game is gone or unreadable now."],
+  };
 
+  it("shows a profile's recorded evidence even when the server no longer lists its run", () => {
     const row = arena(statusView(resolve({ status: status([], { evidence: [evidence] }) })));
 
     expect(row.run).toBeNull();
+    expect(row.evidenceFromEarlierRun).toBe(false);
     expect(row.evidence).toMatchObject({
       runId: "run-before-restart",
       passed: false,
       freshnessLabel: "Stale",
       failures: ["The program exited with code 3."],
     });
+  });
+
+  it("marks evidence as an earlier run's while the newest run has none recorded yet", () => {
+    // The newest run has exited, but its evidence is still being registered.
+    const exited = run({
+      runId: "run-new",
+      status: "exited",
+      exitCode: 1,
+      endedAt: "2026-10-03T10:00:05.000Z",
+    });
+    const pending = arena(
+      statusView(resolve({ status: status([exited], { evidence: [evidence] }) })),
+    );
+    const own = arena(
+      statusView(
+        resolve({
+          status: status([exited], {
+            evidence: [{ ...evidence, record: { ...evidence.record, runId: "run-new" } }],
+          }),
+        }),
+      ),
+    );
+
+    expect(pending.evidence?.runId).toBe("run-before-restart");
+    expect(pending.evidenceFromEarlierRun).toBe(true);
+    expect(own.evidenceFromEarlierRun).toBe(false);
+  });
+
+  it("shows why evidence is missing instead of showing none", () => {
+    const failed = statusView(
+      resolve({
+        status: status([], {
+          evidence: [],
+          evidenceError: "The run evidence registry at /state/evidence.json could not be read.",
+        }),
+      }),
+    );
+    const older = statusView(resolve({ status: status([]) }));
+
+    expect(failed.evidenceError).toContain("could not be read");
+    // A server from before evidence errors sends no field at all.
+    expect(older.evidenceError).toBeNull();
   });
 
   it("is loading before the first read, and offline with nothing known when never read", () => {

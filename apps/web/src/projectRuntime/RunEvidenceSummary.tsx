@@ -20,10 +20,13 @@ export function RunEvidenceSummary(props: {
   evidence: RunEvidenceSummaryView;
   /** Opens a project-relative artifact in the Files panel; null when nothing can open. */
   onOpen: ((relativePath: string) => void) | null;
+  /** Shown above the outcome, e.g. that this evidence is from an earlier run; or null. */
+  note: string | null;
 }) {
   const { evidence } = props;
   return (
     <div className="flex flex-col gap-1 rounded border border-border/50 px-2 py-1.5 text-2xs">
+      {props.note ? <p className="text-muted-foreground">{props.note}</p> : null}
       <div className="flex items-center gap-1.5">
         <span
           className={cn(

@@ -181,7 +181,7 @@ function WorkspaceCard(props: {
         </ul>
       )}
       {props.evidence ? (
-        <RunEvidenceSummary evidence={props.evidence} onOpen={props.onOpen} />
+        <RunEvidenceSummary evidence={props.evidence} onOpen={props.onOpen} note={null} />
       ) : null}
     </li>
   );

@@ -802,7 +802,13 @@ Depends on: PR1, PR6. Estimate: ~330 lines.
 - `evidence.build` names the build to fingerprint when the executable is a wrapper (the Kaigen
   CAPTURE profile runs `tools/capture_kaigen_vfx.sh`, so it fingerprints the game binary).
 - Freshness (`fresh` / `stale` / `unknown`) is computed on every status read from the current
-  HEAD and build sha256; nothing stores it.
+  HEAD, tracked-file dirty state and build sha256; nothing stores it. A run on uncommitted
+  changes is `unknown`, never `fresh`; a clean run goes `stale` once tracked files change.
+- A log pattern passes when any log line matches the regex; the literal-prefix line is only used
+  to show the wrong value when none does. Only a missing registry reads as empty; any other read
+  error refuses to write, and status reports it as `evidenceError`.
+- Outputs, the run log and the build are resolved through symlinks at record and read time and
+  must stay inside the project or the run's directory.
 
 **Reuse**
 

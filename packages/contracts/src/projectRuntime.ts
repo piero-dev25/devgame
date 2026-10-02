@@ -222,7 +222,10 @@ export const RUN_EVIDENCE_SCHEMA = "devgame.run-evidence/1";
 /** Provenance DevGame could not establish. Never replaced by a guess. */
 const Unknown = Schema.Literal("unknown");
 
-/** The project's source at launch: `git rev-parse HEAD`, and whether the tree had changes. */
+/**
+ * The project's source at launch: `git rev-parse HEAD`, and whether tracked
+ * files had uncommitted changes (untracked files do not count).
+ */
 export const RunSourceProvenance = Schema.Struct({
   revision: Schema.Union([Unknown, Schema.String]),
   dirty: Schema.Union([Unknown, Schema.Boolean]),
@@ -249,7 +252,7 @@ export const RunEvidenceArtifact = Schema.Struct({
   exists: Schema.Boolean,
   bytes: Schema.NullOr(Schema.Number),
   sha256: Schema.NullOr(Schema.String),
-  /** Why the artifact does not count (missing, empty, not a file), or null. */
+  /** Why the artifact does not count (missing, empty, not a file, resolves elsewhere), or null. */
   problem: Schema.NullOr(Schema.String),
 });
 export type RunEvidenceArtifact = typeof RunEvidenceArtifact.Type;
@@ -269,10 +272,10 @@ export type RunEvidenceLog = typeof RunEvidenceLog.Type;
 
 /**
  * One `logPatterns` entry checked against the log:
- * - `matched`: `line` matches.
- * - `mismatch`: the last line that starts like the pattern (its literal
- *   prefix, e.g. `VFX capture probe:`) does not match; `line` is that line,
- *   so a wrong capture age shows the age the program reported.
+ * - `matched`: some line matches; `line` is the last one that does.
+ * - `mismatch`: no line matches, but one starts like the pattern (its literal
+ *   prefix, e.g. `VFX capture probe:`); `line` is the last such line, so a
+ *   wrong capture age shows the age the program reported.
  * - `missing`: no line matches or starts like it.
  * - `log-unavailable`: there was no log to check.
  */
@@ -313,10 +316,12 @@ export type RunEvidenceRecord = typeof RunEvidenceRecord.Type;
 
 /**
  * A record with its freshness, computed each time it is read:
- * - `stale`: the project's HEAD, or the build's sha256, is not what the run used.
+ * - `stale`: the project's HEAD, or the build's sha256, is not what the run
+ *   used, or a run on a clean tree now has uncommitted changes in the tree.
  * - `unknown`: nothing DevGame could compare differs, but some provenance
- *   (then or now) is unknown.
- * - `fresh`: both match.
+ *   (then or now) is unknown, or the run used uncommitted changes, which
+ *   cannot be compared afterwards.
+ * - `fresh`: HEAD and build match, and the tree was and is clean.
  */
 export const RunEvidenceView = Schema.Struct({
   record: RunEvidenceRecord,
@@ -330,12 +335,16 @@ export type RunEvidenceView = typeof RunEvidenceView.Type;
  * `profilesError` is set when `devgame.runtime.json` cannot be read; the runs
  * are listed either way. `evidence` holds the newest record per profile,
  * newest first; it is optional so a server without evidence still decodes.
+ * `evidenceError` says why evidence cannot be shown or was not recorded (an
+ * unreadable registry, a failed write), so missing evidence never looks like
+ * evidence that was never captured.
  */
 export const RunStatusSuccess = Schema.Struct({
   profiles: Schema.Array(RunProfileSummary),
   profilesError: Schema.NullOr(Schema.String),
   runs: Schema.Array(RunState),
   evidence: Schema.optionalKey(Schema.Array(RunEvidenceView)),
+  evidenceError: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type RunStatusSuccess = typeof RunStatusSuccess.Type;
 

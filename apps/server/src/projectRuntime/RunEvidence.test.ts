@@ -78,6 +78,8 @@ const makeProject = Effect.fn("makeProject")(function* (withGit: boolean) {
   yield* writeFile(`${root}/${BUILD}`, "build v1");
   yield* writeFile(`${root}/workspace/workspace.json`, WORKSPACE_JSON);
   yield* writeFile(`${root}/src/game.c`, "int main() {}\n");
+  // Like a real game repo: the build is not versioned, only fingerprinted.
+  yield* writeFile(`${root}/.gitignore`, "Runtime/out/\n");
   if (withGit) {
     git(root, "init", "-q");
     git(root, "add", ".");
@@ -122,6 +124,8 @@ const register = Effect.fn("register")(function* (
   const now = yield* DateTime.now;
   return yield* evidence.register({
     projectId: PROJECT,
+    workspaceRoot: root,
+    runDir: run.runDir,
     runId,
     profileId: "capture-fire-front-0.65",
     threadId: THREAD,
@@ -311,6 +315,90 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("RunEvidence", (it) 
       }).pipe(Effect.provide(makeTestLayer())),
     );
 
+    it.effect("matches any pattern the regex matches: optional text, alternation, anchors", () =>
+      Effect.gen(function* () {
+        const root = yield* makeProject(true);
+        const log = [
+          "screenshot saved: /a.png",
+          "listening on 8080",
+          "debug: last screenshot saved: none",
+          "",
+        ].join("\n");
+        const patterns = ["screenshots? saved:", "ready|listening", "^screenshot saved:"];
+
+        const record = yield* register(root, "run-regex", yield* makeRun("regex", { log }), {
+          logPatterns: patterns,
+        });
+        const absent = yield* register(
+          root,
+          "run-regex-absent",
+          yield* makeRun("regex-absent", { log: "debug: last screenshot saved: none\n" }),
+          { logPatterns: patterns },
+        );
+
+        expect(record.checks).toEqual([
+          { pattern: patterns[0], status: "matched", line: "debug: last screenshot saved: none" },
+          { pattern: patterns[1], status: "matched", line: "listening on 8080" },
+          { pattern: patterns[2], status: "matched", line: "screenshot saved: /a.png" },
+        ]);
+        expect(record.outcome).toBe("passed");
+        // With no match, an anchored pattern does not claim a line that only contains its prefix.
+        expect(absent.checks).toEqual([
+          { pattern: patterns[0], status: "matched", line: "debug: last screenshot saved: none" },
+          { pattern: patterns[1], status: "missing", line: null },
+          { pattern: patterns[2], status: "missing", line: null },
+        ]);
+      }).pipe(Effect.provide(makeTestLayer())),
+    );
+
+    it.effect("never fingerprints a file a symlink points to outside the project or run", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const root = yield* makeProject(true);
+        const elsewhere = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-elsewhere-" });
+        yield* writeFile(`${elsewhere}/secret`, "not the project's");
+        const run = yield* makeRun("links", { png: null });
+        yield* fileSystem.symlink(`${elsewhere}/secret`, `${run.runDir}/fire-front-t00_65.png`);
+        yield* fileSystem.makeDirectory(`${root}/work`);
+        yield* fileSystem.symlink(`${elsewhere}/secret`, `${root}/work/shot.png`);
+
+        const record = yield* register(root, "run-links", run, {
+          outputs: [
+            {
+              name: "capture",
+              kind: "image",
+              path: "{{runDir}}/fire-front-t00_65.png",
+              location: "run",
+              relativePath: "fire-front-t00_65.png",
+              absPath: `${run.runDir}/fire-front-t00_65.png`,
+            },
+            {
+              name: "shot",
+              kind: "image",
+              path: "work/shot.png",
+              location: "project",
+              relativePath: "work/shot.png",
+              absPath: `${root}/work/shot.png`,
+            },
+          ],
+        });
+        // After a clean run, the build is swapped for a link to a file elsewhere.
+        yield* fileSystem.remove(`${root}/${BUILD}`);
+        yield* fileSystem.symlink(`${elsewhere}/secret`, `${root}/${BUILD}`);
+        const [view] = yield* latest(root);
+
+        expect(record.outcome).toBe("failed");
+        expect(record.artifacts).toMatchObject([
+          { bytes: null, sha256: null, problem: "Resolves outside the run directory." },
+          { bytes: null, sha256: null, problem: "Resolves outside the project." },
+        ]);
+        expect(view?.freshness).toBe("stale");
+        expect(view?.freshnessReasons).toEqual([
+          `Build changed: ${BUILD} resolves outside the project now.`,
+        ]);
+      }).pipe(Effect.provide(makeTestLayer())),
+    );
+
     it.effect("records a missing or truncated run log explicitly", () =>
       Effect.gen(function* () {
         const root = yield* makeProject(true);
@@ -403,6 +491,29 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("RunEvidence", (it) 
         expect(yield* fileSystem.readFileString(file)).toBe('{"version": 7, "notOurs": true}');
       }).pipe(Effect.provide(makeTestLayer())),
     );
+
+    it.effect("treats a registry it cannot open as unreadable, never as empty", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const root = yield* makeProject(true);
+        const file = `${yield* registryDir}/evidence.json`;
+        yield* register(root, "run-kept", yield* makeRun("kept", {}));
+        const before = yield* fileSystem.readFileString(file);
+        yield* fileSystem.chmod(file, 0o000);
+
+        const registerError = yield* register(root, "run-new", yield* makeRun("new", {})).pipe(
+          Effect.flip,
+        );
+        const latestError = yield* latest(root).pipe(Effect.flip);
+        yield* fileSystem.chmod(file, 0o644);
+
+        expect(registerError._tag).toBe("RunEvidenceRegistryUnreadable");
+        expect(latestError._tag).toBe("RunEvidenceRegistryUnreadable");
+        // The earlier record is still there: nothing replaced the file.
+        expect(yield* fileSystem.readFileString(file)).toBe(before);
+        expect((yield* readRegistry).runs.map((entry) => entry.runId)).toEqual(["run-kept"]);
+      }).pipe(Effect.provide(makeTestLayer())),
+    );
   });
 
   describe("provenance and freshness", () => {
@@ -414,6 +525,41 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("RunEvidence", (it) 
         const launch = yield* captureLaunch(root);
 
         expect(launch.source).toEqual({ revision: git(root, "rev-parse", "HEAD"), dirty: true });
+      }).pipe(Effect.provide(makeTestLayer())),
+    );
+
+    it.effect("never calls evidence current when the run or the tree has uncommitted changes", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const root = yield* makeProject(true);
+        // A run on uncommitted source: same HEAD later, but its source is gone.
+        yield* writeFile(`${root}/src/game.c`, "int main() { return 1; }\n");
+        yield* register(root, "run-dirty", yield* makeRun("dirty", {}));
+        const dirtyRun = (yield* latest(root))[0];
+        git(root, "checkout", "-q", "--", "src/game.c");
+        const dirtyRunReverted = (yield* latest(root))[0];
+
+        // A clean run, then uncommitted changes in the tree.
+        yield* register(root, "run-clean", yield* makeRun("clean", {}));
+        // Untracked files, such as a run's own captures, do not count.
+        yield* writeFile(`${root}/work/devgame-captures/shot.png`, "png");
+        const withUntracked = (yield* latest(root))[0];
+        yield* writeFile(`${root}/src/game.c`, "int main() { return 2; }\n");
+        const treeDirtyNow = (yield* latest(root))[0];
+        yield* fileSystem.remove(`${root}/work`, { recursive: true });
+
+        expect(dirtyRun?.record.source.dirty).toBe(true);
+        expect(dirtyRun?.freshness).toBe("unknown");
+        expect(dirtyRun?.freshnessReasons).toEqual([
+          "The run used uncommitted changes, so its source cannot be compared.",
+        ]);
+        expect(dirtyRunReverted?.freshness).toBe("unknown");
+        expect(withUntracked?.record.runId).toBe("run-clean");
+        expect(withUntracked?.freshness).toBe("fresh");
+        expect(treeDirtyNow?.freshness).toBe("stale");
+        expect(treeDirtyNow?.freshnessReasons).toEqual([
+          "Source changed: the working tree has uncommitted changes the run did not use.",
+        ]);
       }).pipe(Effect.provide(makeTestLayer())),
     );
 
