@@ -10,7 +10,7 @@ Orchestrator state for the 2026-10-02 handoff
 | --- | ------------------------------------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------- |
 | M1  | Phase U: latest T3 merged, compiling, focused tests, record, pushed | Done        | Merge `b55344d8`, review fixes `0a28a8d4`, pushed; [reconciliation record](./upstream-reconciliation-2026-10-02.md) |
 | M2  | U2 live gate in isolated state                                      | Done        | Contract suites and one integrated browser pass; see the U2 sections of the reconciliation record                   |
-| M3  | PRs 1–8 and M1–M4 slices                                            | Not started | —                                                                                                                   |
+| M3  | PRs 1–8 and M1–M4 slices | In progress | Integration branch `codex/devgame-workspace`; merged PR1 `e58795a6`, PR2 `fea15d5b`, PR5 `c0591188`, PR3 `6bf7e6ee` |
 | M4  | Phase C comparison                                                  | Not started | —                                                                                                                   |
 | M5  | Final report                                                        | Not started | —                                                                                                                   |
 
@@ -26,7 +26,7 @@ Orchestrator state for the 2026-10-02 handoff
 | Path                                                           | Branch                           | Base       | Owner        | State dir                        | Owned PIDs |
 | -------------------------------------------------------------- | -------------------------------- | ---------- | ------------ | -------------------------------- | ---------- |
 | `~/Documents/Projects/devgame` (primary clone, blobless)       | `main`                           | `4219e871` | orchestrator | —                                | none       |
-| `~/Documents/Projects/devgame/.claude/worktrees/upstream-sync` | `codex/upstream-sync-2026-10-02` | `ed232bc5` | orchestrator | `<worktree>/.t3` (unused so far) | none       |
+| `~/Documents/Projects/devgame/.claude/worktrees/upstream-sync` | `codex/devgame-workspace` (slices branch from here) | `ed232bc5` | orchestrator | `<worktree>/.t3` (unused so far) | none       |
 
 Toolchain: `~/.local/share/devgame-toolchain` (Node v24.21.0, pnpm 11.10.0 via
 corepack). Dependencies installed for server, web, desktop, contracts, shared,
@@ -48,6 +48,24 @@ client-runtime; mobile, marketing and relay are not installed.
 - Storage isolation (#98): whether DevGame moves off `~/.t3`.
 - `devgame.fun` domain ownership (used in identity strings).
 
+## Slice log
+
+| Slice | Branch head | Merged into integration | Review |
+| --- | --- | --- | --- |
+| PR1 workspace reader | `codex/workspace-reader` `26edcfd3` | `e58795a6` | 4 minor, fixed with tests |
+| PR2 workspace route | `codex/workspace-route` `9083dc0b` | `fea15d5b` | none |
+| PR5 run profiles | `codex/kaigen-profiles` `eb0777fe` | `c0591188` | 1 major (dangling-symlink output escape) + 3 minor, fixed |
+| PR3 workspace panel | `codex/workspace-panel` `8d3f9ac2` | `6bf7e6ee` | 3 minor, fixed |
+
+Disk throttle (2026-10-03, at the disk session's request): one agent at a time,
+all in the integration worktree; no new worktrees or `node_modules` while free
+space is under 12 GB.
+
+Kaigen target: `KaigenHordeSpike/Runtime/out/macos/debug/kaigen-horde-spike`
+(arm64, built 2026-09-23). HordeSpike has uncommitted `horde.c` changes, so
+build provenance must be reported as possibly stale.
+
 ## Next step
 
-Re-map PRs 1–8 and M1–M4 to post-sync paths, then build slices from the green tip `codex/upstream-sync-2026-10-02`.
+Batch 2: PR6 runner, PR4 Use in chat, PR7 runtime panel, PR8 evidence. Then
+batch 3: M1–M4 Mr. Mak import. Then the one authorized Kaigen launch.
