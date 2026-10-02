@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "vfx-arena",
+      "name": "VFX arena (existing debug build)",
+      "executable": "Runtime/out/macos/debug/kaigen-horde-spike",
+      "cwd": "Runtime",
+      "args": ["--vfx"],
+      "outputs": []
+    },
+    {
+      "id": "vfx-capture-fire-front-0.65",
+      "name": "Capture fire front at 0.65 s (no build)",
+      "executable": "Runtime/out/macos/debug/kaigen-horde-spike",
+      "cwd": "Runtime",
+      "args": [
+        "--vfx",
+        "--commands",
+        "0.30:key_down:1;0.36:key_up:1;0.40:key_down:Space;0.46:key_up:Space;0.47:key_down:Z;0.49:key_up:Z;0.50:vfx_capture_hold:0.65;0.55:key_down:R;0.61:key_up:R;1.5500:vfx_capture_probe;1.6500:screenshot:../work/devgame-captures/fire-front-t00_65.png:full;2.4500:quit"
+      ],
+      "outputs": [
+        {
+          "name": "capture",
+          "kind": "image",
+          "path": "work/devgame-captures/fire-front-t00_65.png"
+        }
+      ],
+      "evidence": {
+        "logPatterns": ["VFX capture probe:.*effect age 0\\.65(,|$)", "screenshot saved:"]
+      }
+    }
+  ]
+}
