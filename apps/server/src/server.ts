@@ -670,7 +670,8 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   Layer.provideMerge(
     RunService.layer.pipe(Layer.provide(RunEvidence.layer.pipe(Layer.provide(GitVcsDriver.layer)))),
   ),
-  // Read-only Mr. Mak import planning: committed-tree reads and conflict checks only.
+  // Mr. Mak import: plans from committed-tree reads only, then writes into a
+  // destination project (staged copies, git init, one baseline commit). Never the source.
   Layer.provideMerge(
     MrMakImport.layer.pipe(Layer.provide(GitVcsDriver.layer), Layer.provide(ProcessRunner.layer)),
   ),
