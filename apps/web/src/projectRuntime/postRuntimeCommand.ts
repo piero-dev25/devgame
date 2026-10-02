@@ -14,17 +14,17 @@ import {
   RunStopResult,
   type ThreadId,
 } from "@t3tools/contracts";
-import {
-  ConnectionBlockedError,
-  type PreparedConnection,
-} from "@t3tools/client-runtime/connection";
-import type { RemoteEnvironmentRequestError } from "@t3tools/client-runtime/rpc";
+import type { PreparedConnection } from "@t3tools/client-runtime/connection";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { FetchHttpClient } from "effect/unstable/http";
 
-import { postForkEnvironmentRoute } from "../lib/forkEnvironmentRoute";
+import {
+  classifyForkRouteFailure,
+  type ForkRouteFailure,
+  postForkEnvironmentRoute,
+} from "../lib/forkEnvironmentRoute";
 import { runtime } from "../lib/runtime";
 
 /** Stop waits out the server's SIGTERM grace before SIGKILL, so leave room for it. */
@@ -40,45 +40,8 @@ export type RuntimeCommandOutcome =
     }
   /** The server refused with a reason: unknown profile, missing executable, run not ours. */
   | { readonly _tag: "refused"; readonly message: string }
-  /** This connection lacks the scope (`terminal:operate`); the route answers a text 403. */
-  | { readonly _tag: "notPermitted" }
-  /** No answer: the request could not be sent or timed out. */
-  | { readonly _tag: "unreachable"; readonly message: string }
-  /**
-   * The environment answered, but not with a result: an auth error, another
-   * error status, or a body that does not match the contract.
-   */
-  | { readonly _tag: "failed"; readonly message: string };
-
-const NOT_PERMITTED: RuntimeCommandOutcome = { _tag: "notPermitted" };
-
-const isConnectionBlockedError = Schema.is(ConnectionBlockedError);
-const UNREADABLE_RESPONSE = "It answered with a response this app could not read.";
-
-/** Sorts a failed request into "no answer" versus "answered with an error". */
-function classifyFailure(
-  error: RemoteEnvironmentRequestError | Schema.SchemaError,
-): RuntimeCommandOutcome {
-  switch (error._tag) {
-    case "RemoteEnvironmentAuthTimeoutError":
-      return { _tag: "unreachable", message: error.message };
-    case "RemoteEnvironmentAuthFetchError":
-      // A rejected access token surfaces here wrapped; that is an auth answer, not a network failure.
-      return isConnectionBlockedError(error.cause)
-        ? { _tag: "failed", message: error.cause.detail }
-        : { _tag: "unreachable", message: error.message };
-    case "RemoteEnvironmentAuthUndeclaredStatusError":
-      return error.status === 403
-        ? NOT_PERMITTED
-        : { _tag: "failed", message: `It answered with status ${error.status}.` };
-    case "RemoteEnvironmentAuthInvalidJsonError":
-    case "SchemaError":
-      return { _tag: "failed", message: UNREADABLE_RESPONSE };
-    default:
-      // Every typed environment error (auth, scope, bad request, internal) is a server answer.
-      return { _tag: "failed", message: error.message };
-  }
-}
+  /** `notPermitted`: this connection lacks the scope (`terminal:operate`). */
+  | ForkRouteFailure;
 
 const decodeRunStartResult = Schema.decodeUnknownEffect(RunStartResult);
 const decodeRunStopResult = Schema.decodeUnknownEffect(RunStopResult);
@@ -115,7 +78,9 @@ function postCommand(input: {
     }).pipe(
       // Every typed failure becomes an outcome the panel can word truthfully. The
       // shared helper fails a fork route's plain-text 403 as an undeclared status.
-      Effect.catch((error) => Effect.succeed(classifyFailure(error))),
+      Effect.catch((error): Effect.Effect<RuntimeCommandOutcome> =>
+        Effect.succeed(classifyForkRouteFailure(error)),
+      ),
       Effect.provide(FetchHttpClient.layer),
     ),
   );
