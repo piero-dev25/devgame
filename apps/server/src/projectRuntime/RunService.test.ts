@@ -23,16 +23,20 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as WorkspaceEntries from "../workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "../workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import * as RunEvidence from "./RunEvidence.ts";
 import * as RunProfiles from "./RunProfiles.ts";
 import * as RunService from "./RunService.ts";
 
 const PROJECT = ProjectId.make("run-service-project");
 const OTHER_PROJECT = ProjectId.make("run-service-other");
+/** Only the unreadable-registry test uses it, so its broken registry affects no other test. */
+const BAD_REGISTRY_PROJECT = ProjectId.make("run-service-bad-registry");
 const OWN_THREAD = ThreadId.make("run-service-thread");
 const OTHER_THREAD = ThreadId.make("run-service-other-thread");
 
@@ -50,6 +54,10 @@ process.stdout.write("ready cwd=" + process.cwd() + " env=" + env + " argv=" + J
 if (mode === "exit") {
   process.stderr.write("exiting early\\n");
   process.exitCode = Number(arg);
+} else if (mode === "capture") {
+  const output = process.argv[4];
+  require("node:fs").writeFileSync(output, "png bytes");
+  process.stdout.write("VFX capture probe: effect 1 view front, effect age " + arg + ", ok\\nscreenshot saved: " + output + "\\n");
 } else if (mode === "chatty") {
   process.stdout.write("x".repeat(Number(arg)) + "done\\n");
 } else if (mode === "launcher") {
@@ -87,6 +95,15 @@ const PROFILES = [
   profile("chatty", ["chatty", "40000"], {
     outputs: [{ name: "shot", kind: "image", path: "work/captures/shot.png" }],
   }),
+  ...(["0.65", "0.50"] as const).map((age) =>
+    profile(`capture-${age}`, ["capture", age, "{{runDir}}/shot.png"], {
+      outputs: [{ name: "shot", kind: "image", path: "{{runDir}}/shot.png" }],
+      evidence: {
+        logPatterns: ["VFX capture probe:.*effect age 0\\.65(,|$)", "screenshot saved:"],
+        workspaceCard: { entityId: "fire-front" },
+      },
+    }),
+  ),
   profile("missing", [], { executable: "bin/not-built" }),
   profile("not-executable", [], { executable: "bin/readme" }),
   profile("bad-interpreter", [], { executable: "bin/bad-interpreter" }),
@@ -110,6 +127,12 @@ const makeServiceLayer = () =>
         ),
         Layer.provide(WorkspacePaths.layer),
         Layer.provide(VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess.layer))),
+      ),
+    ),
+    Layer.provide(
+      RunEvidence.layer.pipe(
+        Layer.provide(GitVcsDriver.layer.pipe(Layer.provide(VcsProcess.layer))),
+        Layer.provide(WorkspacePaths.layer),
       ),
     ),
     // Which project each known thread belongs to.
@@ -371,6 +394,99 @@ it.layer(TestLayer, { excludeTestServices: true })("RunService", (it) => {
         expect(log.endsWith(state?.logTail ?? "missing")).toBe(true);
         // The runner creates each output's directory for the program to write into.
         expect(yield* fileSystem.exists(`${h.root}/work/captures`)).toBe(true);
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+  });
+
+  describe("evidence", () => {
+    it.effect("records a capture run's evidence before its exit receipt", () =>
+      Effect.gen(function* () {
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const h = yield* setup;
+
+        const { run } = yield* h.start("capture-0.65", PROJECT, OWN_THREAD);
+        yield* h.awaitReceipt((r) => r._tag === "exited" && r.runId === run.runId);
+        const status = yield* h.service.status({ projectId: PROJECT, workspaceRoot: h.root });
+
+        const runDir = `${stateDir}/runs/${PROJECT}/${run.runId}`;
+        // The state directory is shared by this file's tests, so pick this run's record.
+        const view = status.evidence?.find((entry) => entry.record.runId === run.runId);
+        expect(view?.record).toMatchObject({
+          runId: run.runId,
+          profileId: "capture-0.65",
+          threadId: OWN_THREAD,
+          workspaceCard: { entityId: "fire-front", stepPath: null },
+          outcome: "passed",
+          // The temp project is not a git repository.
+          source: { revision: "unknown", dirty: "unknown" },
+          build: { path: "bin/fake-game" },
+          log: { absolutePath: `${runDir}/run.log`, exists: true, problem: null },
+        });
+        expect(view?.record.checks.map((check) => check.status)).toEqual(["matched", "matched"]);
+        expect(view?.record.artifacts).toMatchObject([
+          { location: "run", absolutePath: `${runDir}/shot.png`, exists: true, bytes: 9 },
+        ]);
+        expect(view?.freshness).toBe("unknown");
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
+    it.effect("records a wrong capture age as a failed run", () =>
+      Effect.gen(function* () {
+        const h = yield* setup;
+
+        const { run } = yield* h.start("capture-0.50");
+        yield* h.awaitReceipt((r) => r._tag === "exited" && r.runId === run.runId);
+        const status = yield* h.service.status({ projectId: PROJECT, workspaceRoot: h.root });
+
+        const record = status.evidence?.find((entry) => entry.record.runId === run.runId)?.record;
+        expect(record?.outcome).toBe("failed");
+        expect(record?.checks[0]).toMatchObject({ status: "mismatch" });
+        expect(record?.checks[0]?.line).toContain("effect age 0.50");
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
+    it.effect("says why evidence is missing when the registry cannot be read", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const { stateDir } = yield* ServerConfig.ServerConfig;
+        const h = yield* setup;
+        const registry = `${stateDir}/runs/${BAD_REGISTRY_PROJECT}/evidence.json`;
+        yield* fileSystem.makeDirectory(`${stateDir}/runs/${BAD_REGISTRY_PROJECT}`, {
+          recursive: true,
+        });
+        yield* fileSystem.writeFileString(registry, '{"version": 7}');
+
+        const { run } = yield* h.start("capture-0.65", BAD_REGISTRY_PROJECT);
+        yield* h.awaitReceipt((r) => r._tag === "exited" && r.runId === run.runId);
+        const unreadable = yield* h.service.status({
+          projectId: BAD_REGISTRY_PROJECT,
+          workspaceRoot: h.root,
+        });
+        // Readable again, the registry still lacks the run that ended meanwhile.
+        yield* fileSystem.remove(registry);
+        const afterRepair = yield* h.service.status({
+          projectId: BAD_REGISTRY_PROJECT,
+          workspaceRoot: h.root,
+        });
+
+        expect(unreadable.evidence).toEqual([]);
+        expect(unreadable.evidenceError).toBe(
+          `The run evidence registry at ${registry} could not be read.`,
+        );
+        expect(afterRepair.evidence).toEqual([]);
+        expect(afterRepair.evidenceError).toContain("was not recorded");
+      }).pipe(Effect.provide(makeServiceLayer())),
+    );
+
+    it.effect("records nothing for a profile without evidence or outputs", () =>
+      Effect.gen(function* () {
+        const h = yield* setup;
+
+        const { run } = yield* h.start("early-exit");
+        yield* h.awaitReceipt((r) => r._tag === "exited" && r.runId === run.runId);
+
+        const status = yield* h.service.status({ projectId: PROJECT, workspaceRoot: h.root });
+        expect(status.evidence?.map((entry) => entry.record.profileId)).not.toContain("early-exit");
       }).pipe(Effect.provide(makeServiceLayer())),
     );
   });

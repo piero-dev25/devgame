@@ -20,6 +20,10 @@
  * `<stateDir>/runs/<projectId>/<runId>/run.log`, with a bounded tail kept in
  * memory. Every lifecycle step publishes a {@link RunReceipt}.
  *
+ * A profile with `evidence` or outputs has its provenance captured before the
+ * spawn and its run recorded by RunEvidence once it has ended, before the
+ * `exited` or `stopped` receipt is published.
+ *
  * @module RunService
  */
 import * as NodeCrypto from "node:crypto";
@@ -47,6 +51,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import * as RunEvidence from "./RunEvidence.ts";
 import * as RunProfiles from "./RunProfiles.ts";
 
 export class RunLaunchFailed extends Schema.TaggedError<RunLaunchFailed>()("RunLaunchFailed", {
@@ -161,6 +166,18 @@ interface RunEntry {
   readonly launched: Deferred.Deferred<void>;
   /** Done when the run has reached a final state. */
   readonly finished: Deferred.Deferred<void>;
+  /** Bytes received from the program, counted before they are written to the log file. */
+  logBytes: number;
+}
+
+/** What a run of an evidence profile registers once it has ended. */
+interface EvidenceContext {
+  readonly launch: RunEvidence.LaunchProvenance;
+  readonly plan: RunProfiles.LaunchPlan;
+  readonly outputs: ReadonlyArray<RunProfiles.BoundOutput>;
+  readonly workspaceRoot: string;
+  readonly runDir: string;
+  readonly logPath: string;
 }
 
 const isLive = (status: RunState["status"]) => status === "starting" || status === "running";
@@ -185,6 +202,7 @@ const make = (options: RunServiceOptions) =>
     const path = yield* Path.Path;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runProfiles = yield* RunProfiles.RunProfiles;
+    const runEvidence = yield* RunEvidence.RunEvidence;
     const { stateDir } = yield* ServerConfig.ServerConfig;
     const hostEnv = yield* HostProcessEnvironment;
     const hostPlatform = yield* HostProcessPlatform;
@@ -197,6 +215,8 @@ const make = (options: RunServiceOptions) =>
     const publish = (receipt: RunReceipt) => PubSub.publish(receipts, receipt);
     /** Insertion-ordered; mutated only inside synchronous blocks, so check-and-reserve is atomic. */
     const runs = new Map<string, RunEntry>();
+    /** The newest failed evidence registration per project, until one succeeds. */
+    const registerFailures = new Map<ProjectId, string>();
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
     const forgetOldRuns = (projectId: ProjectId) => {
@@ -240,6 +260,7 @@ const make = (options: RunServiceOptions) =>
       handle: ChildProcessSpawner.ChildProcessHandle,
       logFile: FileSystem.File,
       runScope: Scope.Closeable,
+      evidence: EvidenceContext | null,
     ) =>
       Effect.gen(function* () {
         const { projectId } = entry;
@@ -248,15 +269,15 @@ const make = (options: RunServiceOptions) =>
         const drain = yield* handle.all.pipe(
           Stream.runForEach((chunk) =>
             // A failed write must not stop the drain: a full pipe would block the game.
-            logFile
-              .writeAll(chunk)
-              .pipe(
-                Effect.ignore,
-                Effect.andThen(appendTail(entry, decoder.decode(chunk, { stream: true }))),
-                Effect.andThen(
-                  publish({ _tag: "logAppended", projectId, runId, bytes: chunk.byteLength }),
-                ),
+            Effect.sync(() => {
+              entry.logBytes += chunk.byteLength;
+            }).pipe(
+              Effect.andThen(logFile.writeAll(chunk).pipe(Effect.ignore)),
+              Effect.andThen(appendTail(entry, decoder.decode(chunk, { stream: true }))),
+              Effect.andThen(
+                publish({ _tag: "logAppended", projectId, runId, bytes: chunk.byteLength }),
               ),
+            ),
           ),
           Effect.ignore,
           Effect.forkIn(runScope),
@@ -281,6 +302,47 @@ const make = (options: RunServiceOptions) =>
           entry.handle = null;
           forgetOldRuns(projectId);
         });
+        // Before the receipt, so a run's exit receipt means its evidence is recorded.
+        if (evidence !== null) {
+          yield* runEvidence
+            .register({
+              projectId,
+              workspaceRoot: evidence.workspaceRoot,
+              runDir: evidence.runDir,
+              runId,
+              profileId: entry.state.profileId,
+              threadId: entry.state.threadId,
+              workspaceCard: evidence.plan.workspaceCard,
+              launch: evidence.launch,
+              startedAt: entry.state.startedAt,
+              endedAt,
+              runStatus: status,
+              exitCode,
+              signal,
+              logPath: evidence.logPath,
+              logBytesReceived: entry.logBytes,
+              outputs: evidence.outputs,
+              logPatterns: evidence.plan.logPatterns,
+            })
+            .pipe(
+              Effect.andThen(Effect.sync(() => registerFailures.delete(projectId))),
+              Effect.catch((error) =>
+                Effect.logWarning("project runtime: run evidence not recorded", {
+                  runId,
+                  error,
+                }).pipe(
+                  Effect.andThen(
+                    Effect.sync(() => {
+                      registerFailures.set(
+                        projectId,
+                        `Evidence of the run that ended at ${endedAt} was not recorded: ${error.message}`,
+                      );
+                    }),
+                  ),
+                ),
+              ),
+            );
+        }
         yield* publish({ _tag: status, projectId, runId, exitCode, signal });
         yield* Deferred.done(entry.finished, Exit.void);
       });
@@ -288,19 +350,33 @@ const make = (options: RunServiceOptions) =>
     const launch = Effect.fn("RunService.launch")(function* (
       entry: RunEntry,
       plan: RunProfiles.LaunchPlan,
+      workspaceRoot: string,
     ) {
       const { projectId } = entry;
       const { runId } = entry.state;
+      const runDir = path.join(stateDir, "runs", encodeURIComponent(projectId), runId);
+      const logPath = path.join(runDir, "run.log");
+      const bound = RunProfiles.bindRunDirectory(plan, runDir);
+      // Captured before the program runs, so it describes what the run used.
+      const evidence: EvidenceContext | null = plan.recordsEvidence
+        ? {
+            launch: yield* runEvidence.captureLaunch({ workspaceRoot, build: plan.build }),
+            plan,
+            outputs: bound.outputs,
+            workspaceRoot,
+            runDir,
+            logPath,
+          }
+        : null;
       const runScope = yield* Scope.fork(serviceScope);
       const spawned = yield* Effect.gen(function* () {
-        const runDir = path.join(stateDir, "runs", encodeURIComponent(projectId), runId);
         yield* fileSystem.makeDirectory(runDir, { recursive: true });
-        for (const output of plan.outputs) {
+        for (const output of bound.outputs) {
           yield* fileSystem.makeDirectory(path.dirname(output.absPath), { recursive: true });
         }
-        const logFile = yield* fileSystem.open(path.join(runDir, "run.log"), { flag: "a" });
+        const logFile = yield* fileSystem.open(logPath, { flag: "a" });
         const handle = yield* spawner.spawn(
-          ChildProcess.make(plan.absExecutable, [...plan.args], {
+          ChildProcess.make(plan.absExecutable, [...bound.args], {
             cwd: plan.absCwd,
             env: childEnv(plan.envAllowList),
             extendEnv: false,
@@ -343,7 +419,7 @@ const make = (options: RunServiceOptions) =>
         entry.state = { ...entry.state, status: "running", pid };
       });
       yield* publish({ _tag: "started", projectId, runId, pid });
-      yield* watch(entry, handle, logFile, runScope).pipe(Effect.forkIn(serviceScope));
+      yield* watch(entry, handle, logFile, runScope, evidence).pipe(Effect.forkIn(serviceScope));
       yield* Deferred.done(entry.launched, Exit.void);
       return entry.state;
     });
@@ -398,6 +474,7 @@ const make = (options: RunServiceOptions) =>
           stopRequested: false,
           launched,
           finished,
+          logBytes: 0,
         };
         runs.set(runId, entry);
         return { _tag: "reserved", entry } as const;
@@ -406,7 +483,9 @@ const make = (options: RunServiceOptions) =>
         return { run: reservation.entry.state, alreadyRunning: true };
       }
       // Uninterruptible: a caller that goes away mid-launch must not strand a reserved slot.
-      const run = yield* Effect.uninterruptible(launch(reservation.entry, plan));
+      const run = yield* Effect.uninterruptible(
+        launch(reservation.entry, plan, input.workspaceRoot),
+      );
       return { run, alreadyRunning: false };
     });
 
@@ -441,7 +520,19 @@ const make = (options: RunServiceOptions) =>
           .filter((entry) => entry.projectId === input.projectId)
           .map((entry) => entry.state)
           .toReversed();
+        // An unreadable registry hides evidence, and says so; it never hides the runs.
+        const read = yield* runEvidence.latest(input).pipe(Effect.result);
+        if (read._tag === "Failure") {
+          yield* Effect.logWarning("project runtime: run evidence unreadable", {
+            error: read.failure,
+          });
+        }
         return {
+          evidence: read._tag === "Success" ? read.success : [],
+          evidenceError:
+            read._tag === "Failure"
+              ? read.failure.message
+              : (registerFailures.get(input.projectId) ?? null),
           profiles:
             loaded._tag === "Success"
               ? loaded.success.map(({ profile, valid, issues }) => ({

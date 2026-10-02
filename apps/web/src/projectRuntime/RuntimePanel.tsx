@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import { AlertTriangle, Play, RefreshCw, Square } from "lucide-react";
 import { type ReactNode, useContext, useLayoutEffect, useRef, useState } from "react";
 
+import { openFileInDock } from "~/components/ChatMarkdown";
 import { resolveEngineChipState } from "~/components/ChatView.logic";
 import { ThreadRouteContext, type ThreadRouteContextValue } from "~/dock/ChatPanel";
 import type { PanelProps } from "~/dock/lib/types";
@@ -38,6 +39,7 @@ import {
   type RuntimeProfileRow,
   type RuntimeReceipt,
 } from "./resolveRuntimePanelView";
+import { RunEvidenceSummary } from "./RunEvidenceSummary";
 import { runtimeStatusAtom } from "./runtimeStatusAtom";
 
 const TONE_DOT: Readonly<Record<NonNullable<RuntimeProfileRow["run"]>["tone"], string>> = {
@@ -221,7 +223,7 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
       {header}
-      {banner || notice || view.profilesError ? (
+      {banner || notice || view.profilesError || view.evidenceError ? (
         <div className="flex shrink-0 flex-col gap-1 border-b border-border/60 bg-warning/5 px-3 py-2 text-2xs text-muted-foreground">
           {banner ? <p className="text-foreground">{banner.text}</p> : null}
           {!view.live && view.asOf !== null && view.rows.length > 0 ? (
@@ -234,6 +236,7 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
           {view.profilesError ? (
             <p>devgame.runtime.json could not be read: {view.profilesError}</p>
           ) : null}
+          {view.evidenceError ? <p>Run evidence: {view.evidenceError}</p> : null}
         </div>
       ) : null}
       {view.guidance ? <Centered>{view.guidance}</Centered> : null}
@@ -269,6 +272,28 @@ function RuntimeBody(props: { route: ThreadRouteContextValue; projectRef: Scoped
             />
           ))}
         </ul>
+      ) : null}
+      {/* Recorded evidence outlives the run list, which a server restart empties. */}
+      {selected?.evidence ? (
+        <div className="shrink-0 px-3 pt-2">
+          <RunEvidenceSummary
+            evidence={selected.evidence}
+            onOpen={
+              route.routeKind === "server"
+                ? (relativePath) =>
+                    openFileInDock(
+                      { environmentId: route.environmentId, threadId: route.threadId },
+                      relativePath,
+                    )
+                : null
+            }
+            note={
+              selected.evidenceFromEarlierRun
+                ? "From an earlier run, not the newest one below."
+                : null
+            }
+          />
+        </div>
       ) : null}
       {selected?.run ? (
         <div className="flex min-h-0 flex-1 flex-col">

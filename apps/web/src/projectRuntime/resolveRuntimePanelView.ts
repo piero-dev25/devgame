@@ -17,6 +17,8 @@
  */
 import type { EngineType, RunState, RunStatusKind, RunStatusSuccess } from "@t3tools/contracts";
 
+import { latestProfileEvidence, type RunEvidenceSummaryView } from "./runEvidenceView";
+
 /** Client-side cap on rendered log lines; the server already bounds the tail to a few KiB. */
 export const RUNTIME_LOG_LINE_CAP = 200;
 
@@ -57,6 +59,13 @@ export interface RuntimeProfileRow {
   readonly unavailableReason: string | null;
   /** This profile's newest run, or null. */
   readonly run: RuntimeRunView | null;
+  /** The newest recorded evidence of this profile, or null. */
+  readonly evidence: RunEvidenceSummaryView | null;
+  /**
+   * True when `evidence` belongs to an earlier run than `run`: the newest run
+   * is still going, its evidence is still being recorded, or it recorded none.
+   */
+  readonly evidenceFromEarlierRun: boolean;
   readonly canLaunch: boolean;
   readonly canStop: boolean;
   /** Button text while this row's request is in flight. */
@@ -80,6 +89,8 @@ export type RuntimePanelView =
       readonly rows: ReadonlyArray<RuntimeProfileRow>;
       /** devgame.runtime.json could not be read; runs are still listed. */
       readonly profilesError: string | null;
+      /** Run evidence could not be read or was not recorded, or null. */
+      readonly evidenceError: string | null;
       /** No profiles: what to add, or null. */
       readonly guidance: string | null;
       /** The row whose run log is shown below the list. */
@@ -185,9 +196,12 @@ function buildRows(input: {
     const run = latest.get(profile.profileId) ?? null;
     const runEnded = run === null || TERMINAL.has(run.status);
     const pending = input.pending;
+    const evidence = latestProfileEvidence(input.status, profile.profileId);
     return {
       ...profile,
       run: run === null ? null : toRunView(run),
+      evidence,
+      evidenceFromEarlierRun: evidence !== null && run !== null && evidence.runId !== run.runId,
       canLaunch: idle && profile.unavailableReason === null && runEnded,
       canStop: idle && !runEnded,
       pendingLabel:
@@ -243,6 +257,7 @@ export function resolveRuntimePanelView(input: {
           asOf: null,
           rows: [],
           profilesError: null,
+          evidenceError: null,
           guidance: null,
           selectedProfileId: null,
         };
@@ -264,6 +279,7 @@ export function resolveRuntimePanelView(input: {
     asOf: requestedAt,
     rows,
     profilesError: status.profilesError,
+    evidenceError: status.evidenceError ?? null,
     guidance:
       rows.length > 0 || status.profilesError !== null
         ? null

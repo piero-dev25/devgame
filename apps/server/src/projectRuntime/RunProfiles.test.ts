@@ -23,6 +23,9 @@ const KAIGEN_FIXTURE_PATH = NodeURL.fileURLToPath(
 );
 const KAIGEN_BINARY = "Runtime/out/macos/debug/kaigen-horde-spike";
 const CAPTURE_ID = "vfx-capture-fire-front-0.65";
+/** The named CAPTURE profile: `tools/capture_kaigen_vfx.sh` writing into the run's own directory. */
+const SCRIPT_CAPTURE_ID = "capture-fire-front-0.65";
+const CAPTURE_SCRIPT = "tools/capture_kaigen_vfx.sh";
 /** The `tools/capture_kaigen_vfx.sh --no-build` invocation for effect 1, view Z, age 0.65. */
 const CAPTURE_ARGS = [
   "--vfx",
@@ -95,6 +98,7 @@ const makeKaigenProject = Effect.gen(function* () {
   const fixture = yield* fileSystem.readFileString(KAIGEN_FIXTURE_PATH);
   yield* writeFile(root, RUN_PROFILES_FILE_NAME, fixture);
   yield* writeExecutable(root, KAIGEN_BINARY);
+  yield* writeExecutable(root, CAPTURE_SCRIPT);
   // The build tool exists and is executable, so nothing but the profile keeps it out of a plan.
   yield* writeExecutable(root, "Runtime/hz/hzbuild");
   return root;
@@ -111,6 +115,7 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
         expect(statuses.map((s) => [s.profile.id, s.valid, s.issues])).toEqual([
           ["vfx-arena", true, []],
           [CAPTURE_ID, true, []],
+          [SCRIPT_CAPTURE_ID, true, []],
         ]);
         expect(statuses[1]?.profile.args).toEqual(CAPTURE_ARGS);
       }),
@@ -132,6 +137,7 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
             name: "capture",
             kind: "image",
             path: "work/devgame-captures/fire-front-t00_65.png",
+            location: "project",
             absPath: path.join(root, "work/devgame-captures/fire-front-t00_65.png"),
           },
         ]);
@@ -163,8 +169,52 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
           envAllowList: [],
           outputs: [],
           logPatterns: [],
+          recordsEvidence: false,
+          build: { path: KAIGEN_BINARY, absPath: path.join(root, KAIGEN_BINARY) },
+          workspaceCard: null,
         });
       }),
+    );
+
+    it.effect(
+      "resolves the CAPTURE profile to the capture script, writing into the run's own directory",
+      () =>
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const root = yield* makeKaigenProject;
+          const runDir = "/state/runs/project-1/run-1";
+
+          const plan = yield* resolve(root, SCRIPT_CAPTURE_ID);
+          const bound = RunProfiles.bindRunDirectory(plan, runDir);
+
+          expect(plan.absExecutable).toBe(path.join(root, CAPTURE_SCRIPT));
+          expect(plan.absCwd).toBe(root);
+          // The script's argv: effect, view, age, absolute PNG under the state dir, --no-build.
+          expect(bound.args).toEqual([
+            "1",
+            "front",
+            "0.65",
+            `${runDir}/fire-front-t00_65.png`,
+            "--no-build",
+          ]);
+          expect(bound.outputs.map((output) => [output.location, output.absPath])).toEqual([
+            ["run", `${runDir}/fire-front-t00_65.png`],
+            ["run", `${runDir}/fire-front-t00_65.log`],
+          ]);
+          expect(plan.logPatterns).toEqual([
+            "VFX capture probe:.*effect age 0\\.65(,|$)",
+            "screenshot saved:",
+          ]);
+          // Evidence fingerprints the game binary the script runs, not the script.
+          expect(plan.recordsEvidence).toBe(true);
+          expect(plan.build).toEqual({
+            path: KAIGEN_BINARY,
+            absPath: path.join(root, KAIGEN_BINARY),
+          });
+          // Nothing is written into the project for the capture.
+          expect(yield* fileSystem.exists(path.join(root, "work"))).toBe(false);
+        }),
     );
 
     it.effect(
@@ -180,7 +230,13 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
           const error = yield* Effect.flip(resolve(root, CAPTURE_ID));
 
           expect(issueKinds(statuses, CAPTURE_ID)).toEqual(["executable-missing"]);
-          expect(statuses.every((status) => !status.valid)).toBe(true);
+          expect(
+            statuses
+              .filter((status) => status.profile.executable === KAIGEN_BINARY)
+              .every((status) => !status.valid),
+          ).toBe(true);
+          // The script profile still launches; its evidence records the build as unknown.
+          expect(issueKinds(statuses, SCRIPT_CAPTURE_ID)).toEqual([]);
           expect(error).toBeInstanceOf(RunProfiles.RunProfileExecutableMissing);
           expect(error.message).toContain(KAIGEN_BINARY);
           expect(yield* fileSystem.exists(path.join(root, KAIGEN_BINARY))).toBe(false);
@@ -324,6 +380,72 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
           }),
       );
     }
+  });
+
+  describe("run directory and build paths", () => {
+    it.effect("accepts only {{runDir}}/ followed by a path inside the run directory", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        yield* writeExecutable(root, "bin/game");
+        const output = (path: string) => ({ name: "shot", kind: "image", path });
+        yield* writeProfiles(root, [
+          profile({ id: "ok", outputs: [output("{{runDir}}/captures/a.png")] }),
+          profile({ id: "climbs", outputs: [output("{{runDir}}/../a.png")] }),
+          profile({ id: "inside", outputs: [output("work/{{runDir}}/a.png")] }),
+          profile({ id: "bare", outputs: [output("{{runDir}}")] }),
+        ]);
+
+        const statuses = yield* load(root);
+
+        expect(
+          statuses.map((status) => [status.profile.id, issueKinds(statuses, status.profile.id)]),
+        ).toEqual([
+          ["ok", []],
+          ["climbs", ["output-escape"]],
+          ["inside", ["output-escape"]],
+          ["bare", ["output-escape"]],
+        ]);
+        const bound = RunProfiles.bindRunDirectory(yield* resolve(root, "ok"), "/runs/r1");
+        expect(bound.outputs[0]).toMatchObject({
+          location: "run",
+          relativePath: "captures/a.png",
+          absPath: "/runs/r1/captures/a.png",
+        });
+      }),
+    );
+
+    it.effect("flags an evidence build path outside the root", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        yield* writeExecutable(root, "bin/game");
+        yield* writeProfiles(root, [
+          profile({ evidence: { logPatterns: [], build: "../elsewhere/game" } }),
+        ]);
+
+        expect(issueKinds(yield* load(root))).toEqual(["build-escape"]);
+        expect((yield* Effect.flip(resolve(root, "game")))._tag).toBe("RunProfileInvalid");
+      }),
+    );
+
+    it.effect("links a profile's evidence to the workspace card it names", () =>
+      Effect.gen(function* () {
+        const root = yield* makeRoot;
+        yield* writeExecutable(root, "bin/game");
+        yield* writeProfiles(root, [
+          profile({
+            evidence: {
+              logPatterns: [],
+              workspaceCard: { entityId: "fire-front", stepPath: "report.html" },
+            },
+          }),
+        ]);
+
+        const plan = yield* resolve(root, "game");
+
+        expect(plan.recordsEvidence).toBe(true);
+        expect(plan.workspaceCard).toEqual({ entityId: "fire-front", stepPath: "report.html" });
+      }),
+    );
   });
 
   describe("executable checks", () => {
