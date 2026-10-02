@@ -5,23 +5,42 @@
  * (`openFileInDock`), which already previews markdown, media, PDF and
  * sandboxed HTML, so this panel never browses or renders files itself.
  *
+ * "Use in chat" (a card, or one step) stages a bounded context packet for
+ * this thread's next message (`contextPacket.ts`, `workspacePacketStore.ts`)
+ * and opens Chat. Nothing is attached until the user presses it.
+ *
  * IDENTITY: `ThreadRouteContext`, like `FilesDockPanel`, so drafts are told
  * apart from "no thread" and still show their project's cards.
  *
  * Web and desktop only: mobile has no dock.
  */
-import { AlertTriangle, FileText, LayoutGrid, Loader2, Pin, RefreshCw } from "lucide-react";
+import type { ScopedThreadRef } from "@t3tools/contracts";
+import {
+  AlertTriangle,
+  FileText,
+  LayoutGrid,
+  Loader2,
+  MessageSquarePlus,
+  Pin,
+  RefreshCw,
+} from "lucide-react";
 import { type ReactNode, useContext } from "react";
 
 import { openFileInDock } from "~/components/ChatMarkdown";
+import { toastManager } from "~/components/ui/toast";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+import { useComposerDraftStore } from "~/composerDraftStore";
+import { CHAT_PANEL_ID, openChatDockPanel } from "~/dock/chatDockHandle";
 import { ThreadRouteContext } from "~/dock/ChatPanel";
 import type { PanelProps } from "~/dock/lib/types";
 import { useRouteProjectRef, useRouteThreadWorktreePath } from "~/dock/useRouteProjectRef";
 import { cn } from "~/lib/utils";
-import { useProject } from "~/state/entities";
+import { readThreadShell, useProject } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 
+import { buildWorkspacePacket } from "./contextPacket";
 import { projectWorkspaceAtom } from "./projectWorkspaceAtom";
+import { stageWorkspacePacket, workspacePacketBlockedReason } from "./workspacePacketStore";
 import {
   resolveWorkspacePanelView,
   type WorkspaceCardView,
@@ -37,12 +56,48 @@ function CenteredMessage(props: { icon?: ReactNode; children: ReactNode }) {
   );
 }
 
+/** "Use in chat": attach the card (every step, or one) to this thread's next message. */
+interface UseInChat {
+  readonly blockedReason: string | null;
+  readonly use: (card: WorkspaceCardView, stepIndexes: ReadonlyArray<number>) => void;
+}
+
+function UseInChatButton(props: {
+  useInChat: UseInChat;
+  label: string;
+  onClick: () => void;
+  children?: ReactNode;
+}) {
+  // A disabled action's reason is shown once above the cards.
+  const blocked = props.useInChat.blockedReason !== null;
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            disabled={blocked}
+            aria-label={props.label}
+            onClick={props.onClick}
+            className="inline-flex shrink-0 items-center gap-1 rounded px-1 py-0.5 text-3xs text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+          />
+        }
+      >
+        <MessageSquarePlus className="size-3" />
+        {props.children}
+      </TooltipTrigger>
+      <TooltipPopup side="top">{props.label}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
 function WorkspaceCard(props: {
   card: WorkspaceCardView;
   onOpen: ((relativePath: string) => void) | null;
   openBlockedReason: string | null;
+  useInChat: UseInChat | null;
 }) {
-  const { card } = props;
+  const { card, useInChat } = props;
   return (
     <li className="flex flex-col gap-1.5 border-b border-border/40 px-3 py-3 last:border-b-0">
       <div className="flex items-start justify-between gap-2">
@@ -50,11 +105,27 @@ function WorkspaceCard(props: {
           {card.pinned ? <Pin className="size-3 shrink-0 text-muted-foreground" /> : null}
           <span className="truncate">{card.title}</span>
         </p>
-        {(card.status ?? card.category) ? (
-          <span className="shrink-0 rounded-full border border-border/60 px-2 py-0.5 text-3xs uppercase tracking-wide text-muted-foreground">
-            {card.status ?? card.category}
-          </span>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1">
+          {(card.status ?? card.category) ? (
+            <span className="rounded-full border border-border/60 px-2 py-0.5 text-3xs uppercase tracking-wide text-muted-foreground">
+              {card.status ?? card.category}
+            </span>
+          ) : null}
+          {useInChat ? (
+            <UseInChatButton
+              useInChat={useInChat}
+              label={`Use ${card.title} in chat`}
+              onClick={() =>
+                useInChat.use(
+                  card,
+                  card.steps.map((step) => step.index),
+                )
+              }
+            >
+              Use in chat
+            </UseInChatButton>
+          ) : null}
+        </div>
       </div>
       {card.description ? (
         <p className="line-clamp-2 text-2xs text-muted-foreground">{card.description}</p>
@@ -65,7 +136,7 @@ function WorkspaceCard(props: {
         <ul className="flex flex-col gap-0.5">
           {card.steps.map((step) => {
             return (
-              <li key={step.key}>
+              <li key={step.key} className="flex items-center gap-0.5">
                 <button
                   type="button"
                   disabled={!step.openable || props.onOpen === null}
@@ -73,7 +144,7 @@ function WorkspaceCard(props: {
                     if (step.relativePath !== null) props.onOpen?.(step.relativePath);
                   }}
                   className={cn(
-                    "flex w-full min-w-0 items-center gap-1.5 rounded px-1.5 py-1 text-left text-2xs",
+                    "flex min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 py-1 text-left text-2xs",
                     step.openable
                       ? "text-foreground hover:bg-muted/60"
                       : "cursor-default text-muted-foreground/70",
@@ -92,6 +163,13 @@ function WorkspaceCard(props: {
                     <span className="ml-auto shrink-0 text-3xs text-warning">{step.problem}</span>
                   ) : null}
                 </button>
+                {useInChat ? (
+                  <UseInChatButton
+                    useInChat={useInChat}
+                    label={`Use step ${step.name} in chat`}
+                    onClick={() => useInChat.use(card, [step.index])}
+                  />
+                ) : null}
               </li>
             );
           })}
@@ -101,7 +179,11 @@ function WorkspaceCard(props: {
   );
 }
 
-function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void }) {
+function WorkspaceBody(props: {
+  view: WorkspacePanelView;
+  onRetry: () => void;
+  useInChat: UseInChat | null;
+}) {
   const { view } = props;
   switch (view.kind) {
     case "no-project":
@@ -144,7 +226,13 @@ function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void })
           {view.staleCards ? (
             <ul className="min-h-0 flex-1 overflow-y-auto opacity-60">
               {view.staleCards.map((card) => (
-                <WorkspaceCard key={card.key} card={card} onOpen={null} openBlockedReason={null} />
+                <WorkspaceCard
+                  key={card.key}
+                  card={card}
+                  onOpen={null}
+                  openBlockedReason={null}
+                  useInChat={null}
+                />
               ))}
             </ul>
           ) : null}
@@ -158,8 +246,12 @@ function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void })
           : (relativePath: string) => openFileInDock(threadRef, relativePath);
       return (
         <div className="flex min-h-0 flex-1 flex-col">
-          {view.issues.length > 0 || view.openBlockedReason || view.openNotice ? (
+          {view.issues.length > 0 ||
+          view.openBlockedReason ||
+          view.openNotice ||
+          props.useInChat?.blockedReason ? (
             <div className="flex shrink-0 flex-col gap-1 border-b border-border/60 bg-warning/5 px-3 py-2 text-2xs text-muted-foreground">
+              {props.useInChat?.blockedReason ? <p>{props.useInChat.blockedReason}</p> : null}
               {view.openBlockedReason ? <p>{view.openBlockedReason}</p> : null}
               {view.openNotice ? <p>{view.openNotice}</p> : null}
               {view.issues.map((issue) => (
@@ -180,6 +272,7 @@ function WorkspaceBody(props: { view: WorkspacePanelView; onRetry: () => void })
                   card={card}
                   onOpen={onOpen}
                   openBlockedReason={view.openBlockedReason}
+                  useInChat={props.useInChat}
                 />
               ))}
             </ul>
@@ -212,6 +305,53 @@ export default function WorkspacePanel(_props: PanelProps) {
             : { kind: "draft" },
     query: { data: query.data, error: query.error },
   });
+  // Drafts and server threads alike: the packet is staged under the route's
+  // thread and sent with its next message.
+  const threadRef: ScopedThreadRef | null =
+    route === null ? null : { environmentId: route.environmentId, threadId: route.threadId };
+  // The cards are read for the route thread's own project (`useRouteProjectRef`
+  // is the shell's project on a server route, the draft session's on a draft),
+  // so at render time the thread and the workspace share one project and only
+  // the "no thread" / "still loading" reasons can disable the action. A thread
+  // that changes project between render and click is caught by the fresh read
+  // in `use` below, which `stageWorkspacePacket` checks again.
+  const threadProjectId = projectRef?.projectId ?? null;
+  const workspaceProjectId = threadProjectId;
+  const useInChat: UseInChat | null =
+    route === null
+      ? null
+      : {
+          blockedReason: workspacePacketBlockedReason({
+            threadRef,
+            threadProjectId,
+            workspaceProjectId,
+          }),
+          use: (card, stepIndexes) => {
+            if (threadRef === null || workspaceProjectId === null) return;
+            const packet = buildWorkspacePacket({
+              projectId: workspaceProjectId,
+              entity: card.entity,
+              stepIndexes,
+              // Filled from run evidence once the run panel lands (PR7/PR8).
+              acceptedVersion: null,
+              runSummary: null,
+              // Existence was checked at the project root, not the worktree.
+              threadInWorktree: view.kind === "ready" && view.threadInWorktree,
+            });
+            // Re-read the thread's project now: the cards may predate a switch.
+            const currentThreadProjectId =
+              route.routeKind === "server"
+                ? (readThreadShell(threadRef)?.projectId ?? null)
+                : (useComposerDraftStore.getState().getDraftSession(route.draftId)?.projectId ??
+                  null);
+            const refused = stageWorkspacePacket(threadRef, currentThreadProjectId, packet);
+            if (refused !== null) {
+              toastManager.add({ type: "error", title: "Not added to chat", description: refused });
+              return;
+            }
+            openChatDockPanel(CHAT_PANEL_ID);
+          },
+        };
 
   return (
     <div className="flex h-full min-w-0 flex-1 flex-col">
@@ -228,7 +368,7 @@ export default function WorkspacePanel(_props: PanelProps) {
           </button>
         </div>
       ) : null}
-      <WorkspaceBody view={view} onRetry={query.refresh} />
+      <WorkspaceBody view={view} onRetry={query.refresh} useInChat={useInChat} />
     </div>
   );
 }

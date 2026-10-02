@@ -9,6 +9,7 @@ import { create } from "zustand";
 import type { LocalDispatchSnapshot } from "./components/ChatView.logic";
 import type { ComposerFileAttachment, ComposerImageAttachment } from "./composerDraftStore";
 import type { TerminalContextDraft } from "./lib/terminalContext";
+import type { WorkspacePacket } from "./projectWorkspace/contextPacket";
 import { randomUUID } from "./lib/utils";
 import type { ReviewCommentContext } from "./reviewCommentContext";
 
@@ -38,6 +39,11 @@ export interface QueuedComposerMessage {
   terminalContexts: TerminalContextDraft[];
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
+  /**
+   * DevGame: the workspace packet staged when the message was queued. It
+   * moves with the message, so a packet staged later never rides on it.
+   */
+  workspacePacket?: WorkspacePacket | null;
   sendSettings: QueuedMessageSendSettings;
   /**
    * The newest completed tool activity at queue time. A different id later
@@ -222,6 +228,21 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
  * message goes out on. Live arrays are sorted, but a snapshot loaded from the
  * database is not, so pick by sequence rather than position.
  */
+/** Context items a queued message carries, its workspace packet included. */
+export function queuedMessageContextCount(
+  message: Pick<
+    QueuedComposerMessage,
+    "terminalContexts" | "previewAnnotations" | "reviewComments" | "workspacePacket"
+  >,
+): number {
+  return (
+    message.terminalContexts.length +
+    message.previewAnnotations.length +
+    message.reviewComments.length +
+    (message.workspacePacket ? 1 : 0)
+  );
+}
+
 export function latestCompletedToolActivityId(
   activities: ReadonlyArray<{
     readonly id: string;

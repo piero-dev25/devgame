@@ -190,6 +190,7 @@ import { useComposerPathSearch } from "../../lib/composerPathSearchState";
 import { replaceComposerContextReferences } from "@t3tools/shared/composerContextReferences";
 import { EditorPresenceChips } from "../../editorPresence/EditorPresenceChips";
 import { shouldMountEditorPresenceChips } from "../../editorPresence/composerMount";
+import { WorkspacePacketChip } from "../../projectWorkspace/WorkspacePacketChip";
 import {
   getRestingComposerImagePreviewCounts,
   resolveRestingComposerControlsLayout,
@@ -1356,6 +1357,8 @@ export interface ChatComposerProps {
   /** `activeProject?.workspaceRoot ?? null` — threaded straight into
    * `EditorPresenceChips` for its own project scoping. */
   presenceWorkspaceRoot: string | null;
+  /** `activeProject?.id ?? null`: a staged workspace packet only sends for this project. */
+  workspacePacketProjectId: ProjectId | null;
 
   // Thread context
   activeThreadId: ThreadId | null;
@@ -1519,6 +1522,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     draftId,
     engineChipState,
     presenceWorkspaceRoot,
+    workspacePacketProjectId,
     multipleModelSelections,
     supportsMultipleModels,
     onMultipleModelSelectionsChange: setMultipleModelSelections,
@@ -6501,6 +6505,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   workspaceRoot={presenceWorkspaceRoot}
                   engineChipState={engineChipState}
                   className="mb-3"
+                />
+              )}
+              {/* DevGame workspace packet ("Use in chat"); any project, game or not. */}
+              {!isComposerCollapsedMobile && (
+                <WorkspacePacketChip
+                  threadRef={routeThreadRef}
+                  projectId={workspacePacketProjectId}
+                  multiModelSend={routeKind === "draft" && multipleModelSelections !== null}
                 />
               )}
 

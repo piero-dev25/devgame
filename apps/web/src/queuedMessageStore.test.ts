@@ -2,9 +2,11 @@ import { ProviderInstanceId } from "@t3tools/contracts";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { createLocalDispatchSnapshot } from "./components/ChatView.logic";
+import { buildWorkspacePacket } from "./projectWorkspace/contextPacket";
 import {
   isQueuedMessageDue,
   latestCompletedToolActivityId,
+  queuedMessageContextCount,
   useQueuedMessageStore,
   type QueuedComposerMessage,
 } from "./queuedMessageStore";
@@ -190,5 +192,19 @@ describe("queued message dispatch timing", () => {
     expect(isQueuedMessageDue({ message, phase: "connecting", latestToolActivityId: "a4" })).toBe(
       false,
     );
+  });
+});
+
+describe("queuedMessageContextCount", () => {
+  it("counts the workspace packet a queued message carries", () => {
+    const packet = buildWorkspacePacket({
+      projectId: "project-a",
+      entity: { id: "pitch", title: "Pitch", folder: "pitch", steps: [] },
+      stepIndexes: [],
+    });
+
+    expect(queuedMessageContextCount(makeMessage("plain"))).toBe(0);
+    expect(queuedMessageContextCount({ ...makeMessage("card"), workspacePacket: packet })).toBe(1);
+    expect(queuedMessageContextCount({ ...makeMessage("none"), workspacePacket: null })).toBe(0);
   });
 });

@@ -111,6 +111,8 @@ export async function sendQueuedMessage(
     const ambientRecords = collectAmbientContextRecords({
       project,
       engineChipState: resolveEngineChipState(project),
+      // Snapshotted at enqueue; collect drops it unless it is this project's.
+      workspacePacket: message.workspacePacket ?? null,
     });
     const text = applyClaudePromptEffortPrefix(
       appendAmbientContextReferences(prompt || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT, ambientRecords),

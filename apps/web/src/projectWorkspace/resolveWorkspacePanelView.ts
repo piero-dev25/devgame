@@ -18,6 +18,8 @@ import type {
 
 export interface WorkspaceStepView {
   readonly key: string;
+  /** Index into the entity's `steps`, for "Use in chat". */
+  readonly index: number;
   readonly name: string;
   /** Project-relative path the Files panel opens, or null when the path escapes. */
   readonly relativePath: string | null;
@@ -35,6 +37,8 @@ export interface WorkspaceCardView {
   readonly description: string | null;
   readonly pinned: boolean;
   readonly steps: ReadonlyArray<WorkspaceStepView>;
+  /** The registry entry the card shows, for building a "Use in chat" packet. */
+  readonly entity: ResolvedWorkspaceEntity;
 }
 
 export type WorkspacePanelView =
@@ -65,6 +69,11 @@ export type WorkspacePanelView =
        * badges describe the project root.
        */
       readonly openNotice: string | null;
+      /**
+       * The thread runs in a git worktree other than the project root, where
+       * the cards' existence checks were made. "Use in chat" tells the agent.
+       */
+      readonly threadInWorktree: boolean;
       /** The thread the Files panel opens steps for; null on drafts. */
       readonly threadRef: ScopedThreadRef | null;
     };
@@ -113,6 +122,7 @@ function toCard(
       const problem = stepProblem(step);
       return {
         key: `${stepIndex}:${step.path}`,
+        index: stepIndex,
         name: step.name.trim() || step.path,
         relativePath: step.relativePath,
         isDefault: entity.defaultStep === stepIndex,
@@ -120,6 +130,7 @@ function toCard(
         openable: canOpen && problem === null && step.relativePath !== null,
       };
     }),
+    entity,
   };
 }
 
@@ -175,6 +186,10 @@ export function resolveWorkspacePanelView(input: {
 
   const manifest = query.data.manifest;
   if (manifest === null) return { kind: "missing" };
+  const threadInWorktree =
+    target.kind === "server" &&
+    target.worktreePath !== null &&
+    target.worktreePath !== target.projectRoot;
 
   return {
     kind: "ready",
@@ -188,12 +203,8 @@ export function resolveWorkspacePanelView(input: {
       ),
     ],
     openBlockedReason: canOpen ? null : DRAFT_OPEN_BLOCKED_REASON,
-    openNotice:
-      target.kind === "server" &&
-      target.worktreePath !== null &&
-      target.worktreePath !== target.projectRoot
-        ? WORKTREE_OPEN_NOTICE
-        : null,
+    openNotice: threadInWorktree ? WORKTREE_OPEN_NOTICE : null,
+    threadInWorktree,
     threadRef: target.kind === "server" ? target.threadRef : null,
   };
 }

@@ -18,6 +18,11 @@ import type { ComposerContextRecord, OrchestrationMessageContext } from "@t3tool
 
 import { removeInlineContextReference } from "~/lib/composerContextReferences";
 import {
+  buildWorkspacePacketRecord,
+  readWorkspacePacketRecord,
+  type WorkspacePacket,
+} from "~/projectWorkspace/contextPacket";
+import {
   buildEditorSelectionContextRecord,
   extractTrailingEditorSelection,
   readEditorSelectionContextRecord,
@@ -46,20 +51,29 @@ import {
  *   rooted at project A never ships project B's selected objects.
  * - The engine record comes last so its reference is the message's final one,
  *   like the old outermost `<engine>` block.
+ * - A workspace packet the user attached ("Use in chat") goes first, for any
+ *   project, game or not, but only when it was built for this thread's
+ *   project (`project.id`). A packet from another project is never sent.
  *
  * `chips` and `editors` default to the live presence snapshots; tests pass
  * their own.
  */
 export function collectAmbientContextRecords(input: {
-  readonly project: EditorPresenceProjectRef | null;
+  readonly project: (EditorPresenceProjectRef & { readonly id?: string }) | null;
   readonly engineChipState: string;
+  readonly workspacePacket?: WorkspacePacket | null;
   readonly chips?: ReadonlyArray<EditorPresenceRenderChip>;
   readonly editors?: ReadonlyArray<EditorPresenceEntry>;
 }): ComposerContextRecord[] {
-  if (input.engineChipState === "none" || !input.project) return [];
+  if (!input.project) return [];
+  const records: ComposerContextRecord[] = [];
+  const packet = input.workspacePacket ?? null;
+  if (packet !== null && input.project.id !== undefined && packet.projectId === input.project.id) {
+    records.push(buildWorkspacePacketRecord(packet));
+  }
+  if (input.engineChipState === "none") return records;
   const chips = input.chips ?? getCurrentEditorPresenceChips();
   const editors = input.editors ?? getCurrentEditorPresenceEditors();
-  const records: ComposerContextRecord[] = [];
   const selection = buildEditorSelectionContextRecord(
     selectEditorPresenceChipsForProject(chips, input.project),
   );
@@ -80,6 +94,7 @@ export interface AmbientMessageContext<T extends AmbientMessage> {
   readonly message: T;
   readonly editorSelection: ExtractedEditorSelection;
   readonly engineLines: ReadonlyArray<string>;
+  readonly workspacePacket: WorkspacePacket | null;
 }
 
 interface AmbientMessage {
@@ -90,7 +105,8 @@ interface AmbientMessage {
 function isAmbientRecord(record: ComposerContextRecord): boolean {
   return (
     readEditorSelectionContextRecord(record) !== null ||
-    readEngineStateContextRecord(record) !== null
+    readEngineStateContextRecord(record) !== null ||
+    readWorkspacePacketRecord(record) !== null
   );
 }
 
@@ -107,9 +123,11 @@ export function extractAmbientMessageContext<T extends AmbientMessage>(
     }
     let editorSelection = EMPTY_SELECTION;
     let engineLines: ReadonlyArray<string> = [];
+    let workspacePacket: WorkspacePacket | null = null;
     for (const record of ambient) {
       editorSelection = readEditorSelectionContextRecord(record) ?? editorSelection;
       engineLines = readEngineStateContextRecord(record) ?? engineLines;
+      workspacePacket = readWorkspacePacketRecord(record) ?? workspacePacket;
     }
     const remaining = records.filter((record) => !isAmbientRecord(record));
     const { context: _context, ...rest } = message;
@@ -119,16 +137,18 @@ export function extractAmbientMessageContext<T extends AmbientMessage>(
         : { ...rest, text }) as unknown as T,
       editorSelection,
       engineLines,
+      workspacePacket,
     };
   }
   const engine = extractTrailingEngineHeadline(message.text);
   const selection = extractTrailingEditorSelection(engine.promptText);
   if (engine.lines.length === 0 && selection.entries.length === 0) {
-    return { message, editorSelection: EMPTY_SELECTION, engineLines: [] };
+    return { message, editorSelection: EMPTY_SELECTION, engineLines: [], workspacePacket: null };
   }
   return {
     message: { ...message, text: selection.promptText } as T,
     editorSelection: selection,
     engineLines: engine.lines,
+    workspacePacket: null,
   };
 }
