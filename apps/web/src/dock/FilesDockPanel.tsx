@@ -78,6 +78,7 @@ import {
   selectThreadFileExplorerState,
   useFileExplorerStore,
 } from "~/fileExplorerStore";
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { cn } from "~/lib/utils";
 import { primaryServerAvailableEditorsAtom, primaryServerKeybindingsAtom } from "~/state/server";
 import { useProject, useThread } from "~/state/entities";
@@ -168,11 +169,15 @@ function FilesTabStrip(props: {
 
 export default function FilesDockPanel(_props: PanelProps) {
   const routeContext = useContext(ThreadRouteContext);
-  const activeThread = useThread(
-    routeContext
-      ? { environmentId: routeContext.environmentId, threadId: routeContext.threadId }
-      : null,
+  const threadRef = routeContext
+    ? { environmentId: routeContext.environmentId, threadId: routeContext.threadId }
+    : null;
+  // A draft's thread does not exist on the server yet; subscribing to it would
+  // retry a 404 every 250 ms until the first message is sent.
+  const draftThread = useComposerDraftStore((store) =>
+    threadRef ? store.getDraftThreadByRef(threadRef) : null,
   );
+  const activeThread = useThread(threadRef, { waitForShell: draftThread !== null });
   const activeProjectId = activeThread?.projectId ?? null;
   const activeProject = useProject(
     activeThread && activeProjectId
