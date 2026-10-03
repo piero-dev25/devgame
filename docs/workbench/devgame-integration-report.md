@@ -36,10 +36,15 @@ Outcome of the 2026-10-02 orchestrator handoff
 | M4 import UI | `codex/mrmak-import-ui` @ `4ef60db77` | `c12272058` |
 | Kaigen live-loop test | `codex/kaigen-live-demo` @ `ceaabb4a6` | `c451f442f` |
 
-Two follow-up commits live only on the integration branch: `db683cd12`
-(`KAIGEN_STATE_DIR` for the live test) and `306191c17` (the direct capture
-profile now writes into `{{runDir}}` and names its build). They were checked
-by a separate read-only fact-check, not by the slice review loop.
+Follow-up commits that live only on the integration branch (not through the
+slice review loop; each checked by its own focused tests plus the live runs
+and QA pass described below):
+
+- `db683cd12` — `KAIGEN_STATE_DIR` for the live test.
+- `306191c17` — the direct capture profile writes into `{{runDir}}` and names its build.
+- `d87d295b4` — the capture schedule starts after the game's startup settles.
+- `496bd9b81` — Workspace collection labels truncate instead of overlapping.
+- `59cffdf13` — the Files dock panel stops polling a draft thread's snapshot.
 
 Every slice in the table was built against the post-sync mount map
 ([devgame-workspace-slices.md](./devgame-workspace-slices.md)) with focused
@@ -61,6 +66,8 @@ not read-only.
 | Server slices | 13 test files (import, runtime, workspace, routes, `server.test.ts`, migrations; the live loop excluded) | 356 passed, 4 skipped (env-gated live tests) |
 | Web slices | 22 test files (dock, workspace, runtime, import, context packet, queued sends) | 202 passed |
 | Capture profile fix | `RunProfiles.test.ts`, `RunEvidence.test.ts` after `306191c17` | 48 passed |
+| Capture schedule | `RunProfiles.test.ts` after `d87d295b4` | 31 passed |
+| QA fixes | web `tsc`; `resolveWorkspacePanelView`, `workspaceCollections`, `resolveFilesDockPanelView`, `ChatDock`, `entities` tests | 0 errors; 16 + 21 passed |
 
 Phase U and U2 evidence (merge, review fixes, provider contract suites, live
 browser pass) is in
@@ -127,8 +134,32 @@ the reconciliation record.
 
 ## Kaigen launch and evidence
 
-One authorized launch through DevGame's real RunProfiles → RunService →
-RunEvidence loop (`KaigenRunLoop.live.test.ts`), profile
+**Passing run (2026-10-03, owner-approved relaunch).** Profile
+`vfx-capture-fire-front-0.65` (direct binary, `--no-build`) through DevGame's
+real RunProfiles → RunService → RunEvidence loop (`KaigenRunLoop.live.test.ts`),
+against a disposable APFS clone of HordeSpike's `Runtime/` (binary SHA-256
+`df668be5…`, identical to HordeSpike's). Evidence kept in
+`~/Documents/Projects/devgame-kaigen-evidence/2026-10-03-direct-settled/`:
+
+| Behavior | Evidence | Result |
+| --- | --- | --- |
+| Launch existing build, no build step | run `e7a1e303…`, pid 8927, exit 0, 4.7 s | Pass |
+| Capture at effect age 0.65 | log: `VFX capture probe: … effect age 0.65, frame 168, dt 0.02` | Matched |
+| Screenshot written into the run directory | log: `screenshot saved: …/fire-front-t00_65.png (2880x1682)` | Matched |
+| Output collected | `fire-front-t00_65.png`, 472,628 bytes, SHA-256 `ba35ddf3…` | Exists |
+| Build provenance | path, 7,490,672 bytes, mtime 2026-09-23 15:27:34 UTC, SHA-256 `df668be5…` | Recorded |
+| Evidence verdict | `outcome: passed`, no failures, `recordedBy: RunService` | Pass |
+| Source provenance | clone is not a git repo | `unknown` (reported, not invented) |
+| HordeSpike untouched | `git status` fingerprint identical before and after; clone removed | Pass |
+
+Getting there took two more launches, both kept in the evidence folder and
+both correctly recorded as failed: right after the macOS restart the game's
+first second ran at a low frame rate, and because it advances an effect's
+timeline by at most 0.05 s per frame, the capture reached effect age 0.05 and
+then 0.32 instead of 0.65. Starting the capture schedule 2 s later
+(`d87d295b4`) fixed it without changing the capture itself.
+
+**First authorized launch (2026-10-03, failed).** Profile
 `capture-fire-front-0.65` (HordeSpike's `tools/capture_kaigen_vfx.sh` with
 `--no-build`):
 
@@ -149,12 +180,36 @@ RunEvidence loop (`KaigenRunLoop.live.test.ts`), profile
 - The temporary state directory, and with it the artifacts, was cleaned up
   when the test ended; the test now accepts `KAIGEN_STATE_DIR` to keep them.
 
+## Real-client QA of the new panels (2026-10-03, owner-approved)
+
+One browser pass (Chrome DevTools, isolated context) against `vp run dev` in
+the integration worktree's own `.t3` state.
+
+| Behavior | Check | Result |
+| --- | --- | --- |
+| Workspace panel, original Mr. Mak checkout opened directly | Lists its 4 cards from the working-tree registry (including the uncommitted "Mac trial QA" step), engine detected as three.js | Pass |
+| Workspace panel, comparison project | "Original Mr. Mak" collection: read-only, provenance `6248c9ec5f54` (codex/macos-trial); 4 cards with 1/2/3/10 steps; 2 workflows, 3 context files, 20 skills, each labelled Mr. Mak; steps disabled on a draft with a clear notice | Pass |
+| Use in chat | "Use My Dream Game in chat" adds a visible "Workspace: My Dream Game" chip with "Remove workspace context"; nothing is sent | Pass |
+| Import dialog dry run | Source mr-mak-workspace-trial → comparison project: 619 files (61.2 MB), 0 new, 619 already identical, 0 conflicts, 20 skills, 34 excluded, 0 issues, "7 uncommitted edits are not imported"; requirements listed only. Not applied | Pass |
+| Run panel | No-profile and no-engine guidance naming `devgame.runtime.json` | Pass |
+| Source untouched | Mr. Mak checkout `git status` fingerprint unchanged; comparison project clean | Pass |
+
+Found and fixed during the pass:
+
+- Collection switch labels drew over each other in a narrow dock panel; they
+  now truncate (`496bd9b81`; checked live: no overlap at 103 px).
+- The Files dock panel subscribed to a draft thread's server snapshot and
+  thread sync retried the 404 every 250 ms (787 failed requests); it now waits
+  for the thread shell like Terminal and Browser (`59cffdf13`; checked live:
+  0 requests in 10 s on a draft, Files still loads on a server thread, console
+  clean).
+
 ## Remaining limitations
 
-- No passing Kaigen capture is recorded yet; the direct-binary profile is
-  ready (`306191c17`) and needs one approved launch.
-- The Workspace, Use in chat, Runtime and Import panels are covered by
-  focused tests, not yet by a real-client pass.
+- The default dock preset lays out nine single-panel columns, so each panel is
+  narrow on a laptop screen. Grouping Workspace with Files/Diff/Terminal as
+  tabs needs a layout-migration change (the migration only recognizes a new
+  panel in a single-view column); not done.
 - Live lifecycle was exercised with Codex only; Claude is covered by
   integration tests.
 - Mr. Mak agent-lifecycle and overhead comparisons have no matched baseline
@@ -168,12 +223,12 @@ RunEvidence loop (`KaigenRunLoop.live.test.ts`), profile
 
 ## Needs Piero
 
-1. Approve one more Kaigen launch with the direct-binary profile
-   `vfx-capture-fire-front-0.65`, and say where its `devgame.runtime.json`
-   may live (HordeSpike's root as one new untracked file, or a disposable
-   clone as before). From `apps/server` with the toolchain on PATH:
-   `DEVGAME_KAIGEN_LIVE=1 KAIGEN_PROJECT_ROOT=<root with devgame.runtime.json> KAIGEN_PROFILE_ID=vfx-capture-fire-front-0.65 KAIGEN_STATE_DIR=<absolute dir> pnpm exec vp test run src/projectRuntime/KaigenRunLoop.live.test.ts`
-2. Approve a real-client QA pass (browser) over the new panels.
-3. Decide storage isolation (#98) and confirm the `devgame.fun` domain.
-4. Decide whether and how to land `codex/devgame-workspace` on fork `main`
+1. Decide storage isolation (#98) and confirm the `devgame.fun` domain.
+2. Decide whether and how to land `codex/devgame-workspace` on fork `main`
    (a merge: `main`'s PR merge commits are not ancestors of the branch).
+3. Decide whether HordeSpike should carry a `devgame.runtime.json` (one new
+   untracked file) so it can be launched from DevGame directly; this session's
+   safety policy refused writing it, so runs used a disposable clone.
+
+To repeat the Kaigen proof (from `apps/server`, toolchain on PATH):
+`DEVGAME_KAIGEN_LIVE=1 KAIGEN_PROJECT_ROOT=<root with devgame.runtime.json> KAIGEN_PROFILE_ID=vfx-capture-fire-front-0.65 KAIGEN_STATE_DIR=<absolute dir> pnpm exec vp test run src/projectRuntime/KaigenRunLoop.live.test.ts`

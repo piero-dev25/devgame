@@ -49,16 +49,18 @@ Other artifacts: comparison project `~/Documents/Projects/mr-mak-comparison`
 - `/usage` and `/pull-requests` render in `AppSidebarLayout`.
 - No PRs on the fork or upstream; branches are pushed for review.
 
-## Blocked on Piero
+## Done after owner approval (2026-10-03)
 
-- One more Kaigen launch with the direct-binary profile
-  `vfx-capture-fire-front-0.65`, and where its `devgame.runtime.json` may live
-  (HordeSpike root, or a disposable clone). The session's safety policy
-  refused writing it into HordeSpike.
-- A real-client QA pass over the Workspace, Use in chat, Runtime and Import
-  panels.
+- Kaigen relaunch: passing run of `vfx-capture-fire-front-0.65` (evidence in
+  `~/Documents/Projects/devgame-kaigen-evidence/2026-10-03-direct-settled/`).
+- Real-client QA pass over Workspace, Use in chat, Run and Import panels;
+  two defects found and fixed (`496bd9b8`, `59cffdf1`).
+
+## Owner decisions still open
+
 - Storage isolation (#98) and `devgame.fun` domain ownership.
 - Whether and how to land `codex/devgame-workspace` on fork `main`.
+- Whether HordeSpike should carry a `devgame.runtime.json`.
 
 ## Slice log
 
@@ -76,7 +78,7 @@ Other artifacts: comparison project `~/Documents/Projects/mr-mak-comparison`
 | M2 content import | `codex/mrmak-content-import` `802bcd35` | `867c4040` | 3 major (symlinked-parent destination, non-idempotent reruns, glob pathspecs) + 6 minor, fixed |
 | M3 skill import | `codex/mrmak-skill-import` `4432c295` | `b759d7bb` | 1 major (case-insensitive rename collision) + 5 minor, fixed |
 | M4 import UI | `codex/mrmak-import-ui` `4ef60db7` | `c1227205` | 2 major (unvalidated receipt paths; Original collection not read-only) + 3 minor, fixed |
-| Kaigen live-loop test | `codex/kaigen-live-demo` `ceaabb4a` | `c451f442` | follow-ups `db683cd1`, `306191c1` on the integration branch, checked by a read-only fact-check |
+| Kaigen live-loop test | `codex/kaigen-live-demo` `ceaabb4a` | `c451f442` | follow-ups on the integration branch: `db683cd1`, `306191c1`, `d87d295b`, `496bd9b8`, `59cffdf1` |
 
 Disk throttle (2026-10-03, at the disk session's request): one agent at a time,
 all in the integration worktree; no new worktrees or `node_modules` while free
@@ -84,4 +86,5 @@ space is under 12 GB.
 
 ## Next step
 
-The owner decisions above. Everything else in the handoff scope is done.
+The owner decisions above. Everything else in the handoff scope is done,
+including the passing Kaigen launch/evidence demo and the real-client QA pass.
