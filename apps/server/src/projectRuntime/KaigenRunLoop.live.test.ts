@@ -9,7 +9,7 @@
  *
  * GATED OFF by default: it launches the real game. Run explicitly, from apps/server:
  *   DEVGAME_KAIGEN_LIVE=1 KAIGEN_PROJECT_ROOT=/abs/game/root \
- *   KAIGEN_PROFILE_ID=<profile> [KAIGEN_CARD_ID=<card>] \
+ *   KAIGEN_PROFILE_ID=<profile> [KAIGEN_CARD_ID=<card>] [KAIGEN_STATE_DIR=/abs/dir] \
  *   pnpm exec vp test run src/projectRuntime/KaigenRunLoop.live.test.ts
  * KAIGEN_CARD_ID, when set, must be the profile's `evidence.workspaceCard`.
  *
@@ -80,9 +80,16 @@ const makeLiveLayer = () =>
     Layer.provide(Layer.mock(ProjectionSnapshotQuery.ProjectionSnapshotQuery)({})),
   );
 
-const TestLayer = ServerConfig.ServerConfig.layerTest(process.cwd(), {
-  prefix: "t3-kaigen-live-",
-}).pipe(Layer.provideMerge(NodeServices.layer));
+/**
+ * KAIGEN_STATE_DIR (absolute, outside ~/.t3) keeps the run's log, capture and
+ * evidence after the test ends, for review. Without it the state is temporary.
+ */
+const persistentStateDir = process.env.KAIGEN_STATE_DIR?.trim() || null;
+
+const TestLayer = ServerConfig.ServerConfig.layerTest(
+  process.cwd(),
+  persistentStateDir ?? { prefix: "t3-kaigen-live-" },
+).pipe(Layer.provideMerge(NodeServices.layer));
 
 const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
