@@ -30,7 +30,7 @@ const CAPTURE_SCRIPT = "tools/capture_kaigen_vfx.sh";
 const CAPTURE_ARGS = [
   "--vfx",
   "--commands",
-  "0.30:key_down:1;0.36:key_up:1;0.40:key_down:Space;0.46:key_up:Space;0.47:key_down:Z;0.49:key_up:Z;0.50:vfx_capture_hold:0.65;0.55:key_down:R;0.61:key_up:R;1.5500:vfx_capture_probe;1.6500:screenshot:../work/devgame-captures/fire-front-t00_65.png:full;2.4500:quit",
+  "0.30:key_down:1;0.36:key_up:1;0.40:key_down:Space;0.46:key_up:Space;0.47:key_down:Z;0.49:key_up:Z;0.50:vfx_capture_hold:0.65;0.55:key_down:R;0.61:key_up:R;1.5500:vfx_capture_probe;1.6500:screenshot:{{runDir}}/fire-front-t00_65.png:full;2.4500:quit",
 ];
 
 const WorkspaceEntriesLayer = WorkspaceEntries.layer.pipe(Layer.provide(WorkspacePaths.layer));
@@ -127,19 +127,17 @@ it.layer(TestLayer, { excludeTestServices: true })("RunProfiles", (it) => {
         const path = yield* Path.Path;
         const root = yield* makeKaigenProject;
 
+        const runDir = "/state/runs/project-1/run-1";
         const plan = yield* resolve(root, CAPTURE_ID);
+        const bound = RunProfiles.bindRunDirectory(plan, runDir);
 
         expect(plan.absExecutable).toBe(path.join(root, KAIGEN_BINARY));
         expect(plan.absCwd).toBe(path.join(root, "Runtime"));
         expect(plan.args).toEqual(CAPTURE_ARGS);
-        expect(plan.outputs).toEqual([
-          {
-            name: "capture",
-            kind: "image",
-            path: "work/devgame-captures/fire-front-t00_65.png",
-            location: "project",
-            absPath: path.join(root, "work/devgame-captures/fire-front-t00_65.png"),
-          },
+        // The screenshot lands in the run's own directory, never in the game project.
+        expect(bound.args[2]).toContain(`screenshot:${runDir}/fire-front-t00_65.png:full`);
+        expect(bound.outputs.map((output) => [output.name, output.location, output.absPath])).toEqual([
+          ["capture", "run", `${runDir}/fire-front-t00_65.png`],
         ]);
         expect(plan.logPatterns).toEqual([
           "VFX capture probe:.*effect age 0\\.65(,|$)",

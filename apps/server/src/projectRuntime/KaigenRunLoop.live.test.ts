@@ -16,7 +16,8 @@
  * Never builds or installs anything (RunService only spawns the profile's
  * existing executable). Never writes into the game project: the profile must
  * keep every output in its run directory (`{{runDir}}/...`), which lives under
- * this test's own temporary state directory, not ~/.t3.
+ * the test's state directory: a temporary one by default, or KAIGEN_STATE_DIR
+ * (absolute, never under ~/.t3) to keep the evidence afterwards.
  */
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
@@ -123,6 +124,7 @@ it.layer(TestLayer, { excludeTestServices: true })("Kaigen run loop (LIVE)", (it
           const profileId = requiredEnv("KAIGEN_PROFILE_ID");
           const cardId = process.env.KAIGEN_CARD_ID?.trim() || null;
           expect(path.isAbsolute(workspaceRoot)).toBe(true);
+          expect(persistentStateDir === null || path.isAbsolute(persistentStateDir)).toBe(true);
           // The state directory is this test's own temp directory, never the live install.
           expect(stateDir.startsWith(path.join(process.env.HOME ?? "/nonexistent", ".t3"))).toBe(
             false,
