@@ -291,15 +291,20 @@ function CollectionSwitch(props: {
     <div className="flex shrink-0 flex-col gap-1.5 border-b border-border/60 px-3 py-2">
       <ToggleGroup
         aria-label="Workspace collection"
-        className="w-full *:flex-1"
+        // min-w-0 lets the two labels share a narrow dock panel; they truncate instead of overlapping.
+        className="w-full *:min-w-0 *:flex-1"
         value={[props.selected]}
         onValueChange={(next) => {
           const value = next[0];
           if (value === "original" || value === "adaptation") props.onSelect(value);
         }}
       >
-        <Toggle value="original">Original Mr. Mak</Toggle>
-        <Toggle value="adaptation">DevGame Adaptation</Toggle>
+        <Toggle value="original" title="Original Mr. Mak">
+          <span className="truncate">Original Mr. Mak</span>
+        </Toggle>
+        <Toggle value="adaptation" title="DevGame Adaptation">
+          <span className="truncate">DevGame Adaptation</span>
+        </Toggle>
       </ToggleGroup>
       {props.selected === "original" ? (
         <p className="break-all text-3xs text-muted-foreground">
